@@ -18,11 +18,15 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ── Database connection ────────────────────────────────────
+console.log(`🔧 DATABASE_URL is ${process.env.DATABASE_URL ? 'set' : 'NOT SET — this will cause startup failure'}`);
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production'
     ? { rejectUnauthorized: false }
     : false,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
 // ── Auth middleware (simple API key) ──────────────────────
@@ -205,6 +209,19 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'KRW Postback Server', time: new Date().toISOString() });
 });
 
+// ── Process-level error handlers ──────────────────────────
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🔥 Unhandled promise rejection:', reason);
+  console.error('   Promise:', promise);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('🔥 Uncaught exception:', err.message);
+  console.error(err.stack);
+  process.exit(1);
+});
+
 // ── Start ──────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(port, () => {
@@ -213,6 +230,7 @@ initDB().then(() => {
     console.log(`   Summary URL:  GET  /summary`);
   });
 }).catch(err => {
-  console.error('Failed to init DB:', err);
+  console.error('❌ Failed to initialise database:', err.message);
+  console.error(err.stack);
   process.exit(1);
 });
