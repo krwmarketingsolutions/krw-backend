@@ -9,6 +9,22 @@ const cors    = require('cors');
 const { Pool } = require('pg');
 require('dotenv').config();
 
+// ── Startup banner — printed before any async work ────────
+console.log('Starting KRW server...');
+console.log(`   NODE_ENV     : ${process.env.NODE_ENV || '(not set)'}`);
+console.log(`   DATABASE_URL : ${process.env.DATABASE_URL ? 'set' : 'NOT SET — this will cause startup failure'}`);
+console.log(`   PORT         : ${process.env.PORT || '8080 (default)'}`);
+
+// ── Startup watchdog — exits with a clear message if the
+//    app hasn't finished initialising within 30 seconds ────
+const startupTimer = setTimeout(() => {
+  console.error('STARTUP TIMEOUT: server did not finish initialising within 30 s');
+  console.error('Check DATABASE_URL, network reachability, and the logs above for errors.');
+  process.exit(1);
+}, 30000);
+// Allow Node to exit normally even if this timer is still pending
+startupTimer.unref();
+
 const app  = express();
 const port = parseInt(process.env.PORT || 8080);
 
@@ -27,6 +43,13 @@ const pool = new Pool({
     : false,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
+});
+
+// Log any idle-client errors so they surface in Railway logs
+// instead of crashing the process silently
+pool.on('error', (err) => {
+  console.error('Pool error (idle client):', err.message);
+  console.error(err.stack);
 });
 
 // ── Auth middleware (simple API key) ──────────────────────
@@ -223,14 +246,23 @@ process.on('uncaughtException', (err) => {
 });
 
 // ── Start ──────────────────────────────────────────────────
-initDB().then(() => {
-  app.listen(port, () => {
-    console.log(`🚀 KRW server running on port ${port}`);
-    console.log(`   Postback URL: POST /postback`);
-    console.log(`   Summary URL:  GET  /summary`);
+try {
+  console.log('⏳ Calling initDB()...');
+  initDB().then(() => {
+    console.log('⏳ initDB() resolved — starting HTTP listener...');
+    app.listen(port, () => {
+      clearTimeout(startupTimer); // disarm the watchdog — we're up
+      console.log(`🚀 KRW server running on port ${port}`);
+      console.log(`   Postback URL: POST /postback`);
+      console.log(`   Summary URL:  GET  /summary`);
+    });
+  }).catch(err => {
+    console.error('❌ Failed to initialise database:', err.message);
+    console.error(err.stack);
+    process.exit(1);
   });
-}).catch(err => {
-  console.error('❌ Failed to initialise database:', err.message);
+} catch (err) {
+  console.error('❌ Synchronous error during startup:', err.message);
   console.error(err.stack);
   process.exit(1);
-});
+}
