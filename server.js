@@ -148,4 +148,37 @@ app.get('/summary', requireKey, async (req, res) => {
         calls: todayQ.rows.reduce((s,r) => s + parseInt(r.calls||0), 0),
       },
       week:  { total: parseFloat(weekQ.rows[0]?.total||0),  calls: parseInt(weekQ.rows[0]?.calls||0) },
-      month: { total: parseFloat(monthQ.rows[0]?.total||0), calls: parseInt(monthQ
+      month: { total: parseFloat(monthQ.rows[0]?.total||0), calls: parseInt(monthQ.rows[0]?.calls||0) },
+      by_vertical: vertQ.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/calls', requireKey, async (req, res) => {
+  try {
+    const { limit=100, vertical, buyer, date } = req.query;
+    let where=[], params=[], i=1;
+    if (vertical) { where.push(`vertical=$${i++}`); params.push(vertical); }
+    if (buyer)    { where.push(`buyer=$${i++}`);    params.push(buyer); }
+    if (date)     { where.push(`call_date::date=$${i++}`); params.push(date); }
+    params.push(parseInt(limit));
+    const wc = where.length ? 'WHERE '+where.join(' AND ') : '';
+    const r = await pool.query(
+      `SELECT * FROM calls ${wc} ORDER BY received_at DESC LIMIT $${i}`, params
+    );
+    res.json({ ok: true, count: r.rows.length, calls: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── START ──────────────────────────────────────────────────────────
+initDB().then(() => {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`KRW server on 0.0.0.0:${PORT}`);
+    console.log(`API_KEY set: ${!!process.env.API_KEY}`);
+    console.log(`DATABASE_URL set: ${!!process.env.DATABASE_URL}`);
+  });
+});
