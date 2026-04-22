@@ -26,7 +26,7 @@ const startupTimer = setTimeout(() => {
 startupTimer.unref();
 
 const app  = express();
-const port = parseInt(process.env.PORT || 8080);
+const port = 3000;
 
 // ── Middleware ─────────────────────────────────────────────
 app.use(cors());
