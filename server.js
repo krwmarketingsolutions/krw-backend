@@ -167,7 +167,9 @@ app.post('/postback', requireKey, async (req, res) => {
     const duration   = parseInt(field(b,'Duration','call_duration','duration','length') || 0);
     const callerId   = field(b,'Caller ID','caller_id','phone','ani','caller') || '';
     const campaignId = field(b,'Campaign ID','campaign_id','campaign') || '';
-    const billable   = field(b,'Billable flag','Billable Flag','billable_flag','billable') !== 'false';
+    // Default ALL calls to billable=true unless explicitly marked false
+    const billableRaw = field(b,'Billable flag','Billable Flag','billable_flag','billable');
+    const billable    = billableRaw === '' ? true : billableRaw !== 'false';
     const disposition= field(b,'Disposition','disposition','call_disposition') || '';
 
     // Write to both old columns (buyer, duration, revenue) and new columns
@@ -344,6 +346,8 @@ app.get('/invoice-summary', requireKey, async (req, res) => {
         COALESCE(disposition, '')                             AS disposition,
         COALESCE(invoice_status, 'pending')                   AS invoice_status,
         COALESCE(invoice_id, '')                              AS invoice_id,
+        COALESCE(campaign_name, campaign_id, '')              AS campaign_name,
+        billable,
         received_at
       FROM calls
       ${wc}
@@ -389,7 +393,23 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
+}
+
+// ── PATCH /calls/:id/billable ──────────────────────────────
+// Toggle billable — called from invoice page mark unbillable button
+app.patch('/calls/:id/billable', requireKey, async (req, res) => {
+  try {
+    const { id }       = req.params;
+    const { billable } = req.body;
+    if (billable === undefined) return res.status(400).json({ error: 'billable required' });
+    await pool.query('UPDATE calls SET billable=$1 WHERE id=$2',
+      [billable === true || billable === 'true', parseInt(id)]);
+    console.log(`Call ${id} billable → ${billable}`);
+    res.json({ ok: true });
+  } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
+}););
 
 // ── START ──────────────────────────────────────────────────
 initDB()
