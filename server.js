@@ -241,7 +241,7 @@ app.get('/summary', requireKey, async (req, res) => {
                   COALESCE(SUM(${revCol}),0) as total_revenue,
                   COUNT(CASE WHEN ${invFilter} THEN 1 END) as pending_count,
                   COALESCE(SUM(CASE WHEN ${invFilter} THEN ${revCol} ELSE 0 END),0) as pending_amount
-                  FROM calls WHERE billable=true GROUP BY 1 ORDER BY total_revenue DESC`),
+                  FROM calls WHERE billable=true GROUP BY 1, invoice_status ORDER BY total_revenue DESC`),
     ]);
 
     const todayByVert = {};
