@@ -295,40 +295,78 @@ app.get('/calls', requireKey, async (req, res) => {
 });
 
 // ── GET /invoice-summary ───────────────────────────────────
+// Groups by buyer_name + vertical combination
+// Only includes billable calls with payout > 0 and status = pending
 app.get('/invoice-summary', requireKey, async (req, res) => {
   try {
     const { buyer, vertical, from, to } = req.query;
-    let where = ['billable=true', "(invoice_status='pending' OR invoice_status IS NULL)"];
+
+    // Base filters — only real billable calls with actual revenue
+    let where = [
+      'billable = true',
+      'COALESCE(payout_amount, revenue, 0) > 0',
+      "(COALESCE(invoice_status, 'pending') = 'pending')",
+    ];
     let params = [], i = 1;
-    if (buyer)    { where.push(`COALESCE(buyer_name,buyer)=$${i++}`); params.push(buyer); }
-    if (vertical) { where.push(`vertical=$${i++}`);                   params.push(vertical); }
-    if (from)     { where.push(`received_at::date>=$${i++}`);         params.push(from); }
-    if (to)       { where.push(`received_at::date<=$${i++}`);         params.push(to); }
+    if (buyer)    { where.push(`COALESCE(buyer_name, buyer, '') = $${i++}`); params.push(buyer); }
+    if (vertical) { where.push(`vertical = $${i++}`);                        params.push(vertical); }
+    if (from)     { where.push(`received_at::date >= $${i++}`);              params.push(from); }
+    if (to)       { where.push(`received_at::date <= $${i++}`);              params.push(to); }
     const wc = 'WHERE ' + where.join(' AND ');
 
-    const [byBuyer, calls] = await Promise.all([
-      pool.query(`SELECT COALESCE(buyer_name,buyer,'Unknown') as buyer_name, vertical,
-                  COUNT(*) as call_count, COALESCE(SUM(COALESCE(payout_amount,revenue)),0) as total_owed,
-                  MIN(received_at::date) as period_start, MAX(received_at::date) as period_end
-                  FROM calls ${wc} GROUP BY buyer_name, vertical ORDER BY buyer_name, vertical`, params),
-      pool.query(`SELECT id, received_at::date as call_date, vertical,
-                  COALESCE(buyer_name, buyer, 'Unknown buyer') as buyer_name,
-                  caller_id, COALESCE(call_duration, duration, 0) as call_duration,
-                  COALESCE(payout_amount, revenue, 0) as payout_amount,
-                  disposition, invoice_status, invoice_id
-                  FROM calls ${wc} ORDER BY buyer_name, received_at DESC`, params),
-    ]);
+    // Group by buyer + vertical — each unique pair becomes one invoice row
+    const byBuyerQ = await pool.query(`
+      SELECT
+        COALESCE(buyer_name, buyer, 'Unknown buyer') AS buyer_name,
+        COALESCE(vertical, 'Unknown')                AS vertical,
+        COUNT(*)                                     AS call_count,
+        COALESCE(SUM(COALESCE(payout_amount, revenue, 0)), 0) AS total_owed,
+        MIN(received_at::date)                       AS period_start,
+        MAX(received_at::date)                       AS period_end
+      FROM calls
+      ${wc}
+      GROUP BY
+        COALESCE(buyer_name, buyer, 'Unknown buyer'),
+        COALESCE(vertical, 'Unknown')
+      ORDER BY total_owed DESC
+    `, params);
+
+    // Individual call line items for the expandable rows
+    const callsQ = await pool.query(`
+      SELECT
+        id,
+        received_at::date                                     AS call_date,
+        COALESCE(vertical, 'Unknown')                         AS vertical,
+        COALESCE(buyer_name, buyer, 'Unknown buyer')          AS buyer_name,
+        COALESCE(caller_id, '')                               AS caller_id,
+        COALESCE(call_duration, duration, 0)                  AS call_duration,
+        COALESCE(payout_amount, revenue, 0)                   AS payout_amount,
+        COALESCE(disposition, '')                             AS disposition,
+        COALESCE(invoice_status, 'pending')                   AS invoice_status,
+        COALESCE(invoice_id, '')                              AS invoice_id,
+        received_at
+      FROM calls
+      ${wc}
+      ORDER BY
+        COALESCE(buyer_name, buyer, 'Unknown buyer'),
+        COALESCE(vertical, 'Unknown'),
+        received_at DESC
+    `, params);
+
+    const totalOwed = callsQ.rows.reduce((s, r) => s + parseFloat(r.payout_amount || 0), 0);
 
     res.json({
-      ok: true,
-      by_buyer: byBuyer.rows,
-      calls:    calls.rows,
+      ok:       true,
+      by_buyer: byBuyerQ.rows,
+      calls:    callsQ.rows,
       totals: {
-        call_count: calls.rows.length,
-        total_owed: calls.rows.reduce((s,r)=>s+parseFloat(r.payout_amount||0),0),
+        call_count:  callsQ.rows.length,
+        total_owed:  totalOwed,
+        buyer_count: byBuyerQ.rows.length,
       }
     });
   } catch(err) {
+    console.error('Invoice summary error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
