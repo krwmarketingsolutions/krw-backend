@@ -192,7 +192,7 @@ app.get('/summary', requireKey, async (req, res) => {
                   COALESCE(buyer_name,buyer,'Unknown buyer') as buyer_name,
                   COUNT(*) as calls, COALESCE(SUM(COALESCE(payout_amount,revenue)),0) as revenue
                   FROM calls WHERE received_at::date=CURRENT_DATE AND billable=true
-                  GROUP BY vertical,buyer_name ORDER BY revenue DESC`),
+                  GROUP BY vertical,buyer_name,buyer ORDER BY revenue DESC`),
       pool.query(`SELECT COALESCE(SUM(COALESCE(payout_amount,revenue)),0) as total,
                   COUNT(*) as calls FROM calls
                   WHERE received_at::date>=$1 AND billable=true`,[weekAgo]),
