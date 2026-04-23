@@ -409,7 +409,7 @@ app.patch('/calls/:id/billable', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-}););
+});
 
 // ── START ──────────────────────────────────────────────────
 initDB()
