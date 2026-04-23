@@ -210,7 +210,7 @@ app.get('/summary', requireKey, async (req, res) => {
                   COUNT(CASE WHEN invoice_status='pending' OR invoice_status IS NULL THEN 1 END) as pending_count,
                   COALESCE(SUM(CASE WHEN invoice_status='pending' OR invoice_status IS NULL
                     THEN COALESCE(payout_amount,revenue) ELSE 0 END),0) as pending_amount
-                  FROM calls WHERE billable=true GROUP BY buyer_name ORDER BY total_revenue DESC`),
+                  FROM calls WHERE billable=true GROUP BY buyer_name,buyer ORDER BY total_revenue DESC`),
     ]);
 
     const todayByVert = {};
