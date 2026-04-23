@@ -135,8 +135,14 @@ app.get('/debug',  (req, res) => res.json({
 // ── POST /postback ─────────────────────────────────────────
 app.post('/postback', requireKey, async (req, res) => {
   try {
-    const b = req.body;
+    let b = req.body;
     console.log('Postback:', JSON.stringify(b));
+
+    // Flatten querystring if present (e.g. Zapier wraps fields under a
+    // "querystring" key instead of posting them at the top level)
+    if (b.querystring && typeof b.querystring === 'object') {
+      b = { ...b, ...b.querystring };
+    }
 
     const rawDate    = field(b,'Call Date Time','call_date','call_datetime','call_start','date');
     const callDate   = parseDate(rawDate);
