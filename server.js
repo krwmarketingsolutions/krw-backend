@@ -312,8 +312,9 @@ app.get('/invoice-summary', requireKey, async (req, res) => {
                   MIN(received_at::date) as period_start, MAX(received_at::date) as period_end
                   FROM calls ${wc} GROUP BY buyer_name, vertical ORDER BY buyer_name, vertical`, params),
       pool.query(`SELECT id, received_at::date as call_date, vertical,
-                  COALESCE(buyer_name,buyer,'Unknown') as buyer_name,
-                  caller_id, duration, COALESCE(payout_amount,revenue,0) as payout_amount,
+                  COALESCE(buyer_name, buyer, 'Unknown buyer') as buyer_name,
+                  caller_id, COALESCE(call_duration, duration, 0) as call_duration,
+                  COALESCE(payout_amount, revenue, 0) as payout_amount,
                   disposition, invoice_status, invoice_id
                   FROM calls ${wc} ORDER BY buyer_name, received_at DESC`, params),
     ]);
