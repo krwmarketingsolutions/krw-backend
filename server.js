@@ -124,6 +124,19 @@ function parseDate(str) {
 // ── ROUTES ─────────────────────────────────────────────────
 
 app.get('/',       (req, res) => res.json({ ok:true, service:'KRW Postback Server', time:new Date().toISOString() }));
+
+// ── POST /postback-test — NO AUTH — shows raw body Zapier sends ────
+// Use this to debug field names, then switch back to /postback
+app.post('/postback-test', async (req, res) => {
+  console.log('Test postback body:', JSON.stringify(req.body));
+  console.log('Test postback keys:', Object.keys(req.body));
+  res.json({
+    ok: true,
+    received_keys: Object.keys(req.body),
+    received_body: req.body,
+    message: 'Copy the received_keys to map fields correctly'
+  });
+});
 app.get('/health', (req, res) => res.json({ ok:true, service:'KRW Postback Server', time:new Date().toISOString() }));
 app.get('/debug',  (req, res) => res.json({
   api_key_set:    !!process.env.API_KEY,
@@ -135,19 +148,26 @@ app.get('/debug',  (req, res) => res.json({
 // ── POST /postback ─────────────────────────────────────────
 app.post('/postback', requireKey, async (req, res) => {
   try {
-    const b = req.body;
+    // TrackDrive wraps everything in a 'querystring' object
+    // e.g. {"querystring": {"Buyer Name": "X", "Payout Amount": "30.0"}}
+    // Flatten it so field() can find everything
+    const raw = req.body;
+    const qs  = raw.querystring || raw.Querystring || {};
+    // Merge top-level and querystring fields together
+    const b   = Object.assign({}, raw, qs);
+    console.log('Postback keys:', Object.keys(b));
     console.log('Postback:', JSON.stringify(b));
 
-    const rawDate    = field(b,'Call Date Time','call_date','call_datetime','call_start','date');
+    const rawDate    = field(b,'Call Date/Time','Call Date Time','call_date','call_datetime','call_start','date');
     const callDate   = parseDate(rawDate);
     const revenue    = parseFloat(field(b,'Payout Amount','payout_amount','payout','revenue','amount') || 0);
     const cost       = parseFloat(field(b,'cost','Cost','buy_price') || 0);
-    const vertical   = field(b,'Vertical Campaign Name','vertical','campaign_name','Campaign Name','Campaign ID','campaign_id') || 'Unknown';
+    const vertical   = field(b,'Vertical/Campaign Name','Vertical Campaign Name','vertical','campaign_name','Campaign Name','Campaign ID','campaign_id') || 'Unknown';
     const buyerName  = field(b,'Buyer Name','buyer_name','buyer','account') || 'Unknown buyer';
     const duration   = parseInt(field(b,'Duration','call_duration','duration','length') || 0);
     const callerId   = field(b,'Caller ID','caller_id','phone','ani','caller') || '';
     const campaignId = field(b,'Campaign ID','campaign_id','campaign') || '';
-    const billable   = field(b,'Billable Flag','billable_flag','billable') !== 'false';
+    const billable   = field(b,'Billable flag','Billable Flag','billable_flag','billable') !== 'false';
     const disposition= field(b,'Disposition','disposition','call_disposition') || '';
 
     // Write to both old columns (buyer, duration, revenue) and new columns
@@ -187,37 +207,49 @@ app.get('/summary', requireKey, async (req, res) => {
     const weekAgo    = new Date(Date.now()-7*86400000).toISOString().split('T')[0];
     const monthStart = new Date().toISOString().slice(0,7)+'-01';
 
+    // Check which columns actually exist in the DB
+    const colCheck = await pool.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name='calls'
+    `);
+    const cols = colCheck.rows.map(r => r.column_name);
+    const hasBuyerName    = cols.includes('buyer_name');
+    const hasPayoutAmount = cols.includes('payout_amount');
+    const hasInvStatus    = cols.includes('invoice_status');
+
+    const revCol    = hasPayoutAmount ? 'COALESCE(payout_amount, revenue, 0)' : 'COALESCE(revenue, 0)';
+    const buyerCol  = hasBuyerName    ? "COALESCE(buyer_name, buyer, 'Unknown buyer')" : "COALESCE(buyer, 'Unknown buyer')";
+    const invFilter = hasInvStatus    ? "(invoice_status='pending' OR invoice_status IS NULL)" : 'true';
+
     const [todayQ, weekQ, monthQ, vertQ, buyerQ] = await Promise.all([
       pool.query(`SELECT COALESCE(vertical,'Unknown') as vertical,
-                  COALESCE(buyer_name,buyer,'Unknown buyer') as buyer_name,
-                  COUNT(*) as calls, COALESCE(SUM(COALESCE(payout_amount,revenue)),0) as revenue
+                  ${buyerCol} as buyer_name,
+                  COUNT(*) as calls, COALESCE(SUM(${revCol}),0) as revenue
                   FROM calls WHERE received_at::date=CURRENT_DATE AND billable=true
-                  GROUP BY vertical,buyer_name,buyer ORDER BY revenue DESC`),
-      pool.query(`SELECT COALESCE(SUM(COALESCE(payout_amount,revenue)),0) as total,
-                  COUNT(*) as calls FROM calls
-                  WHERE received_at::date>=$1 AND billable=true`,[weekAgo]),
-      pool.query(`SELECT COALESCE(SUM(COALESCE(payout_amount,revenue)),0) as total,
-                  COUNT(*) as calls FROM calls
-                  WHERE received_at::date>=$1 AND billable=true`,[monthStart]),
+                  GROUP BY 1,2 ORDER BY revenue DESC`),
+      pool.query(`SELECT COALESCE(SUM(${revCol}),0) as total, COUNT(*) as calls
+                  FROM calls WHERE received_at::date>=$1 AND billable=true`,[weekAgo]),
+      pool.query(`SELECT COALESCE(SUM(${revCol}),0) as total, COUNT(*) as calls
+                  FROM calls WHERE received_at::date>=$1 AND billable=true`,[monthStart]),
       pool.query(`SELECT COALESCE(vertical,'Unknown') as vertical,
                   COUNT(*) as total_calls,
-                  COALESCE(SUM(COALESCE(payout_amount,revenue)),0) as total_revenue
+                  COALESCE(SUM(${revCol}),0) as total_revenue
                   FROM calls WHERE billable=true
-                  GROUP BY vertical ORDER BY total_revenue DESC`),
-      pool.query(`SELECT COALESCE(buyer_name,buyer,'Unknown buyer') as buyer_name,
+                  GROUP BY 1 ORDER BY total_revenue DESC`),
+      pool.query(`SELECT ${buyerCol} as buyer_name,
                   COUNT(*) as total_calls,
-                  COALESCE(SUM(COALESCE(payout_amount,revenue)),0) as total_revenue,
-                  COUNT(CASE WHEN invoice_status='pending' OR invoice_status IS NULL THEN 1 END) as pending_count,
-                  COALESCE(SUM(CASE WHEN invoice_status='pending' OR invoice_status IS NULL
-                    THEN COALESCE(payout_amount,revenue) ELSE 0 END),0) as pending_amount
-                  FROM calls WHERE billable=true GROUP BY buyer_name,buyer ORDER BY total_revenue DESC`),
+                  COALESCE(SUM(${revCol}),0) as total_revenue,
+                  COUNT(CASE WHEN ${invFilter} THEN 1 END) as pending_count,
+                  COALESCE(SUM(CASE WHEN ${invFilter} THEN ${revCol} ELSE 0 END),0) as pending_amount
+                  FROM calls WHERE billable=true GROUP BY 1 ORDER BY total_revenue DESC`),
     ]);
 
     const todayByVert = {};
     todayQ.rows.forEach(r => {
-      if (!todayByVert[r.vertical]) todayByVert[r.vertical] = {vertical:r.vertical,calls:0,revenue:0};
-      todayByVert[r.vertical].calls   += parseInt(r.calls);
-      todayByVert[r.vertical].revenue += parseFloat(r.revenue);
+      const v = r.vertical || 'Unknown';
+      if (!todayByVert[v]) todayByVert[v] = {vertical:v, calls:0, revenue:0};
+      todayByVert[v].calls   += parseInt(r.calls   || 0);
+      todayByVert[v].revenue += parseFloat(r.revenue || 0);
     });
 
     res.json({
@@ -235,7 +267,7 @@ app.get('/summary', requireKey, async (req, res) => {
       by_buyer:    buyerQ.rows,
     });
   } catch(err) {
-    console.error('Summary error:', err.message);
+    console.error('Summary error:', err.message, err.stack);
     res.status(500).json({ error: err.message });
   }
 });
