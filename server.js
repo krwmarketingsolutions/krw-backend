@@ -3,8 +3,6 @@
 
 const express = require('express');
 const { Pool } = require('pg');
-const http  = require('http');
-const https = require('https');
 require('dotenv').config();
 
 const app  = express();
@@ -395,7 +393,7 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
+}
 
 // ── PATCH /calls/:id/billable ──────────────────────────────
 // Toggle billable — called from invoice page mark unbillable button
@@ -411,57 +409,56 @@ app.patch('/calls/:id/billable', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
+}););
 
-// ── POST /send-invoice ─────────────────────────────────────
-// Forwards invoice payload to a Zapier webhook from the server side,
-// avoiding CORS issues when the dashboard runs as a local file.
+
+// ── POST /send-invoice ─────────────────────────────────────────────
+// Receives invoice payload from dashboard and forwards to Zapier
+// Avoids CORS issues when dashboard runs as a local file
 app.post('/send-invoice', requireKey, async (req, res) => {
   try {
     const { zapier_webhook, ...invoicePayload } = req.body;
-
     if (!zapier_webhook) {
       return res.status(400).json({ error: 'zapier_webhook URL is required' });
     }
 
-    let webhookUrl;
-    try {
-      webhookUrl = new URL(zapier_webhook);
-    } catch (e) {
-      return res.status(400).json({ error: 'Invalid zapier_webhook URL' });
-    }
+    // Forward to Zapier from the server (no CORS issues)
+    const https = require('https');
+    const http  = require('http');
+    const url   = new URL(zapier_webhook);
+    const body  = JSON.stringify(invoicePayload);
 
-    const body = JSON.stringify(invoicePayload);
-    const transport = webhookUrl.protocol === 'https:' ? https : http;
+    const options = {
+      hostname: url.hostname,
+      port:     url.port || (url.protocol === 'https:' ? 443 : 80),
+      path:     url.pathname + url.search,
+      method:   'POST',
+      headers: {
+        'Content-Type':   'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    };
 
-    const zapierRes = await new Promise((resolve, reject) => {
-      const options = {
-        hostname: webhookUrl.hostname,
-        port:     webhookUrl.port || (webhookUrl.protocol === 'https:' ? 443 : 80),
-        path:     webhookUrl.pathname + webhookUrl.search,
-        method:   'POST',
-        headers: {
-          'Content-Type':   'application/json',
-          'Content-Length': Buffer.byteLength(body),
-        },
-      };
-
-      const request = transport.request(options, (zapRes) => {
-        let data = '';
-        zapRes.on('data', chunk => { data += chunk; });
-        zapRes.on('end', () => resolve({ status: zapRes.statusCode, body: data }));
+    const proto = url.protocol === 'https:' ? https : http;
+    const zapReq = proto.request(options, (zapRes) => {
+      let data = '';
+      zapRes.on('data', chunk => data += chunk);
+      zapRes.on('end', () => {
+        console.log(`Invoice forwarded to Zapier: ${invoicePayload.buyer_name} $${invoicePayload.total_amount}`);
+        res.json({ ok: true, zapier_status: zapRes.statusCode, message: 'Invoice sent to Zapier successfully' });
       });
-
-      request.on('error', reject);
-      request.write(body);
-      request.end();
     });
 
-    console.log(`✅ Invoice forwarded to Zapier — status ${zapierRes.status}`);
-    res.json({ ok: true, zapier_status: zapierRes.status, zapier_body: zapierRes.body });
+    zapReq.on('error', (err) => {
+      console.error('Zapier forward error:', err.message);
+      res.status(500).json({ error: 'Failed to forward to Zapier: ' + err.message });
+    });
+
+    zapReq.write(body);
+    zapReq.end();
 
   } catch (err) {
-    console.error('Send-invoice error:', err.message);
+    console.error('Send invoice error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
