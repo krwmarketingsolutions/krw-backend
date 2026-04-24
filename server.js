@@ -393,7 +393,7 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-}
+});
 
 // ── PATCH /calls/:id/billable ──────────────────────────────
 // Toggle billable — called from invoice page mark unbillable button
@@ -409,7 +409,7 @@ app.patch('/calls/:id/billable', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-}););
+});
 
 
 // ── POST /send-invoice ─────────────────────────────────────────────
