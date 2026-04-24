@@ -3,6 +3,8 @@
 
 const express = require('express');
 const { Pool } = require('pg');
+const http  = require('http');
+const https = require('https');
 require('dotenv').config();
 
 const app  = express();
@@ -407,6 +409,59 @@ app.patch('/calls/:id/billable', requireKey, async (req, res) => {
     console.log(`Call ${id} billable → ${billable}`);
     res.json({ ok: true });
   } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /send-invoice ─────────────────────────────────────
+// Forwards invoice payload to a Zapier webhook from the server side,
+// avoiding CORS issues when the dashboard runs as a local file.
+app.post('/send-invoice', requireKey, async (req, res) => {
+  try {
+    const { zapier_webhook, ...invoicePayload } = req.body;
+
+    if (!zapier_webhook) {
+      return res.status(400).json({ error: 'zapier_webhook URL is required' });
+    }
+
+    let webhookUrl;
+    try {
+      webhookUrl = new URL(zapier_webhook);
+    } catch (e) {
+      return res.status(400).json({ error: 'Invalid zapier_webhook URL' });
+    }
+
+    const body = JSON.stringify(invoicePayload);
+    const transport = webhookUrl.protocol === 'https:' ? https : http;
+
+    const zapierRes = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: webhookUrl.hostname,
+        port:     webhookUrl.port || (webhookUrl.protocol === 'https:' ? 443 : 80),
+        path:     webhookUrl.pathname + webhookUrl.search,
+        method:   'POST',
+        headers: {
+          'Content-Type':   'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      };
+
+      const request = transport.request(options, (zapRes) => {
+        let data = '';
+        zapRes.on('data', chunk => { data += chunk; });
+        zapRes.on('end', () => resolve({ status: zapRes.statusCode, body: data }));
+      });
+
+      request.on('error', reject);
+      request.write(body);
+      request.end();
+    });
+
+    console.log(`✅ Invoice forwarded to Zapier — status ${zapierRes.status}`);
+    res.json({ ok: true, zapier_status: zapierRes.status, zapier_body: zapierRes.body });
+
+  } catch (err) {
+    console.error('Send-invoice error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
