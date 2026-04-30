@@ -145,6 +145,25 @@ app.get('/debug',  (req, res) => res.json({
   db_url_set:     !!process.env.DATABASE_URL,
 }));
 
+// ── GET /dashboard ─────────────────────────────────────────
+app.get('/dashboard', (req, res) => {
+  const fs   = require('fs');
+  const path = require('path');
+  const file = path.join(__dirname, 'dashboard.html');
+  fs.readFile(file, 'utf8', (err, html) => {
+    if (err) {
+      if (err.code === 'ENOENT') {
+        return res.status(404).send('dashboard.html not found');
+      }
+      console.error('Dashboard read error:', err.message);
+      return res.status(500).send('Error reading dashboard.html');
+    }
+    res.status(200)
+       .setHeader('Content-Type', 'text/html; charset=utf-8')
+       .send(html);
+  });
+});
+
 // ── POST /postback ─────────────────────────────────────────
 app.post('/postback', requireKey, async (req, res) => {
   try {
