@@ -393,7 +393,7 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
+}
 
 // ── PATCH /calls/:id/billable ──────────────────────────────
 // Toggle billable — called from invoice page mark unbillable button
@@ -409,7 +409,7 @@ app.patch('/calls/:id/billable', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
+}););
 
 
 // ── POST /send-invoice ─────────────────────────────────────────────
@@ -461,6 +461,25 @@ app.post('/send-invoice', requireKey, async (req, res) => {
     console.error('Send invoice error:', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── GET /dashboard — serves the dashboard HTML file ─────────────
+app.get('/dashboard', (req, res) => {
+  const path = require('path');
+  const fs   = require('fs');
+  const file = path.join(__dirname, 'dashboard.html');
+  if (!fs.existsSync(file)) {
+    return res.status(404).send(`
+      <html><body style="font-family:sans-serif;padding:2rem;max-width:500px;margin:0 auto">
+        <h2 style="color:#c0392b">dashboard.html not found</h2>
+        <p>Upload your <strong>dashboard.html</strong> file to your GitHub repo alongside server.js and redeploy.</p>
+        <p>Rename <code>deal-dashboard.html</code> to <code>dashboard.html</code> before uploading.</p>
+      </body></html>
+    `);
+  }
+  res.setHeader('Content-Type', 'text/html');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.sendFile(file);
 });
 
 // ── START ──────────────────────────────────────────────────
