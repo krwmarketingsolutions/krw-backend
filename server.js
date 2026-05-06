@@ -602,25 +602,32 @@ app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
     raw:               JSON.stringify(b),
   };
 
-  // Insert into DB
-  const ins = await pool.query(`
-    INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
-      street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
-      publisher_sub,websource,raw)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-    RETURNING id
-  `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
-      lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
-      lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
-      lead.publisher_sub,lead.websource,lead.raw]);
-
-  const leadId = ins.rows[0].id;
+  // Insert into DB — must succeed before we respond or forward
+  let leadId;
+  try {
+    const ins = await pool.query(`
+      INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
+        street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
+        publisher_sub,websource,raw)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+      RETURNING id
+    `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
+        lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
+        lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
+        lead.publisher_sub,lead.websource,lead.raw]);
+    leadId = ins.rows[0].id;
+  } catch (dbErr) {
+    console.error(`❌ Lead DB insert failed for campaign=${slug}:`, dbErr.message);
+    return res.status(500).json({ status:'error', reason:'Failed to store lead: ' + dbErr.message });
+  }
 
   // Respond to publisher immediately — don't make them wait on Apex
   res.json({ status:'received', leadId:`KRW-DEPO-${leadId}`, message:'Lead accepted' });
 
-  // Forward to buyer's Apex endpoint in background
-  forwardToApex(leadId, lead, cfg).catch(console.error);
+  // Forward to buyer's Apex endpoint in background (non-blocking)
+  forwardToApex(leadId, lead, cfg).catch(err => {
+    console.error(`❌ Unhandled error in forwardToApex for KRW-DEPO-${leadId}:`, err.message);
+  });
 });
 
 // ── Forward to Apex buyer endpoint ───────────────────────────
@@ -655,7 +662,20 @@ async function forwardToApex(leadId, lead, cfg) {
       body:    JSON.stringify(payload),
     });
 
-    const data = await resp.json();
+    let data;
+    try {
+      data = await resp.json();
+    } catch (parseErr) {
+      const rawText = await resp.text().catch(() => '(unreadable)');
+      console.error(`❌ Lead KRW-DEPO-${leadId} — Apex returned non-JSON (HTTP ${resp.status}): ${rawText}`);
+      await pool.query(
+        `UPDATE leads SET status='forward_failed', buyer_error=$1 WHERE id=$2`,
+        [`Non-JSON response (HTTP ${resp.status}): ${rawText.slice(0,500)}`, leadId]
+      );
+      return;
+    }
+
+    console.log(`ℹ️  Apex response for KRW-DEPO-${leadId} (HTTP ${resp.status}):`, JSON.stringify(data));
 
     if (data.status === 'Success') {
       await pool.query(
@@ -664,18 +684,19 @@ async function forwardToApex(leadId, lead, cfg) {
       );
       console.log(`✅ Lead KRW-DEPO-${leadId} forwarded to Apex. Buyer ID: ${data.ids?.[0]}`);
     } else {
+      const buyerError = data.statusDetail || data.message || data.error || JSON.stringify(data);
       await pool.query(
         `UPDATE leads SET status='buyer_rejected', buyer_status='Failed', buyer_error=$1 WHERE id=$2`,
-        [data.statusDetail||'Unknown error', leadId]
+        [buyerError, leadId]
       );
-      console.log(`⚠️  Lead KRW-DEPO-${leadId} rejected by buyer: ${data.statusDetail}`);
+      console.error(`⚠️  Lead KRW-DEPO-${leadId} rejected by buyer. statusDetail=${JSON.stringify(data.statusDetail)} full response: ${JSON.stringify(data)}`);
     }
   } catch (err) {
+    console.error(`❌ Lead KRW-DEPO-${leadId} forward failed:`, err.message, err.stack);
     await pool.query(
       `UPDATE leads SET status='forward_failed', buyer_error=$1 WHERE id=$2`,
       [err.message, leadId]
     );
-    console.error(`❌ Lead KRW-DEPO-${leadId} forward failed: ${err.message}`);
   }
 }
 
