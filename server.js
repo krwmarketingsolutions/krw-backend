@@ -643,6 +643,7 @@ async function forwardToApex(leadId, lead, cfg) {
       state:     lead.state,
       zip:       lead.zip,
       notes:     lead.notes,
+      websource: lead.websource,
       meta: {
         id:               `KRW-DEPO-${leadId}`,
         Timestamp:        new Date().toISOString(),
@@ -676,7 +677,7 @@ async function forwardToApex(leadId, lead, cfg) {
       return;
     }
 
-    if (data.status === 'Success') {
+    if (data.status === 'Ok') {
       await pool.query(
         `UPDATE leads SET status='forwarded', buyer_status='Success', buyer_intake_id=$1 WHERE id=$2`,
         [String(data.ids?.[0]||''), leadId]
