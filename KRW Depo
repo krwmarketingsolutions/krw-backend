@@ -143,7 +143,7 @@
 <script>
   // ── Config — fill these in before publishing ─────────────────
   var API_URL = 'https://krw-backend-production.up.railway.app/lead/depo';
-  var API_KEY = 'YOUR_LEAD_API_KEY'; // set LEAD_API_KEY in Railway env vars
+  var API_KEY = '64tgzb5ostadx1azjio9crdlduw4vf29';
   // ─────────────────────────────────────────────────────────────
 
   // Get publisher sub from URL param: ?sub=PUBLISHERCODE
