@@ -603,18 +603,23 @@ app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
   };
 
   // Insert into DB
-  const ins = await pool.query(`
-    INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
-      street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
-      publisher_sub,websource,raw)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-    RETURNING id
-  `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
-      lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
-      lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
-      lead.publisher_sub,lead.websource,lead.raw]);
-
-  const leadId = ins.rows[0].id;
+  let leadId;
+  try {
+    const ins = await pool.query(`
+      INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
+        street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
+        publisher_sub,websource,raw)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+      RETURNING id
+    `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
+        lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
+        lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
+        lead.publisher_sub,lead.websource,lead.raw]);
+    leadId = ins.rows[0].id;
+  } catch (dbErr) {
+    console.error('❌ DB insert failed for lead:', dbErr.message);
+    return res.status(500).json({ status:'error', reason:'Failed to store lead' });
+  }
 
   // Respond to publisher immediately — don't make them wait on Apex
   res.json({ status:'received', leadId:`KRW-DEPO-${leadId}`, message:'Lead accepted' });
@@ -655,7 +660,21 @@ async function forwardToApex(leadId, lead, cfg) {
       body:    JSON.stringify(payload),
     });
 
-    const data = await resp.json();
+    const rawText = await resp.text();
+    console.log(`📨 Apex raw response for KRW-DEPO-${leadId} (HTTP ${resp.status}): ${rawText}`);
+    console.log(`📋 Apex websource sent: ${lead.websource}`);
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseErr) {
+      console.error(`❌ Lead KRW-DEPO-${leadId} — Apex returned non-JSON: ${rawText}`);
+      await pool.query(
+        `UPDATE leads SET status='forward_failed', buyer_error=$1 WHERE id=$2`,
+        [`Non-JSON response: ${rawText}`, leadId]
+      );
+      return;
+    }
 
     if (data.status === 'Success') {
       await pool.query(
@@ -664,11 +683,13 @@ async function forwardToApex(leadId, lead, cfg) {
       );
       console.log(`✅ Lead KRW-DEPO-${leadId} forwarded to Apex. Buyer ID: ${data.ids?.[0]}`);
     } else {
+      const buyerError = data.statusDetail || data.message || data.error || JSON.stringify(data);
       await pool.query(
         `UPDATE leads SET status='buyer_rejected', buyer_status='Failed', buyer_error=$1 WHERE id=$2`,
-        [data.statusDetail||'Unknown error', leadId]
+        [buyerError, leadId]
       );
-      console.log(`⚠️  Lead KRW-DEPO-${leadId} rejected by buyer: ${data.statusDetail}`);
+      console.log(`⚠️  Lead KRW-DEPO-${leadId} rejected by buyer: ${buyerError}`);
+      console.log(`⚠️  Full Apex rejection payload: ${JSON.stringify(data)}`);
     }
   } catch (err) {
     await pool.query(
