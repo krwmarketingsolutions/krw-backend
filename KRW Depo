@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>DEPO — Lead Submission</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Helvetica Neue',Arial,sans-serif;background:#f4f4f4;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
+  .card{background:white;border-radius:8px;box-shadow:0 2px 16px rgba(0,0,0,.1);width:100%;max-width:520px;overflow:hidden}
+  .card-hdr{background:#1a1a2e;color:white;padding:1.25rem 1.5rem}
+  .card-hdr h1{font-size:16px;font-weight:600;margin-bottom:2px}
+  .card-hdr p{font-size:12px;opacity:.6}
+  .card-body{padding:1.5rem}
+  .form-group{margin-bottom:14px}
+  .form-group label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#666;margin-bottom:4px}
+  .form-group label .req{color:#e53e3e;margin-left:2px}
+  .form-group input,
+  .form-group select,
+  .form-group textarea{width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:5px;font-size:13px;font-family:inherit;outline:none;transition:border .15s;background:#fafafa}
+  .form-group input:focus,
+  .form-group select:focus,
+  .form-group textarea:focus{border-color:#2d6a4f;background:white}
+  .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .form-row-3{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px}
+  .section-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#999;margin:18px 0 10px;padding-bottom:5px;border-bottom:1px solid #eee}
+  .submit-btn{width:100%;padding:12px;background:#2d6a4f;color:white;border:none;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;margin-top:6px;transition:background .15s}
+  .submit-btn:hover{background:#1b4332}
+  .submit-btn:disabled{background:#aaa;cursor:not-allowed}
+  .result{margin-top:12px;padding:12px;border-radius:5px;font-size:13px;display:none}
+  .result.success{background:#d1fae5;color:#065f46;border:1px solid #6ee7b7}
+  .result.error{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5}
+  .note{font-size:11px;color:#999;margin-top:4px}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="card-hdr">
+    <h1>DEPO Lead Submission</h1>
+    <p>Submit lead data via this form or API endpoint</p>
+  </div>
+  <div class="card-body">
+    <form id="lead-form" autocomplete="off">
+
+      <div class="section-label">Claimant Information</div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>First Name<span class="req">*</span></label>
+          <input type="text" name="firstName" placeholder="Jane" required/>
+        </div>
+        <div class="form-group">
+          <label>Last Name<span class="req">*</span></label>
+          <input type="text" name="lastName" placeholder="Smith" required/>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Email<span class="req">*</span></label>
+          <input type="email" name="email" placeholder="jane@gmail.com" required/>
+        </div>
+        <div class="form-group">
+          <label>Cell Phone<span class="req">*</span></label>
+          <input type="tel" name="phone" placeholder="3105550123" maxlength="10"/>
+          <div class="note">10 digits, no dashes</div>
+        </div>
+      </div>
+
+      <div class="section-label">Address (Optional)</div>
+
+      <div class="form-group">
+        <label>Street Address</label>
+        <input type="text" name="street" placeholder="123 Main St"/>
+      </div>
+
+      <div class="form-row-3">
+        <div class="form-group">
+          <label>City</label>
+          <input type="text" name="city" placeholder="Los Angeles"/>
+        </div>
+        <div class="form-group">
+          <label>State</label>
+          <select name="state">
+            <option value="">—</option>
+            <option>AL</option><option>AK</option><option>AZ</option><option>AR</option>
+            <option>CA</option><option>CO</option><option>CT</option><option>DE</option>
+            <option>FL</option><option>GA</option><option>HI</option><option>ID</option>
+            <option>IL</option><option>IN</option><option>IA</option><option>KS</option>
+            <option>KY</option><option>LA</option><option>ME</option><option>MD</option>
+            <option>MA</option><option>MI</option><option>MN</option><option>MS</option>
+            <option>MO</option><option>MT</option><option>NE</option><option>NV</option>
+            <option>NH</option><option>NJ</option><option>NM</option><option>NY</option>
+            <option>NC</option><option>ND</option><option>OH</option><option>OK</option>
+            <option>OR</option><option>PA</option><option>RI</option><option>SC</option>
+            <option>SD</option><option>TN</option><option>TX</option><option>UT</option>
+            <option>VT</option><option>VA</option><option>WA</option><option>WV</option>
+            <option>WI</option><option>WY</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Zip</label>
+          <input type="text" name="zip" placeholder="90001" maxlength="5"/>
+        </div>
+      </div>
+
+      <div class="section-label">Compliance (Optional)</div>
+
+      <div class="form-group">
+        <label>TrustedForm Certificate URL</label>
+        <input type="text" name="trustedFormCertUrl" placeholder="https://cert.trustedform.com/..."/>
+      </div>
+      <div class="form-group">
+        <label>Jornaya Lead ID</label>
+        <input type="text" name="jornayaLeadId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"/>
+      </div>
+
+      <div class="section-label">Tracking (Optional)</div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Publisher Sub ID</label>
+          <input type="text" name="publisherSub" placeholder="your-campaign-tag"/>
+        </div>
+        <div class="form-group">
+          <label>Facebook Lead ID</label>
+          <input type="text" name="facebookLeadId" placeholder="123456789"/>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Notes</label>
+        <textarea name="notes" rows="2" placeholder="Any additional case notes..."></textarea>
+      </div>
+
+      <button type="submit" class="submit-btn" id="submit-btn">Submit Lead</button>
+      <div class="result" id="result"></div>
+    </form>
+  </div>
+</div>
+
+<script>
+  // ── Config — fill these in before publishing ─────────────────
+  var API_URL = 'https://krw-backend-production.up.railway.app/lead/depo';
+  var API_KEY = 'YOUR_LEAD_API_KEY'; // set LEAD_API_KEY in Railway env vars
+  // ─────────────────────────────────────────────────────────────
+
+  // Get publisher sub from URL param: ?sub=PUBLISHERCODE
+  var params     = new URLSearchParams(window.location.search);
+  var pubSub     = params.get('sub') || params.get('pub') || '';
+  var websource  = window.location.href;
+
+  var form   = document.getElementById('lead-form');
+  var btn    = document.getElementById('submit-btn');
+  var result = document.getElementById('result');
+
+  // Auto-format phone field
+  form.phone.addEventListener('input', function(){
+    this.value = this.value.replace(/\D/g,'').slice(0,10);
+  });
+
+  form.addEventListener('submit', async function(e){
+    e.preventDefault();
+    btn.disabled = true;
+    btn.textContent = 'Submitting...';
+    result.style.display = 'none';
+
+    var data = {
+      firstName:          form.firstName.value.trim(),
+      lastName:           form.lastName.value.trim(),
+      email:              form.email.value.trim(),
+      phone:              form.phone.value.replace(/\D/g,''),
+      street:             form.street.value.trim()  || undefined,
+      city:               form.city.value.trim()    || undefined,
+      state:              form.state.value           || undefined,
+      zip:                form.zip.value.trim()      || undefined,
+      notes:              form.notes.value.trim()    || undefined,
+      trustedFormCertUrl: form.trustedFormCertUrl.value.trim() || undefined,
+      jornayaLeadId:      form.jornayaLeadId.value.trim()      || undefined,
+      facebookLeadId:     form.facebookLeadId.value.trim()     || undefined,
+      publisherSub:       pubSub || undefined,
+      websource:          websource,
+    };
+
+    try {
+      var res = await fetch(API_URL, {
+        method:  'POST',
+        headers: { 'Content-Type':'application/json', 'x-api-key': API_KEY },
+        body:    JSON.stringify(data),
+      });
+      var resp = await res.json();
+
+      if (resp.status === 'received') {
+        result.className = 'result success';
+        result.textContent = '✓ Lead accepted. Reference ID: ' + resp.leadId;
+        form.reset();
+      } else {
+        result.className = 'result error';
+        result.textContent = '✕ ' + (resp.reason || 'Submission failed');
+      }
+    } catch(err) {
+      result.className = 'result error';
+      result.textContent = '✕ Connection error: ' + err.message;
+    }
+
+    result.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Submit Lead';
+  });
+</script>
+</body>
+</html>
