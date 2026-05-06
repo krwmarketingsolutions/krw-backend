@@ -145,25 +145,6 @@ app.get('/debug',  (req, res) => res.json({
   db_url_set:     !!process.env.DATABASE_URL,
 }));
 
-// ── GET /dashboard ─────────────────────────────────────────
-app.get('/dashboard', (req, res) => {
-  const fs   = require('fs');
-  const path = require('path');
-  const file = path.join(__dirname, 'dashboard.html');
-  fs.readFile(file, 'utf8', (err, html) => {
-    if (err) {
-      if (err.code === 'ENOENT') {
-        return res.status(404).send('dashboard.html not found');
-      }
-      console.error('Dashboard read error:', err.message);
-      return res.status(500).send('Error reading dashboard.html');
-    }
-    res.status(200)
-       .setHeader('Content-Type', 'text/html; charset=utf-8')
-       .send(html);
-  });
-});
-
 // ── POST /postback ─────────────────────────────────────────
 app.post('/postback', requireKey, async (req, res) => {
   try {
@@ -412,7 +393,7 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
+}
 
 // ── PATCH /calls/:id/billable ──────────────────────────────
 // Toggle billable — called from invoice page mark unbillable button
@@ -428,7 +409,7 @@ app.patch('/calls/:id/billable', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
+}););
 
 
 // ── POST /send-invoice ─────────────────────────────────────────────
@@ -482,8 +463,312 @@ app.post('/send-invoice', requireKey, async (req, res) => {
   }
 });
 
+// ── GET /dashboard — serves the dashboard HTML file ─────────────
+app.get('/dashboard', (req, res) => {
+  const path = require('path');
+  const fs   = require('fs');
+  const file = path.join(__dirname, 'dashboard.html');
+  if (!fs.existsSync(file)) {
+    return res.status(404).send(`
+      <html><body style="font-family:sans-serif;padding:2rem;max-width:500px;margin:0 auto">
+        <h2 style="color:#c0392b">dashboard.html not found</h2>
+        <p>Upload your <strong>dashboard.html</strong> file to your GitHub repo alongside server.js and redeploy.</p>
+        <p>Rename <code>deal-dashboard.html</code> to <code>dashboard.html</code> before uploading.</p>
+      </body></html>
+    `);
+  }
+  res.setHeader('Content-Type', 'text/html');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.sendFile(file);
+});
+
+
+// ════════════════════════════════════════════════════════════
+//  LEADS — Campaign Lead Intake System
+//  Receives leads from publishers → validates → stores in DB
+//  → forwards directly to buyer's Apex endpoint
+// ════════════════════════════════════════════════════════════
+
+// ── Campaign config (add new campaigns here) ─────────────────
+const CAMPAIGNS = {
+  depo: {
+    name:        'DEPO — Lead Tree (WTC)',
+    vertical:    'Mass Tort - Depo',
+    apexEndpoint:'https://apex-services-nbd7z6aa7a-uc.a.run.app/intake/depo/depo/zapier/tuell/submit',
+    websource:   'https://krwmarketing.github.io/depo',
+    required:    ['firstName','lastName','email','phone'],
+    optional:    ['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','facebookLeadId','publisherSub'],
+  },
+  // Add more campaigns here later:
+  // mva: { name:'MVA', vertical:'MVA', apexEndpoint:'...', required:[...] },
+};
+
+// ── DB init — create leads + campaigns tables ─────────────────
+async function initLeadsDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS leads (
+      id              SERIAL PRIMARY KEY,
+      received_at     TIMESTAMPTZ DEFAULT NOW(),
+      campaign        TEXT NOT NULL,
+      vertical        TEXT,
+      status          TEXT DEFAULT 'received',
+      -- Claimant info
+      first_name      TEXT,
+      last_name       TEXT,
+      email           TEXT,
+      phone           TEXT,
+      street          TEXT,
+      city            TEXT,
+      state           TEXT,
+      zip             TEXT,
+      notes           TEXT,
+      -- Compliance
+      trusted_form_url TEXT,
+      jornaya_id      TEXT,
+      facebook_lead_id TEXT,
+      -- Tracking
+      publisher_sub   TEXT,
+      websource       TEXT,
+      -- Buyer response
+      buyer_status    TEXT,
+      buyer_intake_id TEXT,
+      buyer_error     TEXT,
+      -- Raw payload
+      raw             JSONB
+    );
+    CREATE INDEX IF NOT EXISTS idx_leads_campaign    ON leads (campaign);
+    CREATE INDEX IF NOT EXISTS idx_leads_received    ON leads (received_at);
+    CREATE INDEX IF NOT EXISTS idx_leads_status      ON leads (status);
+  `);
+  console.log('✅ Leads table ready');
+}
+
+// ── Lead API key auth ─────────────────────────────────────────
+function requireLeadKey(req, res, next) {
+  const key = (req.headers['x-api-key'] || req.query.api_key || '').trim();
+  const exp = (process.env.LEAD_API_KEY || process.env.API_KEY || '').trim();
+  if (!exp || key !== exp) {
+    return res.status(401).json({ status:'rejected', reason:'Invalid API key' });
+  }
+  next();
+}
+
+// ── POST /lead/:campaign ──────────────────────────────────────
+// Publishers post leads here. Validates, stores, forwards to buyer.
+app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
+  const slug = req.params.campaign.toLowerCase();
+  const cfg  = CAMPAIGNS[slug];
+  if (!cfg) return res.status(404).json({ status:'rejected', reason:`Unknown campaign: ${slug}` });
+
+  const b = req.body || {};
+
+  // Validate required fields
+  const missing = cfg.required.filter(f => !b[f] || !String(b[f]).trim());
+  if (missing.length) {
+    return res.status(422).json({ status:'rejected', reason:`Missing required fields: ${missing.join(', ')}` });
+  }
+
+  // Basic email validation
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email)) {
+    return res.status(422).json({ status:'rejected', reason:'Invalid email format' });
+  }
+
+  // Phone: strip non-digits, require 10
+  const phone = String(b.phone).replace(/\D/g,'');
+  if (phone.length < 10) {
+    return res.status(422).json({ status:'rejected', reason:'Phone must be 10 digits' });
+  }
+
+  // Build clean lead record
+  const lead = {
+    campaign:          slug,
+    vertical:          cfg.vertical,
+    status:            'received',
+    first_name:        String(b.firstName||'').trim(),
+    last_name:         String(b.lastName ||'').trim(),
+    email:             String(b.email    ||'').trim().toLowerCase(),
+    phone:             phone,
+    street:            b.street    || null,
+    city:              b.city      || null,
+    state:             b.state     || null,
+    zip:               b.zip       || null,
+    notes:             b.notes     || null,
+    trusted_form_url:  b.trustedFormCertUrl || null,
+    jornaya_id:        b.jornayaLeadId      || null,
+    facebook_lead_id:  b.facebookLeadId     || null,
+    publisher_sub:     b.publisherSub       || null,
+    websource:         b.websource || cfg.websource,
+    raw:               JSON.stringify(b),
+  };
+
+  // Insert into DB
+  const ins = await pool.query(`
+    INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
+      street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
+      publisher_sub,websource,raw)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+    RETURNING id
+  `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
+      lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
+      lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
+      lead.publisher_sub,lead.websource,lead.raw]);
+
+  const leadId = ins.rows[0].id;
+
+  // Respond to publisher immediately — don't make them wait on Apex
+  res.json({ status:'received', leadId:`KRW-DEPO-${leadId}`, message:'Lead accepted' });
+
+  // Forward to buyer's Apex endpoint in background
+  forwardToApex(leadId, lead, cfg).catch(console.error);
+});
+
+// ── Forward to Apex buyer endpoint ───────────────────────────
+async function forwardToApex(leadId, lead, cfg) {
+  try {
+    await pool.query(`UPDATE leads SET status='forwarding' WHERE id=$1`, [leadId]);
+
+    const payload = {
+      firstName: lead.first_name,
+      lastName:  lead.last_name,
+      email:     lead.email,
+      phone:     lead.phone,
+      street:    lead.street,
+      city:      lead.city,
+      state:     lead.state,
+      zip:       lead.zip,
+      notes:     lead.notes,
+      meta: {
+        id:               `KRW-DEPO-${leadId}`,
+        Timestamp:        new Date().toISOString(),
+        createDt:         new Date().toISOString(),
+        claimant:         `${lead.first_name} ${lead.last_name}`,
+        websource:        lead.websource,
+        trustedFormCertUrl: lead.trusted_form_url,
+        jornayaLeadId:    lead.jornaya_id,
+      },
+    };
+
+    const resp = await fetch(cfg.apexEndpoint, {
+      method:  'POST',
+      headers: { 'Content-Type':'application/json' },
+      body:    JSON.stringify(payload),
+    });
+
+    const data = await resp.json();
+
+    if (data.status === 'Success') {
+      await pool.query(
+        `UPDATE leads SET status='forwarded', buyer_status='Success', buyer_intake_id=$1 WHERE id=$2`,
+        [String(data.ids?.[0]||''), leadId]
+      );
+      console.log(`✅ Lead KRW-DEPO-${leadId} forwarded to Apex. Buyer ID: ${data.ids?.[0]}`);
+    } else {
+      await pool.query(
+        `UPDATE leads SET status='buyer_rejected', buyer_status='Failed', buyer_error=$1 WHERE id=$2`,
+        [data.statusDetail||'Unknown error', leadId]
+      );
+      console.log(`⚠️  Lead KRW-DEPO-${leadId} rejected by buyer: ${data.statusDetail}`);
+    }
+  } catch (err) {
+    await pool.query(
+      `UPDATE leads SET status='forward_failed', buyer_error=$1 WHERE id=$2`,
+      [err.message, leadId]
+    );
+    console.error(`❌ Lead KRW-DEPO-${leadId} forward failed: ${err.message}`);
+  }
+}
+
+// ── GET /leads/summary ────────────────────────────────────────
+app.get('/leads/summary', requireKey, async (req, res) => {
+  try {
+    const today     = new Date().toISOString().split('T')[0];
+    const weekAgo   = new Date(Date.now()-7*86400000).toISOString().split('T')[0];
+    const monthStart= today.slice(0,7)+'-01';
+
+    const [todayQ,weekQ,monthQ,statusQ,campaignQ] = await Promise.all([
+      pool.query(`SELECT campaign, COUNT(*) as count FROM leads WHERE received_at::date=CURRENT_DATE GROUP BY campaign`),
+      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1`,[weekAgo]),
+      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1`,[monthStart]),
+      pool.query(`SELECT status, COUNT(*) as count FROM leads GROUP BY status ORDER BY count DESC`),
+      pool.query(`SELECT campaign, COUNT(*) as total, COUNT(CASE WHEN status='forwarded' THEN 1 END) as forwarded, COUNT(CASE WHEN status='buyer_rejected' THEN 1 END) as rejected FROM leads GROUP BY campaign`),
+    ]);
+
+    res.json({
+      ok: true,
+      today:      todayQ.rows,
+      week:       parseInt(weekQ.rows[0]?.count||0),
+      month:      parseInt(monthQ.rows[0]?.count||0),
+      by_status:  statusQ.rows,
+      by_campaign:campaignQ.rows,
+    });
+  } catch(err) {
+    res.status(500).json({ error:err.message });
+  }
+});
+
+// ── GET /leads/feed ───────────────────────────────────────────
+app.get('/leads/feed', requireKey, async (req, res) => {
+  try {
+    const { campaign, status, limit=50 } = req.query;
+    let where=[], params=[], i=1;
+    if (campaign) { where.push(`campaign=$${i++}`); params.push(campaign); }
+    if (status)   { where.push(`status=$${i++}`);   params.push(status); }
+    params.push(parseInt(limit));
+    const wc = where.length ? 'WHERE '+where.join(' AND ') : '';
+    const r = await pool.query(
+      `SELECT id,received_at,campaign,vertical,first_name,last_name,email,phone,
+              state,status,buyer_status,buyer_intake_id,buyer_error,
+              trusted_form_url,jornaya_id,publisher_sub,websource
+       FROM leads ${wc} ORDER BY received_at DESC LIMIT $${i}`, params
+    );
+    res.json({ ok:true, count:r.rows.length, leads:r.rows });
+  } catch(err) {
+    res.status(500).json({ error:err.message });
+  }
+});
+
+// ── GET /leads/export/:campaign ───────────────────────────────
+// Returns CSV for publisher sharing
+app.get('/leads/export/:campaign', requireKey, async (req, res) => {
+  try {
+    const { campaign } = req.params;
+    const { from, to } = req.query;
+    let where=[`campaign=$1`], params=[campaign], i=2;
+    if (from) { where.push(`received_at::date>=$${i++}`); params.push(from); }
+    if (to)   { where.push(`received_at::date<=$${i++}`); params.push(to); }
+
+    const r = await pool.query(
+      `SELECT id,received_at,first_name,last_name,email,phone,street,city,state,zip,
+              notes,status,buyer_status,buyer_intake_id,publisher_sub,websource,
+              trusted_form_url,jornaya_id,facebook_lead_id
+       FROM leads WHERE ${where.join(' AND ')} ORDER BY received_at DESC`, params
+    );
+
+    const headers = ['ID','Received','First Name','Last Name','Email','Phone',
+      'Street','City','State','Zip','Notes','Status','Buyer Status','Buyer ID',
+      'Publisher Sub','Websource','TrustedForm','Jornaya','Facebook Lead ID'];
+
+    const rows = r.rows.map(row => [
+      `KRW-${campaign.toUpperCase()}-${row.id}`,
+      row.received_at, row.first_name, row.last_name, row.email, row.phone,
+      row.street||'', row.city||'', row.state||'', row.zip||'', row.notes||'',
+      row.status, row.buyer_status||'', row.buyer_intake_id||'',
+      row.publisher_sub||'', row.websource||'',
+      row.trusted_form_url||'', row.jornaya_id||'', row.facebook_lead_id||'',
+    ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
+
+    const csv = [headers.join(','), ...rows].join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${campaign}-leads-${new Date().toISOString().split('T')[0]}.csv"`);
+    res.send(csv);
+  } catch(err) {
+    res.status(500).json({ error:err.message });
+  }
+});
+
 // ── START ──────────────────────────────────────────────────
 initDB()
+  .then(() => initLeadsDB())
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
