@@ -692,13 +692,19 @@ async function forwardToApex(leadId, lead, cfg) {
       },
     };
 
+    console.log('Apex request payload:', JSON.stringify(payload, null, 2));
+
     const resp = await fetch(cfg.apexEndpoint, {
       method:  'POST',
       headers: { 'Content-Type':'application/json' },
       body:    JSON.stringify(payload),
     });
 
+    console.log('Apex HTTP status:', resp.status);
+
     const data = await resp.json();
+
+    console.log('Apex response:', JSON.stringify(data, null, 2));
 
     if (data.status === 'Success') {
       await pool.query(
