@@ -571,21 +571,21 @@ function requireLeadKey(req, res, next) {
   next();
 }
 
-// ── GET /campaigns/:slug/config ───────────────────────────────
-// Public — no auth. Returns form config for the universal form page.
-// Never exposes buyer endpoint or internal details.
+// ── GET /campaigns/:slug/config ────────────────────────────────
+// Public endpoint — returns campaign config for the universal form
 app.get('/campaigns/:slug/config', (req, res) => {
   const slug = req.params.slug.toLowerCase();
   const cfg  = CAMPAIGNS[slug];
-  if (!cfg) return res.status(404).json({ error: `Unknown campaign: ${slug}` });
+  if (!cfg) {
+    return res.status(404).json({ status: 'error', reason: `Campaign not found: ${slug}` });
+  }
   res.json({
-    ok:       true,
-    slug:     slug,
-    name:     cfg.name,
-    vertical: cfg.vertical,
-    required: cfg.required,
-    optional: cfg.optional,
+    slug:      slug,
+    name:      cfg.name,
+    vertical:  cfg.vertical,
     websource: cfg.websource,
+    required:  cfg.required,
+    optional:  cfg.optional,
   });
 });
 
