@@ -395,12 +395,12 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
     if (paid_date)      { sets.push(`paid_date=$${i++}`);      params.push(paid_date); }
     if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
     params.push(id);
-    await pool.query(`UPDATE calls SET ${sets.join(',')} WHERE id=${i}`, params);
+    await pool.query(`UPDATE calls SET ${sets.join(',')} WHERE id=$${i}`, params);
     res.json({ ok: true });
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
+}
 
 // ── PATCH /calls/:id/billable ──────────────────────────────
 // Toggle billable — called from invoice page mark unbillable button
@@ -416,7 +416,7 @@ app.patch('/calls/:id/billable', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
+}););
 
 
 // ── POST /send-invoice ─────────────────────────────────────────────
@@ -571,104 +571,206 @@ function requireLeadKey(req, res, next) {
   next();
 }
 
-// ── GET /campaigns/:slug/config ────────────────────────────────
-// Public endpoint — returns campaign config for the universal form
-app.get('/campaigns/:slug/config', (req, res) => {
-  const slug = req.params.slug.toLowerCase();
-  const cfg  = CAMPAIGNS[slug];
-  if (!cfg) {
-    return res.status(404).json({ status: 'error', reason: `Campaign not found: ${slug}` });
+
+// ── DB: campaigns table ───────────────────────────────────────
+async function initCampaignsDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id           SERIAL PRIMARY KEY,
+      slug         TEXT UNIQUE NOT NULL,
+      name         TEXT NOT NULL,
+      vertical     TEXT,
+      apex_endpoint TEXT,
+      websource    TEXT,
+      required_fields  JSONB DEFAULT '["firstName","lastName","email","phone"]',
+      optional_fields  JSONB DEFAULT '["street","city","state","zip","notes","trustedFormCertUrl","jornayaLeadId","facebookLeadId","publisherSub"]',
+      field_labels JSONB DEFAULT '{}',
+      active       BOOLEAN DEFAULT true,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  // Seed DEPO from hardcoded config if not exists
+  const existing = await pool.query('SELECT slug FROM campaigns WHERE slug=$1',['depo']);
+  if (!existing.rows.length) {
+    const cfg = CAMPAIGNS['depo'];
+    if (cfg) {
+      await pool.query(`
+        INSERT INTO campaigns (slug,name,vertical,apex_endpoint,websource,required_fields,optional_fields,field_labels)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      `, [
+        'depo', cfg.name, cfg.vertical, cfg.apexEndpoint, cfg.websource,
+        JSON.stringify(cfg.required),
+        JSON.stringify(cfg.optional),
+        JSON.stringify(cfg.fieldLabels||{}),
+      ]);
+      console.log('✅ DEPO campaign seeded to DB');
+    }
   }
-  res.json({
-    slug:      slug,
-    name:      cfg.name,
-    vertical:  cfg.vertical,
-    websource: cfg.websource,
-    required:  cfg.required,
-    optional:  cfg.optional,
-  });
+  console.log('✅ Campaigns table ready');
+}
+
+// ── GET /campaigns/:slug/config (public) ──────────────────────
+// Reads from DB first, falls back to hardcoded CAMPAIGNS config
+
+// ── GET /campaigns/:slug/config (public — no auth) ───────────
+app.get('/campaigns/:slug/config', async (req, res) => {
+  const slug = req.params.slug.toLowerCase();
+  try {
+    const r = await pool.query('SELECT * FROM campaigns WHERE slug=$1 AND active=true',[slug]);
+    if (r.rows.length) {
+      const row = r.rows[0];
+      return res.json({
+        ok:       true,
+        slug:     row.slug,
+        name:     row.name,
+        vertical: row.vertical,
+        required: row.required_fields,
+        optional: row.optional_fields,
+        fieldLabels: row.field_labels||{},
+        websource:   row.websource,
+      });
+    }
+    // Fallback to hardcoded
+    const cfg = CAMPAIGNS[slug];
+    if (!cfg) return res.status(404).json({ error:`Unknown campaign: ${slug}` });
+    res.json({ ok:true, slug, name:cfg.name, vertical:cfg.vertical,
+               required:cfg.required, optional:cfg.optional,
+               fieldLabels:cfg.fieldLabels||{}, websource:cfg.websource });
+  } catch(err) {
+    res.status(500).json({ error:err.message });
+  }
+});
+
+// ── GET /campaigns (dashboard — list all) ─────────────────────
+app.get('/campaigns', requireKey, async (req, res) => {
+  try {
+    const r = await pool.query('SELECT id,slug,name,vertical,required_fields,optional_fields,field_labels,active,created_at FROM campaigns ORDER BY created_at ASC');
+    res.json({ ok:true, campaigns:r.rows });
+  } catch(err) { res.status(500).json({ error:err.message }); }
+});
+
+// ── POST /campaigns (create new campaign) ─────────────────────
+app.post('/campaigns', requireKey, async (req, res) => {
+  const { slug,name,vertical,apex_endpoint,websource,required_fields,optional_fields,field_labels } = req.body;
+  if (!slug||!name) return res.status(400).json({ error:'slug and name required' });
+  try {
+    const r = await pool.query(`
+      INSERT INTO campaigns (slug,name,vertical,apex_endpoint,websource,required_fields,optional_fields,field_labels)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      ON CONFLICT (slug) DO UPDATE SET
+        name=$2,vertical=$3,apex_endpoint=$4,websource=$5,
+        required_fields=$6,optional_fields=$7,field_labels=$8,updated_at=NOW()
+      RETURNING *
+    `,[slug,name,vertical||'',apex_endpoint||'',websource||'',
+       JSON.stringify(required_fields||['firstName','lastName','email','phone']),
+       JSON.stringify(optional_fields||[]),
+       JSON.stringify(field_labels||{})]);
+    res.json({ ok:true, campaign:r.rows[0] });
+  } catch(err) { res.status(500).json({ error:err.message }); }
+});
+
+// ── PATCH /campaigns/:slug (update fields) ────────────────────
+app.patch('/campaigns/:slug', requireKey, async (req, res) => {
+  const { slug } = req.params;
+  const { name,vertical,apex_endpoint,websource,required_fields,optional_fields,field_labels,active } = req.body;
+  try {
+    const sets=[],params=[],i={v:1};
+    const add=(col,val)=>{ sets.push(`${col}=$${i.v++}`); params.push(val); };
+    if (name!==undefined)             add('name',name);
+    if (vertical!==undefined)         add('vertical',vertical);
+    if (apex_endpoint!==undefined)    add('apex_endpoint',apex_endpoint);
+    if (websource!==undefined)        add('websource',websource);
+    if (required_fields!==undefined)  add('required_fields',JSON.stringify(required_fields));
+    if (optional_fields!==undefined)  add('optional_fields',JSON.stringify(optional_fields));
+    if (field_labels!==undefined)     add('field_labels',JSON.stringify(field_labels));
+    if (active!==undefined)           add('active',active);
+    sets.push(`updated_at=NOW()`);
+    params.push(slug);
+    await pool.query(`UPDATE campaigns SET ${sets.join(',')} WHERE slug=$${i.v}`,params);
+    res.json({ ok:true });
+  } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
 // ── POST /lead/:campaign ──────────────────────────────────────
 // Publishers post leads here. Validates, stores, forwards to buyer.
 app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
-  try {
-    const slug = req.params.campaign.toLowerCase();
-    const cfg  = CAMPAIGNS[slug];
-    if (!cfg) return res.status(404).json({ status:'rejected', reason:`Unknown campaign: ${slug}` });
+  const slug = req.params.campaign.toLowerCase();
+  const cfg  = CAMPAIGNS[slug];
+  if (!cfg) return res.status(404).json({ status:'rejected', reason:`Unknown campaign: ${slug}` });
 
-    const b = req.body || {};
+  const b = req.body || {};
 
-    // Validate required fields
-    const missing = cfg.required.filter(f => !b[f] || !String(b[f]).trim());
-    if (missing.length) {
-      return res.status(422).json({ status:'rejected', reason:`Missing required fields: ${missing.join(', ')}` });
-    }
-
-    // Basic email validation
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email)) {
-      return res.status(422).json({ status:'rejected', reason:'Invalid email format' });
-    }
-
-    // Phone: strip non-digits, require exactly 10
-    const phone = String(b.phone).replace(/\D/g,'');
-    if (phone.length !== 10) {
-      return res.status(422).json({ status:'rejected', reason:'Phone must be 10 digits' });
-    }
-
-    // Build clean lead record
-    const lead = {
-      campaign:          slug,
-      vertical:          cfg.vertical,
-      status:            'received',
-      first_name:        String(b.firstName||'').trim(),
-      last_name:         String(b.lastName ||'').trim(),
-      email:             String(b.email    ||'').trim().toLowerCase(),
-      phone:             phone,
-      street:            b.street    || null,
-      city:              b.city      || null,
-      state:             b.state     || null,
-      zip:               b.zip       || null,
-      notes:             b.notes     || null,
-      trusted_form_url:  b.trustedFormCertUrl || null,
-      jornaya_id:        b.jornayaLeadId      || null,
-      facebook_lead_id:  b.facebookLeadId     || null,
-      publisher_sub:     b.publisherSub       || null,
-      websource:         b.websource || cfg.websource,
-      raw:               JSON.stringify(b),
-    };
-
-    // Insert into DB
-    const ins = await pool.query(`
-      INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
-        street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
-        publisher_sub,websource,raw)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-      RETURNING id
-    `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
-        lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
-        lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
-        lead.publisher_sub,lead.websource,lead.raw]);
-
-    const leadId = ins.rows[0].id;
-    const leadRef = `KRW-${slug.toUpperCase()}-${leadId}`;
-
-    // Respond to publisher immediately — don't make them wait on Apex
-    res.json({ status:'received', leadId: leadRef, message:'Lead accepted' });
-
-    // Forward to buyer's Apex endpoint in background
-    forwardToApex(leadId, lead, cfg).catch(console.error);
-
-  } catch (err) {
-    console.error('Lead intake error:', err.message);
-    res.status(500).json({ status:'rejected', reason:'Internal server error' });
+  // Validate required fields
+  const missing = cfg.required.filter(f => !b[f] || !String(b[f]).trim());
+  if (missing.length) {
+    return res.status(422).json({ status:'rejected', reason:`Missing required fields: ${missing.join(', ')}` });
   }
+
+  // Basic email validation
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email)) {
+    return res.status(422).json({ status:'rejected', reason:'Invalid email format' });
+  }
+
+  // Phone: strip non-digits, require 10
+  const phone = String(b.phone).replace(/\D/g,'');
+  if (phone.length < 10) {
+    return res.status(422).json({ status:'rejected', reason:'Phone must be 10 digits' });
+  }
+
+  // Build clean lead record
+  const lead = {
+    campaign:          slug,
+    vertical:          cfg.vertical,
+    status:            'received',
+    first_name:        String(b.firstName||'').trim(),
+    last_name:         String(b.lastName ||'').trim(),
+    email:             String(b.email    ||'').trim().toLowerCase(),
+    phone:             phone,
+    street:            b.street    || null,
+    city:              b.city      || null,
+    state:             b.state     || null,
+    zip:               b.zip       || null,
+    notes:             b.notes     || null,
+    trusted_form_url:  b.trustedFormCertUrl || null,
+    jornaya_id:        b.jornayaLeadId      || null,
+    facebook_lead_id:  b.facebookLeadId     || null,
+    publisher_sub:     b.publisherSub       || null,
+    websource:         b.websource || cfg.websource,
+    raw:               JSON.stringify(b),
+  };
+
+  // Insert into DB
+  const ins = await pool.query(`
+    INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
+      street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
+      publisher_sub,websource,raw)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+    RETURNING id
+  `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
+      lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
+      lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
+      lead.publisher_sub,lead.websource,lead.raw]);
+
+  const leadId = ins.rows[0].id;
+
+  // Respond to publisher immediately — don't make them wait on Apex
+  res.json({ status:'received', leadId:`KRW-DEPO-${leadId}`, message:'Lead accepted' });
+
+  // Forward to buyer's Apex endpoint in background
+  forwardToApex(leadId, lead, cfg).catch(console.error);
 });
 
 // ── Forward to Apex buyer endpoint ───────────────────────────
 async function forwardToApex(leadId, lead, cfg) {
-  const leadRef = `KRW-${lead.campaign.toUpperCase()}-${leadId}`;
   try {
+    // Get latest endpoint from DB (allows updating without redeploying)
+    let apexEndpoint = cfg.apexEndpoint;
+    try {
+      const dbCfg = await pool.query('SELECT apex_endpoint FROM campaigns WHERE slug=$1',[cfg.vertical?.toLowerCase().replace(/[^a-z]/g,'')|| 'depo']);
+      if (dbCfg.rows[0]?.apex_endpoint) apexEndpoint = dbCfg.rows[0].apex_endpoint;
+    } catch(e) { /* use hardcoded fallback */ }
+
     await pool.query(`UPDATE leads SET status='forwarding' WHERE id=$1`, [leadId]);
 
     const payload = {
@@ -682,7 +784,7 @@ async function forwardToApex(leadId, lead, cfg) {
       zip:       lead.zip,
       notes:     lead.notes,
       meta: {
-        id:               leadRef,
+        id:               `KRW-DEPO-${leadId}`,
         Timestamp:        new Date().toISOString(),
         createDt:         new Date().toISOString(),
         claimant:         `${lead.first_name} ${lead.last_name}`,
@@ -692,39 +794,33 @@ async function forwardToApex(leadId, lead, cfg) {
       },
     };
 
-    console.log('Apex request payload:', JSON.stringify(payload, null, 2));
-
     const resp = await fetch(cfg.apexEndpoint, {
       method:  'POST',
       headers: { 'Content-Type':'application/json' },
       body:    JSON.stringify(payload),
     });
 
-    console.log('Apex HTTP status:', resp.status);
-
     const data = await resp.json();
 
-    console.log('Apex response:', JSON.stringify(data, null, 2));
-
-    if (data.status === 'Ok' || data.status === 'Success') {
+    if (data.status === 'Success') {
       await pool.query(
         `UPDATE leads SET status='forwarded', buyer_status='Success', buyer_intake_id=$1 WHERE id=$2`,
         [String(data.ids?.[0]||''), leadId]
       );
-      console.log(`✅ Lead ${leadRef} forwarded to Apex. Buyer ID: ${data.ids?.[0]}`);
+      console.log(`✅ Lead KRW-DEPO-${leadId} forwarded to Apex. Buyer ID: ${data.ids?.[0]}`);
     } else {
       await pool.query(
         `UPDATE leads SET status='buyer_rejected', buyer_status='Failed', buyer_error=$1 WHERE id=$2`,
         [data.statusDetail||'Unknown error', leadId]
       );
-      console.log(`⚠️  Lead ${leadRef} rejected by buyer: ${data.statusDetail}`);
+      console.log(`⚠️  Lead KRW-DEPO-${leadId} rejected by buyer: ${data.statusDetail}`);
     }
   } catch (err) {
     await pool.query(
       `UPDATE leads SET status='forward_failed', buyer_error=$1 WHERE id=$2`,
       [err.message, leadId]
     );
-    console.error(`❌ Lead ${leadRef} forward failed: ${err.message}`);
+    console.error(`❌ Lead KRW-DEPO-${leadId} forward failed: ${err.message}`);
   }
 }
 
@@ -819,6 +915,7 @@ app.get('/leads/export/:campaign', requireKey, async (req, res) => {
 // ── START ──────────────────────────────────────────────────
 initDB()
   .then(() => initLeadsDB())
+  .then(() => initCampaignsDB())
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
