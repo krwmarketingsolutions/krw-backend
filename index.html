@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>KRW Lead Form</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Helvetica Neue',Arial,sans-serif;background:#f4f4f4;min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:1.5rem 1rem}
+  .card{background:white;border-radius:8px;box-shadow:0 2px 16px rgba(0,0,0,.1);width:100%;max-width:540px;overflow:hidden}
+  .card-hdr{background:#1a1a2e;color:white;padding:1.25rem 1.5rem;display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .card-hdr h1{font-size:16px;font-weight:600;margin-bottom:2px}
+  .card-hdr p{font-size:12px;opacity:.6}
+  .instructions-btn{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.25);color:white;border-radius:5px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s}
+  .instructions-btn:hover{background:rgba(255,255,255,.22)}
+  .card-body{padding:1.5rem}
+  .form-group{margin-bottom:14px}
+  .form-group label{display:flex;align-items:center;gap:3px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#555;margin-bottom:5px}
+  .req{color:#e53e3e;font-size:14px;line-height:1;font-weight:700}
+  .form-group input,.form-group select,.form-group textarea{width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:5px;font-size:13px;font-family:inherit;outline:none;transition:border .15s;background:#fafafa;color:#1a1a2e}
+  .form-group input:focus,.form-group select:focus,.form-group textarea:focus{border-color:#2d6a4f;background:white;box-shadow:0 0 0 3px rgba(45,106,79,.08)}
+  .form-group input.invalid,.form-group select.invalid{border-color:#e53e3e !important;background:#fff5f5 !important}
+  .field-error{font-size:11px;color:#e53e3e;margin-top:3px;display:none}
+  .field-error.show{display:block}
+  .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .form-row-3{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px}
+  .section-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#999;margin:20px 0 10px;padding-bottom:5px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:6px}
+  .optional-badge{font-size:9px;background:#f0f0f0;color:#aaa;padding:1px 6px;border-radius:10px;font-weight:normal;text-transform:none;letter-spacing:0}
+  .submit-btn{width:100%;padding:13px;background:#2d6a4f;color:white;border:none;border-radius:5px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px;transition:background .15s}
+  .submit-btn:hover:not(:disabled){background:#1b4332}
+  .submit-btn:disabled{background:#aaa;cursor:not-allowed}
+  .result{margin-top:12px;padding:12px 14px;border-radius:5px;font-size:13px;display:none}
+  .result.success{background:#d1fae5;color:#065f46;border:1px solid #6ee7b7}
+  .result.error{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5}
+  .note{font-size:11px;color:#aaa;margin-top:4px}
+  .loading{text-align:center;padding:2rem;font-size:13px;color:#888}
+  .error-state{text-align:center;padding:2rem;font-size:13px;color:#991b1b}
+  /* Modal */
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100;align-items:center;justify-content:center;padding:1rem}
+  .modal-overlay.open{display:flex}
+  .modal{background:white;border-radius:8px;width:100%;max-width:580px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.25)}
+  .modal-hdr{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.25rem;background:#1a1a2e;color:white;border-radius:8px 8px 0 0;position:sticky;top:0;z-index:1}
+  .modal-hdr h2{font-size:14px;font-weight:600}
+  .modal-x{background:none;border:none;color:white;font-size:22px;cursor:pointer;line-height:1;padding:2px 6px;opacity:.7}
+  .modal-x:hover{opacity:1}
+  .modal-body{padding:1.25rem}
+  .instructions-box{background:#0f172a;color:#e2e8f0;border-radius:6px;padding:1rem 1.1rem;font-family:'Courier New',monospace;font-size:11.5px;line-height:1.8;white-space:pre;overflow-x:auto;margin-bottom:12px;max-height:60vh;overflow-y:auto}
+  .copy-btn{width:100%;padding:11px;background:#2d6a4f;color:white;border:none;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s}
+  .copy-btn:hover{background:#1b4332}
+  .copy-btn.copied{background:#065f46}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="card-hdr">
+    <div>
+      <h1 id="form-title">KRW Lead Submission</h1>
+      <p id="form-subtitle">Submit lead data via this form</p>
+    </div>
+    <button class="instructions-btn" id="instructions-btn" style="display:none" onclick="showInstructions()">📋 Posting Instructions</button>
+  </div>
+  <div class="card-body" id="card-body">
+    <div class="loading" id="loading-state">Loading campaign…</div>
+  </div>
+</div>
+
+<!-- POSTING INSTRUCTIONS MODAL -->
+<div class="modal-overlay" id="instructions-modal">
+  <div class="modal">
+    <div class="modal-hdr">
+      <h2 id="modal-title">📋 Posting Instructions</h2>
+      <button class="modal-x" onclick="closeInstructions()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="instructions-box" id="instructions-text"></div>
+      <button class="copy-btn" id="copy-btn" onclick="copyInstructions()">Copy to Clipboard</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  /* ══════════════════════════════════════════════════════
+     FILE: index.html
+     REPO: krwmarketingsolutions/forms
+     URL:  https://krwmarketingsolutions.github.io/forms
+     PURPOSE: Universal lead form — fetches campaign config
+              from Railway and submits to POST /lead/:campaign
+     USAGE: ?campaign=depo&sub=K002
+  ══════════════════════════════════════════════════════ */
+
+  var BASE_URL = 'https://krw-backend-production.up.railway.app';
+  var API_KEY  = 'krwleads2026secure';
+
+  var params   = new URLSearchParams(window.location.search);
+  var campaign = (params.get('campaign') || '').toLowerCase().trim();
+  var pubSub   = params.get('sub') || params.get('pub') || '';
+  var websource= window.location.href;
+
+  var campaignConfig = null;
+
+  // ── Boot ──────────────────────────────────────────────
+  (async function init() {
+    if (!campaign) {
+      showError('No campaign specified. Add <code>?campaign=depo</code> to the URL.');
+      return;
+    }
+    try {
+      var res = await fetch(BASE_URL + '/campaigns/' + encodeURIComponent(campaign) + '/config');
+      if (!res.ok) throw new Error('Campaign not found: ' + campaign);
+      campaignConfig = await res.json();
+      buildForm(campaignConfig);
+    } catch(err) {
+      showError('Could not load campaign config: ' + err.message);
+    }
+  })();
+
+  function showError(msg) {
+    document.getElementById('loading-state').style.display = 'none';
+    var d = document.createElement('div');
+    d.className = 'error-state';
+    d.innerHTML = '✕ ' + msg;
+    document.getElementById('card-body').appendChild(d);
+  }
+
+  // ── Build form from campaign config ───────────────────
+  function buildForm(cfg) {
+    document.getElementById('form-title').textContent = cfg.name + ' Lead Submission';
+    document.getElementById('form-subtitle').textContent = 'Submit lead data via this form';
+    document.getElementById('instructions-btn').style.display = '';
+    document.getElementById('modal-title').textContent = '📋 ' + cfg.name + ' — Posting Instructions';
+
+    var required = cfg.required || ['firstName','lastName','email','phone'];
+    var optional = cfg.optional || [];
+
+    var LABELS = {
+      firstName:          'First Name',
+      lastName:           'Last Name',
+      email:              'Email',
+      phone:              'Cell Phone',
+      street:             'Street Address',
+      city:               'City',
+      state:              'State',
+      zip:                'Zip',
+      notes:              'Notes',
+      trustedFormCertUrl: 'TrustedForm Certificate URL',
+      jornayaLeadId:      'Jornaya Lead ID',
+      facebookLeadId:     'Facebook Lead ID',
+      publisherSub:       'Publisher Sub ID',
+    };
+
+    var PLACEHOLDERS = {
+      firstName:          'Jane',
+      lastName:           'Smith',
+      email:              'jane@gmail.com',
+      phone:              '3105550123',
+      street:             '123 Main St',
+      city:               'Los Angeles',
+      state:              '',
+      zip:                '90001',
+      notes:              'Any additional case notes...',
+      trustedFormCertUrl: 'https://cert.trustedform.com/...',
+      jornayaLeadId:      'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+      facebookLeadId:     '123456789',
+      publisherSub:       'auto-filled from URL',
+    };
+
+    var html = '<form id="lead-form" autocomplete="off" novalidate>';
+
+    // ── Required fields ──
+    html += '<div class="section-label">Claimant Information</div>';
+    html += '<div class="form-row">';
+    html += fieldHtml('firstName', LABELS, PLACEHOLDERS, required, 'text');
+    html += fieldHtml('lastName',  LABELS, PLACEHOLDERS, required, 'text');
+    html += '</div>';
+    html += '<div class="form-row">';
+    html += fieldHtml('email', LABELS, PLACEHOLDERS, required, 'email');
+    html += phoneFieldHtml(required);
+    html += '</div>';
+
+    // ── Address (optional) ──
+    var addrFields = ['street','city','state','zip'].filter(function(f){ return optional.indexOf(f) > -1; });
+    if (addrFields.length) {
+      html += '<div class="section-label">Address <span class="optional-badge">Optional</span></div>';
+      if (optional.indexOf('street') > -1) {
+        html += '<div class="form-group"><label>' + LABELS.street + '</label>';
+        html += '<input type="text" name="street" placeholder="' + PLACEHOLDERS.street + '"/></div>';
+      }
+      if (optional.indexOf('city') > -1 || optional.indexOf('state') > -1 || optional.indexOf('zip') > -1) {
+        html += '<div class="form-row-3">';
+        if (optional.indexOf('city') > -1) {
+          html += '<div class="form-group"><label>' + LABELS.city + '</label>';
+          html += '<input type="text" name="city" placeholder="' + PLACEHOLDERS.city + '"/></div>';
+        }
+        if (optional.indexOf('state') > -1) {
+          html += '<div class="form-group"><label>' + LABELS.state + '</label>' + stateSelect() + '</div>';
+        }
+        if (optional.indexOf('zip') > -1) {
+          html += '<div class="form-group"><label>' + LABELS.zip + '</label>';
+          html += '<input type="text" name="zip" placeholder="' + PLACEHOLDERS.zip + '" maxlength="5"/></div>';
+        }
+        html += '</div>';
+      }
+    }
+
+    // ── Compliance (optional) ──
+    var compFields = ['trustedFormCertUrl','jornayaLeadId'].filter(function(f){ return optional.indexOf(f) > -1; });
+    if (compFields.length) {
+      html += '<div class="section-label">Compliance <span class="optional-badge">Optional</span></div>';
+      compFields.forEach(function(f){
+        html += '<div class="form-group"><label>' + LABELS[f] + '</label>';
+        html += '<input type="text" name="' + f + '" placeholder="' + PLACEHOLDERS[f] + '"/></div>';
+      });
+    }
+
+    // ── Tracking (optional) ──
+    var trackFields = ['publisherSub','facebookLeadId'].filter(function(f){ return optional.indexOf(f) > -1; });
+    if (trackFields.length) {
+      html += '<div class="section-label">Tracking <span class="optional-badge">Optional</span></div>';
+      html += '<div class="form-row">';
+      trackFields.forEach(function(f){
+        var id = f === 'publisherSub' ? ' id="field-publisherSub"' : '';
+        html += '<div class="form-group"><label>' + LABELS[f] + '</label>';
+        html += '<input type="text" name="' + f + '"' + id + ' placeholder="' + PLACEHOLDERS[f] + '"/></div>';
+      });
+      html += '</div>';
+    }
+
+    // ── Notes (optional) ──
+    if (optional.indexOf('notes') > -1) {
+      html += '<div class="form-group"><label>' + LABELS.notes + '</label>';
+      html += '<textarea name="notes" rows="2" placeholder="' + PLACEHOLDERS.notes + '"></textarea></div>';
+    }
+
+    html += '<button type="submit" class="submit-btn" id="submit-btn">Submit Lead</button>';
+    html += '<div class="result" id="result"></div>';
+    html += '</form>';
+
+    document.getElementById('loading-state').style.display = 'none';
+    document.getElementById('card-body').innerHTML = html;
+
+    // Pre-fill sub from URL
+    if (pubSub) {
+      var sf = document.getElementById('field-publisherSub');
+      if (sf) sf.value = pubSub;
+    }
+
+    attachFormHandlers(required);
+  }
+
+  function fieldHtml(name, labels, placeholders, required, type) {
+    var isReq = required.indexOf(name) > -1;
+    var html = '<div class="form-group">';
+    html += '<label>' + labels[name] + (isReq ? ' <span class="req">*</span>' : '') + '</label>';
+    html += '<input type="' + type + '" name="' + name + '" placeholder="' + placeholders[name] + '"/>';
+    if (isReq) html += '<div class="field-error" id="err-' + name + '">' + labels[name] + ' is required</div>';
+    html += '</div>';
+    return html;
+  }
+
+  function phoneFieldHtml(required) {
+    var isReq = required.indexOf('phone') > -1;
+    var html = '<div class="form-group">';
+    html += '<label>Cell Phone' + (isReq ? ' <span class="req">*</span>' : '') + '</label>';
+    html += '<input type="tel" name="phone" placeholder="3105550123" maxlength="10"/>';
+    html += '<div class="note">10 digits, no dashes</div>';
+    if (isReq) html += '<div class="field-error" id="err-phone">10-digit phone is required</div>';
+    html += '</div>';
+    return html;
+  }
+
+  function stateSelect() {
+    var states = ['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID',
+      'IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT',
+      'NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
+      'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'];
+    var html = '<select name="state"><option value="">—</option>';
+    states.forEach(function(s){ html += '<option>' + s + '</option>'; });
+    html += '</select>';
+    return html;
+  }
+
+  // ── Form event handlers ───────────────────────────────
+  function attachFormHandlers(required) {
+    var form   = document.getElementById('lead-form');
+    var btn    = document.getElementById('submit-btn');
+    var result = document.getElementById('result');
+
+    // Phone: digits only
+    if (form.phone) {
+      form.phone.addEventListener('input', function(){
+        this.value = this.value.replace(/\D/g,'').slice(0,10);
+        clearErr('phone');
+      });
+    }
+
+    // Clear errors on type
+    ['firstName','lastName','email'].forEach(function(n){
+      var el = form.elements[n];
+      if (el) el.addEventListener('input', function(){ clearErr(n); });
+    });
+
+    function clearErr(name) {
+      var el  = form.elements[name];
+      var err = document.getElementById('err-' + name);
+      if (el)  el.classList.remove('invalid');
+      if (err) err.classList.remove('show');
+    }
+
+    function showErr(name, msg) {
+      var el  = form.elements[name];
+      var err = document.getElementById('err-' + name);
+      if (el)  el.classList.add('invalid');
+      if (err) { if (msg) err.textContent = msg; err.classList.add('show'); }
+    }
+
+    function validate() {
+      var ok = true;
+      form.querySelectorAll('.invalid').forEach(function(e){ e.classList.remove('invalid'); });
+      form.querySelectorAll('.field-error.show').forEach(function(e){ e.classList.remove('show'); });
+
+      if (required.indexOf('firstName') > -1 && !form.firstName.value.trim()) { showErr('firstName'); ok = false; }
+      if (required.indexOf('lastName')  > -1 && !form.lastName.value.trim())  { showErr('lastName');  ok = false; }
+
+      if (required.indexOf('email') > -1) {
+        var email = form.email.value.trim();
+        if (!email) { showErr('email', 'Email is required'); ok = false; }
+        else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showErr('email', 'Enter a valid email address'); ok = false; }
+      }
+
+      if (required.indexOf('phone') > -1) {
+        var phone = form.phone.value.replace(/\D/g,'');
+        if (phone.length < 10) { showErr('phone', 'Phone must be 10 digits'); ok = false; }
+      }
+
+      return ok;
+    }
+
+    form.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      if (!validate()) {
+        var first = form.querySelector('.invalid');
+        if (first) first.scrollIntoView({ behavior:'smooth', block:'center' });
+        return;
+      }
+
+      btn.disabled    = true;
+      btn.textContent = 'Submitting…';
+      result.style.display = 'none';
+
+      var data = {
+        firstName:          (form.firstName && form.firstName.value.trim())           || undefined,
+        lastName:           (form.lastName  && form.lastName.value.trim())            || undefined,
+        email:              (form.email     && form.email.value.trim())               || undefined,
+        phone:              (form.phone     && form.phone.value.replace(/\D/g,''))    || undefined,
+        street:             (form.street    && form.street.value.trim())              || undefined,
+        city:               (form.city      && form.city.value.trim())                || undefined,
+        state:              (form.state     && form.state.value)                      || undefined,
+        zip:                (form.zip       && form.zip.value.trim())                 || undefined,
+        notes:              (form.notes     && form.notes.value.trim())               || undefined,
+        trustedFormCertUrl: (form.trustedFormCertUrl && form.trustedFormCertUrl.value.trim()) || undefined,
+        jornayaLeadId:      (form.jornayaLeadId      && form.jornayaLeadId.value.trim())      || undefined,
+        facebookLeadId:     (form.facebookLeadId     && form.facebookLeadId.value.trim())     || undefined,
+        publisherSub:       pubSub || (form.publisherSub && form.publisherSub.value.trim())   || undefined,
+        websource:          websource,
+      };
+
+      // Strip undefined keys
+      Object.keys(data).forEach(function(k){ if (data[k] === undefined) delete data[k]; });
+
+      try {
+        var res  = await fetch(BASE_URL + '/lead/' + encodeURIComponent(campaign), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': 'krwleads2026secure' },
+          body:    JSON.stringify(data),
+        });
+        var resp = await res.json();
+        if (resp.status === 'received') {
+          result.className   = 'result success';
+          result.textContent = '✓ Lead accepted. Reference ID: ' + resp.leadId;
+          form.reset();
+          if (pubSub && document.getElementById('field-publisherSub'))
+            document.getElementById('field-publisherSub').value = pubSub;
+        } else {
+          result.className   = 'result error';
+          result.textContent = '✕ ' + (resp.reason || 'Submission failed. Check all required fields.');
+        }
+      } catch(err) {
+        result.className   = 'result error';
+        result.textContent = '✕ Connection error: ' + err.message;
+      }
+
+      result.style.display = 'block';
+      btn.disabled    = false;
+      btn.textContent = 'Submit Lead';
+    });
+  }
+
+  // ── Posting Instructions ──────────────────────────────
+  function showInstructions() {
+    if (!campaignConfig) return;
+    var cfg     = campaignConfig;
+    var sub     = pubSub || 'YOUR_SUB_ID';
+    var apiUrl  = BASE_URL + '/lead/' + cfg.slug;
+    var formUrl = window.location.origin + window.location.pathname + '?campaign=' + cfg.slug + '&sub=' + sub;
+    var line    = '─'.repeat(52);
+    var dline   = '='.repeat(52);
+
+    var txt =
+dline+'\n'+
+cfg.name.toUpperCase()+' — PUBLISHER POSTING INSTRUCTIONS\n'+
+dline+'\n\n'+
+'CAMPAIGN:      '+cfg.name+'\n'+
+'PUBLISHER ID:  '+sub+'\n'+
+'FORM URL:      '+formUrl+'\n\n'+
+line+'\n'+
+'API ENDPOINT (for programmatic posting)\n'+
+line+'\n\n'+
+'Method:   POST\n'+
+'URL:      '+apiUrl+'\n\n'+
+'Headers:\n'+
+'  Content-Type:  application/json\n'+
+'  x-api-key:     '+API_KEY+'\n\n'+
+line+'\n'+
+'REQUIRED FIELDS  (* must be included)\n'+
+line+'\n\n'+
+(cfg.required||[]).map(function(f){
+  var labels={firstName:'First Name',lastName:'Last Name',email:'Email Address',phone:'10-digit US phone (digits only)'};
+  return '  '+f+' *    string    '+(labels[f]||f);
+}).join('\n')+'\n\n'+
+line+'\n'+
+'OPTIONAL FIELDS\n'+
+line+'\n\n'+
+(cfg.optional||[]).map(function(f){
+  var labels={street:'Street address',city:'City',state:'2-letter state (e.g. CA)',zip:'5-digit zip code',
+    notes:'Case notes',trustedFormCertUrl:'TrustedForm cert URL',jornayaLeadId:'Jornaya LeadiD token',
+    facebookLeadId:'Facebook lead form ID',publisherSub:'Your sub ID / tracking tag'};
+  return '  '+f+'    string   '+(labels[f]||f);
+}).join('\n')+'\n\n'+
+line+'\n'+
+'EXAMPLE PAYLOAD\n'+
+line+'\n\n'+
+'{\n'+
+'  "firstName":    "Jane",\n'+
+'  "lastName":     "Smith",\n'+
+'  "email":        "jane@gmail.com",\n'+
+'  "phone":        "3105550123",\n'+
+'  "state":        "CA",\n'+
+'  "publisherSub": "'+sub+'"\n'+
+'}\n\n'+
+line+'\n'+
+'RESPONSES\n'+
+line+'\n\n'+
+'Accepted:  {"status":"received","leadId":"KRW-DEPO-123"}\n'+
+'Rejected:  {"status":"rejected","reason":"Missing: phone"}\n\n'+
+line+'\n'+
+'IMPORTANT NOTES\n'+
+line+'\n\n'+
+'* Phone: 10 digits only — strip all spaces, dashes, parentheses\n'+
+'* Save the leadId from each response for your tracking records\n'+
+'* You are responsible for TrustedForm / Jornaya data if required\n'+
+'* publisherSub is auto-appended when using the form URL above\n'+
+dline;
+
+    document.getElementById('instructions-text').textContent = txt;
+    document.getElementById('copy-btn').textContent = 'Copy to Clipboard';
+    document.getElementById('copy-btn').classList.remove('copied');
+    document.getElementById('instructions-modal').classList.add('open');
+  }
+
+  function closeInstructions() {
+    document.getElementById('instructions-modal').classList.remove('open');
+  }
+
+  function copyInstructions() {
+    var text = document.getElementById('instructions-text').textContent;
+    navigator.clipboard.writeText(text).then(function(){
+      var b = document.getElementById('copy-btn');
+      b.textContent = '✓ Copied!'; b.classList.add('copied');
+      setTimeout(function(){ b.textContent = 'Copy to Clipboard'; b.classList.remove('copied'); }, 2500);
+    }).catch(function(){
+      var ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
+      document.getElementById('copy-btn').textContent = '✓ Copied!';
+    });
+  }
+
+  document.getElementById('instructions-modal').addEventListener('click', function(e){
+    if (e.target === this) closeInstructions();
+  });
+</script>
+</body>
+</html>
