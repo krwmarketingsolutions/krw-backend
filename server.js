@@ -395,12 +395,12 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
     if (paid_date)      { sets.push(`paid_date=$${i++}`);      params.push(paid_date); }
     if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
     params.push(id);
-    await pool.query(`UPDATE calls SET ${sets.join(',')} WHERE id=$${i}`, params);
+    await pool.query(`UPDATE calls SET ${sets.join(',')} WHERE id=${i}`, params);
     res.json({ ok: true });
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-}
+});
 
 // ── PATCH /calls/:id/billable ──────────────────────────────
 // Toggle billable — called from invoice page mark unbillable button
