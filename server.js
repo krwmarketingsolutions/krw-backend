@@ -613,6 +613,75 @@ async function initCampaignsDB() {
 // ── GET /campaigns/:slug/config (public) ──────────────────────
 // Reads from DB first, falls back to hardcoded CAMPAIGNS config
 
+
+// ── POST /parse-spec ─────────────────────────────────────────
+// Receives raw file text from dashboard, sends to Anthropic API,
+// returns structured field list. Keeps API key server-side only.
+app.post('/parse-spec', requireKey, async (req, res) => {
+  const { content, fileName, context } = req.body;
+  if (!content) return res.status(400).json({ error: 'content required' });
+
+  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+  if (!ANTHROPIC_KEY) {
+    return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set in Railway environment variables' });
+  }
+
+  const systemPrompt =
+    'You are an expert lead management system analyst. Read buyer API specs and extract field requirements.\n\n' +
+    'Respond with ONLY valid JSON — no markdown, no explanation, no backticks.\n\n' +
+    'Return this exact structure:\n' +
+    '{\n' +
+    '  "campaignName": "detected campaign/buyer name",\n' +
+    '  "vertical": "detected vertical (Mass Tort, MVA, ACA, Final Expense, etc)",\n' +
+    '  "requiredFields": [{ "name": "camelCaseName", "label": "Human Label", "type": "text|email|tel|select|date|number|textarea", "description": "purpose" }],\n' +
+    '  "optionalFields": [{ "name": "camelCaseName", "label": "Human Label", "type": "text|email|tel|select|date|number|textarea", "description": "purpose" }],\n' +
+    '  "payoutInfo": "any payout/pricing info",\n' +
+    '  "qualificationNotes": "qualification requirements, state restrictions, caps, hours",\n' +
+    '  "endpoint": "any API endpoint URL found",\n' +
+    '  "rawSummary": "2-3 sentence plain English summary"\n' +
+    '}\n\n' +
+    'Rules:\n' +
+    '- firstName, lastName, email, phone are ALWAYS required minimum\n' +
+    '- Map variants: "first name"->firstName, "cell"->phone, "zip code"->zip\n' +
+    '- trustedFormCertUrl and jornayaLeadId go in optional unless explicitly required\n' +
+    '- publisherSub always goes in optional\n' +
+    '- Never duplicate fields\n' +
+    '- TRUE/Required next to a field = requiredFields\n' +
+    '- FALSE/Optional next to a field = optionalFields\n' +
+    'Context: ' + (context || 'buyer lead submission spec');
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type':            'application/json',
+        'x-api-key':               ANTHROPIC_KEY,
+        'anthropic-version':       '2023-06-01',
+      },
+      body: JSON.stringify({
+        model:      'claude-sonnet-4-20250514',
+        max_tokens: 1500,
+        system:     systemPrompt,
+        messages:   [{ role:'user', content: `File: ${fileName}\n\n${content.slice(0,12000)}` }],
+      }),
+    });
+
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message || 'Anthropic API error');
+
+    let text = (data.content || []).map(b => b.text || '').join('');
+    text = text.replace(/```json|```/g,'').trim();
+    const parsed = JSON.parse(text);
+
+    console.log(`✅ Spec parsed: ${fileName} — ${(parsed.requiredFields||[]).length} req, ${(parsed.optionalFields||[]).length} opt fields`);
+    res.json({ ok:true, result:parsed });
+
+  } catch(err) {
+    console.error('Parse spec error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /campaigns/:slug/config (public — no auth) ───────────
 app.get('/campaigns/:slug/config', async (req, res) => {
   const slug = req.params.slug.toLowerCase();
