@@ -592,74 +592,82 @@ app.get('/campaigns/:slug/config', (req, res) => {
 // ── POST /lead/:campaign ──────────────────────────────────────
 // Publishers post leads here. Validates, stores, forwards to buyer.
 app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
-  const slug = req.params.campaign.toLowerCase();
-  const cfg  = CAMPAIGNS[slug];
-  if (!cfg) return res.status(404).json({ status:'rejected', reason:`Unknown campaign: ${slug}` });
+  try {
+    const slug = req.params.campaign.toLowerCase();
+    const cfg  = CAMPAIGNS[slug];
+    if (!cfg) return res.status(404).json({ status:'rejected', reason:`Unknown campaign: ${slug}` });
 
-  const b = req.body || {};
+    const b = req.body || {};
 
-  // Validate required fields
-  const missing = cfg.required.filter(f => !b[f] || !String(b[f]).trim());
-  if (missing.length) {
-    return res.status(422).json({ status:'rejected', reason:`Missing required fields: ${missing.join(', ')}` });
+    // Validate required fields
+    const missing = cfg.required.filter(f => !b[f] || !String(b[f]).trim());
+    if (missing.length) {
+      return res.status(422).json({ status:'rejected', reason:`Missing required fields: ${missing.join(', ')}` });
+    }
+
+    // Basic email validation
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email)) {
+      return res.status(422).json({ status:'rejected', reason:'Invalid email format' });
+    }
+
+    // Phone: strip non-digits, require exactly 10
+    const phone = String(b.phone).replace(/\D/g,'');
+    if (phone.length !== 10) {
+      return res.status(422).json({ status:'rejected', reason:'Phone must be 10 digits' });
+    }
+
+    // Build clean lead record
+    const lead = {
+      campaign:          slug,
+      vertical:          cfg.vertical,
+      status:            'received',
+      first_name:        String(b.firstName||'').trim(),
+      last_name:         String(b.lastName ||'').trim(),
+      email:             String(b.email    ||'').trim().toLowerCase(),
+      phone:             phone,
+      street:            b.street    || null,
+      city:              b.city      || null,
+      state:             b.state     || null,
+      zip:               b.zip       || null,
+      notes:             b.notes     || null,
+      trusted_form_url:  b.trustedFormCertUrl || null,
+      jornaya_id:        b.jornayaLeadId      || null,
+      facebook_lead_id:  b.facebookLeadId     || null,
+      publisher_sub:     b.publisherSub       || null,
+      websource:         b.websource || cfg.websource,
+      raw:               JSON.stringify(b),
+    };
+
+    // Insert into DB
+    const ins = await pool.query(`
+      INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
+        street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
+        publisher_sub,websource,raw)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+      RETURNING id
+    `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
+        lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
+        lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
+        lead.publisher_sub,lead.websource,lead.raw]);
+
+    const leadId = ins.rows[0].id;
+    const leadRef = `KRW-${slug.toUpperCase()}-${leadId}`;
+
+    // Respond to publisher immediately — don't make them wait on Apex
+    res.json({ status:'received', leadId: leadRef, message:'Lead accepted' });
+
+    // Forward to buyer's Apex endpoint in background
+    forwardToApex(leadId, lead, cfg).catch(console.error);
+
+  } catch (err) {
+    console.error('Lead intake error:', err.message);
+    res.status(500).json({ status:'rejected', reason:'Internal server error' });
   }
-
-  // Basic email validation
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email)) {
-    return res.status(422).json({ status:'rejected', reason:'Invalid email format' });
-  }
-
-  // Phone: strip non-digits, require 10
-  const phone = String(b.phone).replace(/\D/g,'');
-  if (phone.length < 10) {
-    return res.status(422).json({ status:'rejected', reason:'Phone must be 10 digits' });
-  }
-
-  // Build clean lead record
-  const lead = {
-    campaign:          slug,
-    vertical:          cfg.vertical,
-    status:            'received',
-    first_name:        String(b.firstName||'').trim(),
-    last_name:         String(b.lastName ||'').trim(),
-    email:             String(b.email    ||'').trim().toLowerCase(),
-    phone:             phone,
-    street:            b.street    || null,
-    city:              b.city      || null,
-    state:             b.state     || null,
-    zip:               b.zip       || null,
-    notes:             b.notes     || null,
-    trusted_form_url:  b.trustedFormCertUrl || null,
-    jornaya_id:        b.jornayaLeadId      || null,
-    facebook_lead_id:  b.facebookLeadId     || null,
-    publisher_sub:     b.publisherSub       || null,
-    websource:         b.websource || cfg.websource,
-    raw:               JSON.stringify(b),
-  };
-
-  // Insert into DB
-  const ins = await pool.query(`
-    INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
-      street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
-      publisher_sub,websource,raw)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-    RETURNING id
-  `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
-      lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
-      lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
-      lead.publisher_sub,lead.websource,lead.raw]);
-
-  const leadId = ins.rows[0].id;
-
-  // Respond to publisher immediately — don't make them wait on Apex
-  res.json({ status:'received', leadId:`KRW-DEPO-${leadId}`, message:'Lead accepted' });
-
-  // Forward to buyer's Apex endpoint in background
-  forwardToApex(leadId, lead, cfg).catch(console.error);
 });
 
 // ── Forward to Apex buyer endpoint ───────────────────────────
 async function forwardToApex(leadId, lead, cfg) {
+  const leadRef = `KRW-${lead.campaign.toUpperCase()}-${leadId}`;
   try {
     await pool.query(`UPDATE leads SET status='forwarding' WHERE id=$1`, [leadId]);
 
@@ -674,7 +682,7 @@ async function forwardToApex(leadId, lead, cfg) {
       zip:       lead.zip,
       notes:     lead.notes,
       meta: {
-        id:               `KRW-DEPO-${leadId}`,
+        id:               leadRef,
         Timestamp:        new Date().toISOString(),
         createDt:         new Date().toISOString(),
         claimant:         `${lead.first_name} ${lead.last_name}`,
@@ -697,20 +705,20 @@ async function forwardToApex(leadId, lead, cfg) {
         `UPDATE leads SET status='forwarded', buyer_status='Success', buyer_intake_id=$1 WHERE id=$2`,
         [String(data.ids?.[0]||''), leadId]
       );
-      console.log(`✅ Lead KRW-DEPO-${leadId} forwarded to Apex. Buyer ID: ${data.ids?.[0]}`);
+      console.log(`✅ Lead ${leadRef} forwarded to Apex. Buyer ID: ${data.ids?.[0]}`);
     } else {
       await pool.query(
         `UPDATE leads SET status='buyer_rejected', buyer_status='Failed', buyer_error=$1 WHERE id=$2`,
         [data.statusDetail||'Unknown error', leadId]
       );
-      console.log(`⚠️  Lead KRW-DEPO-${leadId} rejected by buyer: ${data.statusDetail}`);
+      console.log(`⚠️  Lead ${leadRef} rejected by buyer: ${data.statusDetail}`);
     }
   } catch (err) {
     await pool.query(
       `UPDATE leads SET status='forward_failed', buyer_error=$1 WHERE id=$2`,
       [err.message, leadId]
     );
-    console.error(`❌ Lead KRW-DEPO-${leadId} forward failed: ${err.message}`);
+    console.error(`❌ Lead ${leadRef} forward failed: ${err.message}`);
   }
 }
 
