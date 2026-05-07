@@ -1,3 +1,10 @@
+// ══════════════════════════════════════════════════════
+// FILE: server.js
+// UPLOAD TO: GitHub repo "krw-backend" (krwmarketingsolutions/krw-backend)
+// PURPOSE: Railway backend — all API endpoints
+// DO NOT upload to the "forms" or "depo" repos
+// ══════════════════════════════════════════════════════
+
 // KRW Marketing Solutions — Postback Receiver v3
 // Invoice-ready schema. Handles existing DB gracefully.
 
@@ -393,8 +400,7 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
-
+}
 
 // ── PATCH /calls/:id/billable ──────────────────────────────
 // Toggle billable — called from invoice page mark unbillable button
@@ -410,7 +416,7 @@ app.patch('/calls/:id/billable', requireKey, async (req, res) => {
   } catch(err) {
     res.status(500).json({ error: err.message });
   }
-});
+}););
 
 
 // ── POST /send-invoice ─────────────────────────────────────────────
@@ -496,12 +502,20 @@ const CAMPAIGNS = {
     name:        'DEPO — Lead Tree (WTC)',
     vertical:    'Mass Tort - Depo',
     apexEndpoint:'https://apex-services-nbd7z6aa7a-uc.a.run.app/intake/depo/depo/zapier/tuell/submit',
-    websource:   'https://krwmarketing.github.io/depo',
+    websource:   'https://krwmarketingsolutions.github.io/forms',
     required:    ['firstName','lastName','email','phone'],
     optional:    ['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','facebookLeadId','publisherSub'],
+    fieldLabels: {
+      firstName: 'First Name', lastName: 'Last Name',
+      email: 'Email Address', phone: 'Cell Phone',
+      street: 'Street Address', city: 'City', state: 'State', zip: 'Zip Code',
+      notes: 'Notes', trustedFormCertUrl: 'TrustedForm Certificate URL',
+      jornayaLeadId: 'Jornaya Lead ID', facebookLeadId: 'Facebook Lead ID',
+      publisherSub: 'Publisher Sub ID',
+    },
   },
-  // Add more campaigns here later:
-  // mva: { name:'MVA', vertical:'MVA', apexEndpoint:'...', required:[...] },
+  // Add more campaigns here — copy the depo block and update:
+  // mva: { name:'MVA', vertical:'MVA', apexEndpoint:'...', required:[...], optional:[...], fieldLabels:{} },
 };
 
 // ── DB init — create leads + campaigns tables ─────────────────
@@ -547,12 +561,33 @@ async function initLeadsDB() {
 // ── Lead API key auth ─────────────────────────────────────────
 function requireLeadKey(req, res, next) {
   const key = (req.headers['x-api-key'] || req.query.api_key || '').trim();
-  const exp = (process.env.LEAD_API_KEY || process.env.API_KEY || '').trim();
-  if (!exp || key !== exp) {
+  const exp = (process.env.LEAD_API_KEY || '').trim();
+  if (!exp) {
+    return res.status(500).json({ status:'rejected', reason:'LEAD_API_KEY not configured on server' });
+  }
+  if (key !== exp) {
     return res.status(401).json({ status:'rejected', reason:'Invalid API key' });
   }
   next();
 }
+
+// ── GET /campaigns/:slug/config ───────────────────────────────
+// Public — no auth. Returns form config for the universal form page.
+// Never exposes buyer endpoint or internal details.
+app.get('/campaigns/:slug/config', (req, res) => {
+  const slug = req.params.slug.toLowerCase();
+  const cfg  = CAMPAIGNS[slug];
+  if (!cfg) return res.status(404).json({ error: `Unknown campaign: ${slug}` });
+  res.json({
+    ok:       true,
+    slug:     slug,
+    name:     cfg.name,
+    vertical: cfg.vertical,
+    required: cfg.required,
+    optional: cfg.optional,
+    websource: cfg.websource,
+  });
+});
 
 // ── POST /lead/:campaign ──────────────────────────────────────
 // Publishers post leads here. Validates, stores, forwards to buyer.
@@ -603,23 +638,18 @@ app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
   };
 
   // Insert into DB
-  let leadId;
-  try {
-    const ins = await pool.query(`
-      INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
-        street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
-        publisher_sub,websource,raw)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-      RETURNING id
-    `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
-        lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
-        lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
-        lead.publisher_sub,lead.websource,lead.raw]);
-    leadId = ins.rows[0].id;
-  } catch (dbErr) {
-    console.error('❌ DB insert failed for lead:', dbErr.message);
-    return res.status(500).json({ status:'error', reason:'Failed to store lead' });
-  }
+  const ins = await pool.query(`
+    INSERT INTO leads (campaign,vertical,status,first_name,last_name,email,phone,
+      street,city,state,zip,notes,trusted_form_url,jornaya_id,facebook_lead_id,
+      publisher_sub,websource,raw)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+    RETURNING id
+  `, [lead.campaign,lead.vertical,lead.status,lead.first_name,lead.last_name,
+      lead.email,lead.phone,lead.street,lead.city,lead.state,lead.zip,lead.notes,
+      lead.trusted_form_url,lead.jornaya_id,lead.facebook_lead_id,
+      lead.publisher_sub,lead.websource,lead.raw]);
+
+  const leadId = ins.rows[0].id;
 
   // Respond to publisher immediately — don't make them wait on Apex
   res.json({ status:'received', leadId:`KRW-DEPO-${leadId}`, message:'Lead accepted' });
@@ -643,7 +673,6 @@ async function forwardToApex(leadId, lead, cfg) {
       state:     lead.state,
       zip:       lead.zip,
       notes:     lead.notes,
-      websource: lead.websource,
       meta: {
         id:               `KRW-DEPO-${leadId}`,
         Timestamp:        new Date().toISOString(),
@@ -661,36 +690,20 @@ async function forwardToApex(leadId, lead, cfg) {
       body:    JSON.stringify(payload),
     });
 
-    const rawText = await resp.text();
-    console.log(`📨 Apex raw response for KRW-DEPO-${leadId} (HTTP ${resp.status}): ${rawText}`);
-    console.log(`📋 Apex websource sent: ${lead.websource}`);
+    const data = await resp.json();
 
-    let data;
-    try {
-      data = JSON.parse(rawText);
-    } catch (parseErr) {
-      console.error(`❌ Lead KRW-DEPO-${leadId} — Apex returned non-JSON: ${rawText}`);
-      await pool.query(
-        `UPDATE leads SET status='forward_failed', buyer_error=$1 WHERE id=$2`,
-        [`Non-JSON response: ${rawText}`, leadId]
-      );
-      return;
-    }
-
-    if (data.status === 'Ok') {
+    if (data.status === 'Success') {
       await pool.query(
         `UPDATE leads SET status='forwarded', buyer_status='Success', buyer_intake_id=$1 WHERE id=$2`,
         [String(data.ids?.[0]||''), leadId]
       );
       console.log(`✅ Lead KRW-DEPO-${leadId} forwarded to Apex. Buyer ID: ${data.ids?.[0]}`);
     } else {
-      const buyerError = data.statusDetail || data.message || data.error || JSON.stringify(data);
       await pool.query(
         `UPDATE leads SET status='buyer_rejected', buyer_status='Failed', buyer_error=$1 WHERE id=$2`,
-        [buyerError, leadId]
+        [data.statusDetail||'Unknown error', leadId]
       );
-      console.log(`⚠️  Lead KRW-DEPO-${leadId} rejected by buyer: ${buyerError}`);
-      console.log(`⚠️  Full Apex rejection payload: ${JSON.stringify(data)}`);
+      console.log(`⚠️  Lead KRW-DEPO-${leadId} rejected by buyer: ${data.statusDetail}`);
     }
   } catch (err) {
     await pool.query(
