@@ -706,7 +706,7 @@ async function forwardToApex(leadId, lead, cfg) {
 
     console.log('Apex response:', JSON.stringify(data, null, 2));
 
-    if (data.status === 'Success') {
+    if (data.status === 'Ok' || data.status === 'Success') {
       await pool.query(
         `UPDATE leads SET status='forwarded', buyer_status='Success', buyer_intake_id=$1 WHERE id=$2`,
         [String(data.ids?.[0]||''), leadId]
