@@ -470,6 +470,65 @@ app.post('/send-invoice', requireKey, async (req, res) => {
   }
 });
 
+// ── POST /parse-spec ──────────────────────────────────────────
+// Parse buyer API specs using Claude to extract field requirements
+app.post('/parse-spec', requireKey, async (req, res) => {
+  try {
+    const { content, fileName, context } = req.body;
+    if (!content) return res.status(400).json({ error: 'content required' });
+
+    const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+    if (!ANTHROPIC_KEY) {
+      return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set' });
+    }
+
+    const system = [
+      'You are an expert lead management system analyst.',
+      'Read buyer API specs and extract all field requirements.',
+      'Respond with ONLY valid JSON. No markdown, no backticks, no explanation.',
+      'Return this exact JSON structure:',
+      '{ "campaignName": "detected name", "vertical": "detected vertical", "requiredFields": [{"name":"camelCase","label":"Human Label","type":"text"}], "optionalFields": [{"name":"camelCase","label":"Human Label","type":"text"}], "payoutInfo": "any payout info", "qualificationNotes": "requirements and restrictions", "endpoint": "any API URL found", "rawSummary": "2-3 sentence summary" }',
+      'Rules: firstName lastName email phone are ALWAYS required minimum.',
+      'Map: first name to firstName, cell to phone, zip code to zip.',
+      'trustedFormCertUrl and jornayaLeadId go in optional unless explicitly required.',
+      'publisherSub always goes in optional.',
+      'Never duplicate fields.',
+      'TRUE or Required next to a field means requiredFields.',
+      'FALSE or Optional next to a field means optionalFields.',
+      'Context: ' + (context || 'buyer lead submission spec'),
+    ].join(' ');
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1500,
+        system: system,
+        messages: [{ role: 'user', content: 'File: ' + fileName + '\n\n' + content.slice(0, 12000) }],
+      }),
+    });
+
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message || 'Anthropic error');
+
+    let text = (data.content || []).map(b => b.text || '').join('');
+    text = text.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(text);
+
+    console.log('Spec parsed: ' + fileName + ' - ' + (parsed.requiredFields||[]).length + ' required, ' + (parsed.optionalFields||[]).length + ' optional fields');
+    res.json({ ok: true, result: parsed });
+
+  } catch(err) {
+    console.error('parse-spec error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /dashboard — serves the dashboard HTML file ─────────────
 app.get('/dashboard', (req, res) => {
   const path = require('path');
