@@ -14,7 +14,7 @@ const app     = express();
 app.use(express.json());
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key, x-setup-key');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -37,6 +37,13 @@ function requireLeadKey(req, res, next) {
   // Accept either the lead key or the main key
   const valid = [API_KEY, LEAD_KEY].filter(Boolean);
   if (!valid.includes(key)) return res.status(401).json({ status: 'rejected', reason: 'Invalid API key' });
+  next();
+}
+
+function requireSetupKey(req, res, next) {
+  const SETUP_KEY = process.env.SETUP_KEY;
+  const key = (req.headers['x-setup-key'] || '').trim();
+  if (!SETUP_KEY || key !== SETUP_KEY) return res.status(401).json({ error: 'Unauthorized' });
   next();
 }
 
@@ -120,6 +127,40 @@ async function initLeadsDB() {
   `);
   console.log('✅ Leads table ready');
 }
+
+// ══════════════════════════════════════════════════════
+//  SETUP ENDPOINTS (protected by x-setup-key)
+// ══════════════════════════════════════════════════════
+
+// POST /setup/campaign — insert or update a campaign row
+// Required header: x-setup-key: <SETUP_KEY env var>
+// Body: { slug, name, active?, apex_endpoint?, config? }
+app.post('/setup/campaign', requireSetupKey, async (req, res) => {
+  try {
+    const { slug, name, active = true, apex_endpoint = null, config = {} } = req.body || {};
+
+    if (!slug || !name) {
+      return res.status(400).json({ error: 'slug and name are required' });
+    }
+
+    const r = await pool.query(
+      `INSERT INTO campaigns (slug, name, active, apex_endpoint, config)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (slug) DO UPDATE
+         SET name          = EXCLUDED.name,
+             active        = EXCLUDED.active,
+             apex_endpoint = EXCLUDED.apex_endpoint,
+             config        = EXCLUDED.config
+       RETURNING id, slug, name, active, apex_endpoint, config, created_at`,
+      [slug.toLowerCase(), name, active, apex_endpoint, JSON.stringify(config)]
+    );
+
+    res.json({ ok: true, campaign: r.rows[0] });
+  } catch (err) {
+    console.error('Setup campaign error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ══════════════════════════════════════════════════════
 //  CAMPAIGN CONFIG (public)
