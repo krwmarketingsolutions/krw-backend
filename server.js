@@ -14,7 +14,7 @@ const app     = express();
 app.use(express.json());
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key, x-setup-key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -73,25 +73,6 @@ async function initDB() {
   console.log('✅ DB ready');
 }
 
-async function initCampaignsDB() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS campaigns (
-      id            SERIAL PRIMARY KEY,
-      slug          TEXT UNIQUE NOT NULL,
-      name          TEXT NOT NULL,
-      active        BOOLEAN DEFAULT true,
-      apex_endpoint TEXT,
-      config        JSONB DEFAULT '{}'::jsonb,
-      created_at    TIMESTAMPTZ DEFAULT NOW()
-    );
-  `);
-  await pool.query(`
-    ALTER TABLE campaigns
-      ADD COLUMN IF NOT EXISTS config JSONB DEFAULT '{}'::jsonb;
-  `);
-  console.log('✅ Campaigns table ready');
-}
-
 async function initLeadsDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS leads (
@@ -122,85 +103,8 @@ async function initLeadsDB() {
     CREATE INDEX IF NOT EXISTS idx_leads_campaign ON leads (campaign);
     CREATE INDEX IF NOT EXISTS idx_leads_received ON leads (received_at);
   `);
-  await pool.query(`
-    ALTER TABLE leads
-      ADD COLUMN IF NOT EXISTS zapier_status TEXT DEFAULT NULL;
-  `);
   console.log('✅ Leads table ready');
 }
-
-// ══════════════════════════════════════════════════════
-//  CAMPAIGN CONFIG (public)
-// ══════════════════════════════════════════════════════
-
-// GET /campaigns/:slug/config — public, no auth required
-app.get('/campaigns/:slug/config', async (req, res) => {
-  try {
-    const slug = req.params.slug.toLowerCase();
-    const r = await pool.query(
-      `SELECT slug, name, config FROM campaigns WHERE slug=$1 AND active=true`,
-      [slug]
-    );
-    if (!r.rows.length) {
-      return res.status(404).json({ error: 'Campaign not found', slug });
-    }
-    const row = r.rows[0];
-    res.json({
-      slug:   row.slug,
-      name:   row.name,
-      config: row.config || {},
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ══════════════════════════════════════════════════════
-//  SETUP ENDPOINTS (one-time data seeding)
-// ══════════════════════════════════════════════════════
-
-// POST /setup/campaigns — insert seed campaigns (requires x-setup-key header)
-app.post('/setup/campaigns', async (req, res) => {
-  const setupKey = process.env.SETUP_KEY;
-  const provided = (req.headers['x-setup-key'] || '').trim();
-  if (!setupKey || provided !== setupKey) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  try {
-    // Check if depo already exists
-    const existing = await pool.query(
-      `SELECT id FROM campaigns WHERE slug = $1`,
-      ['depo']
-    );
-    if (existing.rows.length) {
-      return res.status(200).json({ error: 'Campaign already exists' });
-    }
-
-    const config = {
-      vertical: 'depo',
-      websource: 'https://krwmarketingsolutions.github.io/forms',
-      requiredFields: ['firstName', 'lastName', 'email', 'phone'],
-      optionalFields: ['street', 'city', 'state', 'zip', 'notes', 'trustedFormCertUrl', 'jornayaLeadId', 'publisherSub'],
-    };
-
-    await pool.query(
-      `INSERT INTO campaigns (slug, name, active, apex_endpoint, config)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [
-        'depo',
-        'DEPO — Lead Tree (WTC)',
-        true,
-        'https://apex-services-nbd7z6aa7a-uc.a.run.app/intake/depo/depo/zapier/tuell/submit',
-        JSON.stringify(config),
-      ]
-    );
-
-    res.json({ status: 'ok', message: 'Campaign inserted' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // ══════════════════════════════════════════════════════
 //  LEAD INTAKE
@@ -324,18 +228,14 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
 
     const result = await resp.json().catch(() => ({ status: resp.status }));
 
-    console.log(`🔍 Lead ${leadRef} → Apex response: HTTP ${resp.status} body: ${JSON.stringify(result)}`);
-
-    if (resp.ok) {
-      // HTTP 200-299 = success
-      const buyerId = String(result.ids?.[0] || result.id || result.leadId || result.intake_id || '');
+    if (resp.ok && (result.status === 'Success' || result.status === 'success' || result.ok)) {
+      const buyerId = String(result.ids?.[0] || result.id || result.leadId || '');
       await pool.query(
         `UPDATE leads SET status='forwarded', buyer_intake_id=$1, buyer_error=null WHERE id=$2`,
         [buyerId, leadId]
       );
-      console.log(`✅ Lead ${leadRef} → buyer accepted. Response: ${JSON.stringify(result)}`);
+      console.log(`✅ Lead ${leadRef} → buyer accepted. Buyer ID: ${buyerId}`);
     } else {
-      // HTTP 4xx or 5xx = rejection
       const errMsg = result.statusDetail || result.error || result.message || `HTTP ${resp.status}`;
       await pool.query(
         `UPDATE leads SET status='buyer_rejected', buyer_error=$1 WHERE id=$2`,
@@ -532,10 +432,141 @@ app.get('/dashboard', (req, res) => {
 app.get('/health', (req, res) => res.json({ ok:true, status:'healthy' }));
 app.get('/debug',  (req, res) => res.json({ api_key_set:!!process.env.API_KEY, lead_key_set:!!process.env.LEAD_API_KEY, db_url_set:!!process.env.DATABASE_URL }));
 
+
+// ══════════════════════════════════════════════════════
+//  CAMPAIGNS — create/edit from dashboard, no env vars needed
+// ══════════════════════════════════════════════════════
+
+async function initCampaignsDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id               SERIAL PRIMARY KEY,
+      slug             TEXT UNIQUE NOT NULL,
+      name             TEXT NOT NULL,
+      vertical         TEXT,
+      apex_endpoint    TEXT,
+      payout           NUMERIC(10,2) DEFAULT 0,
+      buyer_notes      TEXT,
+      required_fields  JSONB DEFAULT '["firstName","lastName","email","phone"]',
+      optional_fields  JSONB DEFAULT '["state","zip","notes","trustedFormCertUrl","jornayaLeadId","publisherSub"]',
+      field_labels     JSONB DEFAULT '{}',
+      description      TEXT,
+      active           BOOLEAN DEFAULT true,
+      created_at       TIMESTAMPTZ DEFAULT NOW(),
+      updated_at       TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  // Seed DEPO if not exists
+  const existing = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['depo']);
+  if (!existing.rows.length) {
+    await pool.query(`
+      INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields)
+      VALUES ($1,$2,$3,$4,$5,$6)
+    `, [
+      'depo',
+      'DEPO — Lead Tree (WTC)',
+      'Mass Tort - Depo',
+      process.env.BUYER_ENDPOINT_DEPO || '',
+      JSON.stringify(['firstName','lastName','email','phone']),
+      JSON.stringify(['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','facebookLeadId','publisherSub']),
+    ]);
+    console.log('✅ DEPO campaign seeded');
+  }
+  console.log('✅ Campaigns table ready');
+}
+
+// GET /campaigns — list all (dashboard)
+app.get('/campaigns', requireKey, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT * FROM campaigns WHERE active=true ORDER BY created_at ASC'
+    );
+    res.json({ ok: true, campaigns: r.rows });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /campaigns/:slug/config — public, used by publisher form
+app.get('/campaigns/:slug/config', async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT * FROM campaigns WHERE slug=$1 AND active=true',
+      [req.params.slug.toLowerCase()]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Campaign not found: '+req.params.slug });
+    const row = r.rows[0];
+    res.json({
+      ok:          true,
+      slug:        row.slug,
+      name:        row.name,
+      vertical:    row.vertical || '',
+      description: row.description || '',
+      required:    row.required_fields,
+      optional:    row.optional_fields,
+      fieldLabels: row.field_labels || {},
+    });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /campaigns — create or update (upsert)
+app.post('/campaigns', requireKey, async (req, res) => {
+  try {
+    const {
+      slug, name, vertical, apex_endpoint, payout,
+      buyer_notes, required_fields, optional_fields,
+      field_labels, description
+    } = req.body;
+    if (!slug || !name) return res.status(400).json({ error: 'slug and name required' });
+    const r = await pool.query(`
+      INSERT INTO campaigns
+        (slug, name, vertical, apex_endpoint, payout, buyer_notes,
+         required_fields, optional_fields, field_labels, description)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      ON CONFLICT (slug) DO UPDATE SET
+        name=$2, vertical=$3, apex_endpoint=$4, payout=$5,
+        buyer_notes=$6, required_fields=$7, optional_fields=$8,
+        field_labels=$9, description=$10, updated_at=NOW()
+      RETURNING *
+    `, [
+      slug.toLowerCase(), name, vertical||'', apex_endpoint||'',
+      parseFloat(payout)||0, buyer_notes||null,
+      JSON.stringify(required_fields||['firstName','lastName','email','phone']),
+      JSON.stringify(optional_fields||[]),
+      JSON.stringify(field_labels||{}),
+      description||null,
+    ]);
+    res.json({ ok: true, campaign: r.rows[0] });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// PATCH /campaigns/:slug — partial update
+app.patch('/campaigns/:slug', requireKey, async (req, res) => {
+  try {
+    const slug = req.params.slug.toLowerCase();
+    const allowed = ['name','vertical','apex_endpoint','payout','buyer_notes',
+                     'required_fields','optional_fields','field_labels','description','active'];
+    const sets = [], params = [];
+    let i = 1;
+    allowed.forEach(function(col) {
+      if (req.body[col] !== undefined) {
+        sets.push(col+'=$'+i++);
+        const val = req.body[col];
+        params.push(['required_fields','optional_fields','field_labels'].includes(col)
+          ? JSON.stringify(val) : val);
+      }
+    });
+    if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
+    sets.push('updated_at=NOW()');
+    params.push(slug);
+    await pool.query('UPDATE campaigns SET '+sets.join(',')+" WHERE slug=$"+i, params);
+    res.json({ ok: true });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+
 // ── Start ─────────────────────────────────────────────
 initDB()
-  .then(() => initCampaignsDB())
   .then(() => initLeadsDB())
+  .then(() => initCampaignsDB())
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
