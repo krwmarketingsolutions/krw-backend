@@ -73,6 +73,21 @@ async function initDB() {
   console.log('✅ DB ready');
 }
 
+async function initCampaignsDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id            SERIAL PRIMARY KEY,
+      slug          TEXT UNIQUE NOT NULL,
+      name          TEXT NOT NULL,
+      active        BOOLEAN DEFAULT true,
+      apex_endpoint TEXT,
+      config        JSONB DEFAULT '{}'::jsonb,
+      created_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  console.log('✅ Campaigns table ready');
+}
+
 async function initLeadsDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS leads (
@@ -105,6 +120,32 @@ async function initLeadsDB() {
   `);
   console.log('✅ Leads table ready');
 }
+
+// ══════════════════════════════════════════════════════
+//  CAMPAIGN CONFIG (public)
+// ══════════════════════════════════════════════════════
+
+// GET /campaigns/:slug/config — public, no auth required
+app.get('/campaigns/:slug/config', async (req, res) => {
+  try {
+    const slug = req.params.slug.toLowerCase();
+    const r = await pool.query(
+      `SELECT slug, name, config FROM campaigns WHERE slug=$1 AND active=true`,
+      [slug]
+    );
+    if (!r.rows.length) {
+      return res.status(404).json({ error: 'Campaign not found', slug });
+    }
+    const row = r.rows[0];
+    res.json({
+      slug:   row.slug,
+      name:   row.name,
+      config: row.config || {},
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ══════════════════════════════════════════════════════
 //  LEAD INTAKE
@@ -434,6 +475,7 @@ app.get('/debug',  (req, res) => res.json({ api_key_set:!!process.env.API_KEY, l
 
 // ── Start ─────────────────────────────────────────────
 initDB()
+  .then(() => initCampaignsDB())
   .then(() => initLeadsDB())
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {

@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Loading…</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --brand:      #1a3a5c;
+    --brand-dark: #122840;
+    --accent:     #2d6a4f;
+    --accent-dk:  #1b4332;
+    --red:        #dc2626;
+    --red-bg:     #fef2f2;
+    --green-bg:   #d1fae5;
+    --green-text: #065f46;
+    --green-bdr:  #6ee7b7;
+    --err-bg:     #fee2e2;
+    --err-text:   #991b1b;
+    --err-bdr:    #fca5a5;
+    --border:     #e2e8f0;
+    --muted:      #64748b;
+    --bg:         #f1f5f9;
+    --surface:    #ffffff;
+    --radius:     8px;
+    --radius-sm:  5px;
+  }
+
+  body {
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    background: var(--bg);
+    min-height: 100vh;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 2rem 1rem 3rem;
+    color: #1e293b;
+  }
+
+  /* ── Card ── */
+  .card {
+    background: var(--surface);
+    border-radius: var(--radius);
+    box-shadow: 0 4px 24px rgba(0,0,0,.10);
+    width: 100%;
+    max-width: 560px;
+    overflow: hidden;
+  }
+
+  .card-hdr {
+    background: var(--brand);
+    color: white;
+    padding: 1.4rem 1.75rem;
+  }
+  .card-hdr h1 {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -.01em;
+    margin-bottom: 3px;
+  }
+  .card-hdr p {
+    font-size: 12px;
+    opacity: .65;
+  }
+
+  .card-body { padding: 1.75rem; }
+
+  /* ── Spinner ── */
+  .spinner-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem 1rem;
+    gap: 14px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid var(--border);
+    border-top-color: var(--brand);
+    border-radius: 50%;
+    animation: spin .75s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Error / Success states ── */
+  .state-msg {
+    padding: 2rem 1.75rem;
+    text-align: center;
+  }
+  .state-msg .icon { font-size: 40px; margin-bottom: 12px; }
+  .state-msg h2 { font-size: 17px; margin-bottom: 6px; }
+  .state-msg p  { font-size: 13px; color: var(--muted); line-height: 1.6; }
+  .state-msg.success h2 { color: var(--green-text); }
+  .state-msg.error   h2 { color: var(--err-text); }
+
+  /* ── Form sections ── */
+  .section-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--muted);
+    margin: 22px 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .section-label:first-child { margin-top: 0; }
+  .optional-badge {
+    font-size: 9px;
+    background: #f1f5f9;
+    color: #94a3b8;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-weight: normal;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+
+  /* ── Form groups ── */
+  .form-group { margin-bottom: 14px; }
+  .form-group label {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: #475569;
+    margin-bottom: 5px;
+  }
+  .req { color: var(--red); font-size: 14px; line-height: 1; font-weight: 700; }
+
+  .form-group input,
+  .form-group select,
+  .form-group textarea {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    transition: border .15s, box-shadow .15s;
+    background: #f8fafc;
+    color: #1e293b;
+  }
+  .form-group input:focus,
+  .form-group select:focus,
+  .form-group textarea:focus {
+    border-color: var(--accent);
+    background: white;
+    box-shadow: 0 0 0 3px rgba(45,106,79,.09);
+  }
+  .form-group input.invalid,
+  .form-group select.invalid {
+    border-color: var(--red) !important;
+    background: var(--red-bg) !important;
+  }
+  .field-error {
+    font-size: 11px;
+    color: var(--red);
+    margin-top: 3px;
+    display: none;
+  }
+  .field-error.show { display: block; }
+  .field-note {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+  }
+
+  /* ── Grid layouts ── */
+  .form-row   { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .form-row-3 { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; }
+
+  /* ── Submit button ── */
+  .submit-btn {
+    width: 100%;
+    padding: 13px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 10px;
+    transition: background .15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+  .submit-btn:hover:not(:disabled) { background: var(--accent-dk); }
+  .submit-btn:disabled { background: #94a3b8; cursor: not-allowed; }
+
+  .btn-spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(255,255,255,.4);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin .65s linear infinite;
+    display: none;
+  }
+  .submit-btn.loading .btn-spinner { display: block; }
+
+  /* ── Inline result banner ── */
+  .result {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    display: none;
+    line-height: 1.5;
+  }
+  .result.success {
+    background: var(--green-bg);
+    color: var(--green-text);
+    border: 1px solid var(--green-bdr);
+  }
+  .result.error {
+    background: var(--err-bg);
+    color: var(--err-text);
+    border: 1px solid var(--err-bdr);
+  }
+</style>
+</head>
+<body>
+
+<div class="card" id="app">
+  <!-- Content injected by JS -->
+  <div class="card-body">
+    <div class="spinner-wrap">
+      <div class="spinner"></div>
+      <span>Loading form…</span>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var API_BASE = 'https://krw-backend-production.up.railway.app';
+  var API_KEY  = 'krwleads2026secure';
+
+  var params   = new URLSearchParams(window.location.search);
+  var campaign = (params.get('campaign') || '').trim().toLowerCase();
+  var pubSub   = (params.get('sub') || '').trim();
+
+  var app = document.getElementById('app');
+
+  /* ── Render helpers ─────────────────────────────── */
+
+  function renderError(title, body) {
+    app.innerHTML =
+      '<div class="card-hdr"><h1>KRW Marketing Solutions</h1></div>' +
+      '<div class="state-msg error">' +
+        '<div class="icon">⚠️</div>' +
+        '<h2>' + escHtml(title) + '</h2>' +
+        '<p>' + escHtml(body) + '</p>' +
+      '</div>';
+  }
+
+  function renderSuccess(campaignName, leadId) {
+    app.innerHTML =
+      '<div class="card-hdr"><h1>' + escHtml(campaignName) + '</h1></div>' +
+      '<div class="state-msg success">' +
+        '<div class="icon">✅</div>' +
+        '<h2>Thank you! Your information has been submitted.</h2>' +
+        '<p>A representative will be in touch with you shortly.<br>' +
+        (leadId ? 'Reference ID: <strong>' + escHtml(leadId) + '</strong>' : '') + '</p>' +
+      '</div>';
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /* ── State options ──────────────────────────────── */
+  var US_STATES = [
+    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA',
+    'HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
+    'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+    'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
+    'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'
+  ];
+
+  function stateOptions() {
+    return '<option value="">— Select —</option>' +
+      US_STATES.map(function(s){ return '<option>' + s + '</option>'; }).join('');
+  }
+
+  /* ── Build form HTML ────────────────────────────── */
+
+  function buildForm(campaignName) {
+    document.title = campaignName;
+
+    app.innerHTML =
+      '<div class="card-hdr">' +
+        '<h1>' + escHtml(campaignName) + '</h1>' +
+        '<p>Please fill out all required fields below</p>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<form id="lead-form" autocomplete="off" novalidate>' +
+
+          '<div class="section-label">Contact Information</div>' +
+
+          '<div class="form-row">' +
+            '<div class="form-group">' +
+              '<label>First Name <span class="req">*</span></label>' +
+              '<input type="text" name="firstName" placeholder="Jane" autocomplete="given-name"/>' +
+              '<div class="field-error" id="err-firstName">First name is required</div>' +
+            '</div>' +
+            '<div class="form-group">' +
+              '<label>Last Name <span class="req">*</span></label>' +
+              '<input type="text" name="lastName" placeholder="Smith" autocomplete="family-name"/>' +
+              '<div class="field-error" id="err-lastName">Last name is required</div>' +
+            '</div>' +
+          '</div>' +
+
+          '<div class="form-row">' +
+            '<div class="form-group">' +
+              '<label>Email <span class="req">*</span></label>' +
+              '<input type="email" name="email" placeholder="jane@gmail.com" autocomplete="email"/>' +
+              '<div class="field-error" id="err-email">A valid email is required</div>' +
+            '</div>' +
+            '<div class="form-group">' +
+              '<label>Cell Phone <span class="req">*</span></label>' +
+              '<input type="tel" name="phone" placeholder="3105550123" maxlength="10" autocomplete="tel"/>' +
+              '<div class="field-note">10 digits, no dashes or spaces</div>' +
+              '<div class="field-error" id="err-phone">A 10-digit phone number is required</div>' +
+            '</div>' +
+          '</div>' +
+
+          '<div class="section-label">Address <span class="optional-badge">Optional</span></div>' +
+
+          '<div class="form-group">' +
+            '<label>Street Address</label>' +
+            '<input type="text" name="street" placeholder="123 Main St" autocomplete="street-address"/>' +
+          '</div>' +
+          '<div class="form-row-3">' +
+            '<div class="form-group">' +
+              '<label>City</label>' +
+              '<input type="text" name="city" placeholder="Los Angeles" autocomplete="address-level2"/>' +
+            '</div>' +
+            '<div class="form-group">' +
+              '<label>State</label>' +
+              '<select name="state" autocomplete="address-level1">' + stateOptions() + '</select>' +
+            '</div>' +
+            '<div class="form-group">' +
+              '<label>Zip</label>' +
+              '<input type="text" name="zip" placeholder="90001" maxlength="5" autocomplete="postal-code"/>' +
+            '</div>' +
+          '</div>' +
+
+          '<div class="section-label">Additional Information <span class="optional-badge">Optional</span></div>' +
+
+          '<div class="form-group">' +
+            '<label>Notes</label>' +
+            '<textarea name="notes" rows="2" placeholder="Any additional information…"></textarea>' +
+          '</div>' +
+
+          '<div class="section-label">Compliance <span class="optional-badge">Optional</span></div>' +
+
+          '<div class="form-group">' +
+            '<label>TrustedForm Certificate URL</label>' +
+            '<input type="text" name="trustedFormCertUrl" placeholder="https://cert.trustedform.com/…"/>' +
+          '</div>' +
+          '<div class="form-row">' +
+            '<div class="form-group">' +
+              '<label>Jornaya Lead ID</label>' +
+              '<input type="text" name="jornayaLeadId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"/>' +
+            '</div>' +
+            '<div class="form-group">' +
+              '<label>Facebook Lead ID</label>' +
+              '<input type="text" name="facebookLeadId" placeholder="123456789"/>' +
+            '</div>' +
+          '</div>' +
+
+          '<input type="hidden" name="publisherSub" id="field-publisherSub" value="' + escHtml(pubSub) + '"/>' +
+
+          '<button type="submit" class="submit-btn" id="submit-btn">' +
+            '<div class="btn-spinner"></div>' +
+            '<span id="btn-label">Submit</span>' +
+          '</button>' +
+          '<div class="result" id="result"></div>' +
+
+        '</form>' +
+      '</div>';
+
+    attachFormHandlers(campaignName);
+  }
+
+  /* ── Form event handlers ────────────────────────── */
+
+  function attachFormHandlers(campaignName) {
+    var form   = document.getElementById('lead-form');
+    var btn    = document.getElementById('submit-btn');
+    var result = document.getElementById('result');
+
+    /* Phone: digits only, max 10 */
+    form.phone.addEventListener('input', function () {
+      this.value = this.value.replace(/\D/g, '').slice(0, 10);
+      clearErr('phone');
+    });
+
+    /* Zip: digits only, max 5 */
+    form.zip.addEventListener('input', function () {
+      this.value = this.value.replace(/\D/g, '').slice(0, 5);
+    });
+
+    /* Clear errors on input */
+    ['firstName', 'lastName', 'email'].forEach(function (n) {
+      var el = form.elements[n];
+      if (el) el.addEventListener('input', function () { clearErr(n); });
+    });
+
+    function clearErr(name) {
+      var el  = form.elements[name];
+      var err = document.getElementById('err-' + name);
+      if (el)  el.classList.remove('invalid');
+      if (err) err.classList.remove('show');
+    }
+
+    function showErr(name, msg) {
+      var el  = form.elements[name];
+      var err = document.getElementById('err-' + name);
+      if (el)  el.classList.add('invalid');
+      if (err) { if (msg) err.textContent = msg; err.classList.add('show'); }
+    }
+
+    function validate() {
+      var ok = true;
+      form.querySelectorAll('.invalid').forEach(function (e) { e.classList.remove('invalid'); });
+      form.querySelectorAll('.field-error.show').forEach(function (e) { e.classList.remove('show'); });
+
+      if (!form.firstName.value.trim()) { showErr('firstName'); ok = false; }
+      if (!form.lastName.value.trim())  { showErr('lastName');  ok = false; }
+
+      var email = form.email.value.trim();
+      if (!email) {
+        showErr('email', 'Email is required');
+        ok = false;
+      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        showErr('email', 'Enter a valid email address');
+        ok = false;
+      }
+
+      var phone = form.phone.value.replace(/\D/g, '');
+      if (phone.length < 10) { showErr('phone', 'Phone must be exactly 10 digits'); ok = false; }
+
+      return ok;
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+
+      if (!validate()) {
+        var first = form.querySelector('.invalid');
+        if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+
+      /* Loading state */
+      btn.disabled = true;
+      btn.classList.add('loading');
+      document.getElementById('btn-label').textContent = 'Submitting…';
+      result.style.display = 'none';
+
+      var data = {
+        firstName:          form.firstName.value.trim(),
+        lastName:           form.lastName.value.trim(),
+        email:              form.email.value.trim().toLowerCase(),
+        phone:              form.phone.value.replace(/\D/g, ''),
+        street:             form.street.value.trim()             || undefined,
+        city:               form.city.value.trim()               || undefined,
+        state:              form.state.value                      || undefined,
+        zip:                form.zip.value.trim()                 || undefined,
+        notes:              form.notes.value.trim()               || undefined,
+        trustedFormCertUrl: form.trustedFormCertUrl.value.trim()  || undefined,
+        jornayaLeadId:      form.jornayaLeadId.value.trim()       || undefined,
+        facebookLeadId:     form.facebookLeadId.value.trim()      || undefined,
+        publisherSub:       pubSub || form.publisherSub.value.trim() || undefined,
+        websource:          window.location.href,
+      };
+
+      fetch(API_BASE + '/lead/' + encodeURIComponent(campaign), {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+        body:    JSON.stringify(data),
+      })
+      .then(function (res) { return res.json().then(function (j) { return { ok: res.ok, body: j }; }); })
+      .then(function (r) {
+        if (r.body.status === 'received') {
+          renderSuccess(campaignName, r.body.leadId);
+        } else {
+          result.className   = 'result error';
+          result.textContent = '✕ ' + (r.body.reason || r.body.error || 'Submission failed. Please check all fields and try again.');
+          result.style.display = 'block';
+          btn.disabled = false;
+          btn.classList.remove('loading');
+          document.getElementById('btn-label').textContent = 'Submit';
+        }
+      })
+      .catch(function (err) {
+        result.className   = 'result error';
+        result.textContent = '✕ Connection error: ' + err.message;
+        result.style.display = 'block';
+        btn.disabled = false;
+        btn.classList.remove('loading');
+        document.getElementById('btn-label').textContent = 'Submit';
+      });
+    });
+  }
+
+  /* ── Boot: fetch config then render ────────────── */
+
+  if (!campaign) {
+    renderError(
+      'No campaign specified',
+      'Please add a campaign parameter to the URL, e.g. ?campaign=depo'
+    );
+    return;
+  }
+
+  fetch(API_BASE + '/campaigns/' + encodeURIComponent(campaign) + '/config')
+    .then(function (res) {
+      if (res.status === 404) {
+        throw { notFound: true };
+      }
+      if (!res.ok) {
+        throw new Error('Server error (' + res.status + ')');
+      }
+      return res.json();
+    })
+    .then(function (data) {
+      buildForm(data.name || campaign);
+    })
+    .catch(function (err) {
+      if (err && err.notFound) {
+        renderError(
+          'Campaign not found',
+          'The campaign "' + campaign + '" does not exist or is no longer active. ' +
+          'Please check the URL and try again.'
+        );
+      } else {
+        renderError(
+          'Unable to load form',
+          'There was a problem connecting to the server. Please try again in a moment.'
+        );
+      }
+    });
+
+}());
+</script>
+</body>
+</html>
