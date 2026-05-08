@@ -324,14 +324,18 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
 
     const result = await resp.json().catch(() => ({ status: resp.status }));
 
-    if (resp.ok && (result.status === 'Success' || result.status === 'success' || result.ok)) {
-      const buyerId = String(result.ids?.[0] || result.id || result.leadId || '');
+    console.log(`🔍 Lead ${leadRef} → Apex response: HTTP ${resp.status} body: ${JSON.stringify(result)}`);
+
+    if (resp.ok) {
+      // HTTP 200-299 = success
+      const buyerId = String(result.ids?.[0] || result.id || result.leadId || result.intake_id || '');
       await pool.query(
         `UPDATE leads SET status='forwarded', buyer_intake_id=$1, buyer_error=null WHERE id=$2`,
         [buyerId, leadId]
       );
-      console.log(`✅ Lead ${leadRef} → buyer accepted. Buyer ID: ${buyerId}`);
+      console.log(`✅ Lead ${leadRef} → buyer accepted. Response: ${JSON.stringify(result)}`);
     } else {
+      // HTTP 4xx or 5xx = rejection
       const errMsg = result.statusDetail || result.error || result.message || `HTTP ${resp.status}`;
       await pool.query(
         `UPDATE leads SET status='buyer_rejected', buyer_error=$1 WHERE id=$2`,
