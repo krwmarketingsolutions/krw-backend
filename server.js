@@ -585,6 +585,8 @@ async function initCampaignsDB() {
       required_fields  JSONB DEFAULT '["firstName","lastName","email","phone"]',
       optional_fields  JSONB DEFAULT '["street","city","state","zip","notes","trustedFormCertUrl","jornayaLeadId","facebookLeadId","publisherSub"]',
       field_labels JSONB DEFAULT '{}',
+      payout       NUMERIC(10,2) DEFAULT 0,
+      buyer_notes  TEXT,
       active       BOOLEAN DEFAULT true,
       created_at   TIMESTAMPTZ DEFAULT NOW(),
       updated_at   TIMESTAMPTZ DEFAULT NOW()
@@ -607,6 +609,11 @@ async function initCampaignsDB() {
       console.log('✅ DEPO campaign seeded to DB');
     }
   }
+  // Add columns if upgrading from older schema
+  try {
+    await pool.query('ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS payout NUMERIC(10,2) DEFAULT 0');
+    await pool.query('ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS buyer_notes TEXT');
+  } catch(e) { /* columns may already exist */ }
   console.log('✅ Campaigns table ready');
 }
 
@@ -723,20 +730,23 @@ app.get('/campaigns', requireKey, async (req, res) => {
 
 // ── POST /campaigns (create new campaign) ─────────────────────
 app.post('/campaigns', requireKey, async (req, res) => {
-  const { slug,name,vertical,apex_endpoint,websource,required_fields,optional_fields,field_labels } = req.body;
+  const { slug,name,vertical,apex_endpoint,websource,required_fields,optional_fields,field_labels,payout,buyer_notes } = req.body;
   if (!slug||!name) return res.status(400).json({ error:'slug and name required' });
   try {
     const r = await pool.query(`
-      INSERT INTO campaigns (slug,name,vertical,apex_endpoint,websource,required_fields,optional_fields,field_labels)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      INSERT INTO campaigns (slug,name,vertical,apex_endpoint,websource,required_fields,optional_fields,field_labels,payout,buyer_notes)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       ON CONFLICT (slug) DO UPDATE SET
         name=$2,vertical=$3,apex_endpoint=$4,websource=$5,
-        required_fields=$6,optional_fields=$7,field_labels=$8,updated_at=NOW()
+        required_fields=$6,optional_fields=$7,field_labels=$8,
+        payout=$9,buyer_notes=$10,updated_at=NOW()
       RETURNING *
     `,[slug,name,vertical||'',apex_endpoint||'',websource||'',
        JSON.stringify(required_fields||['firstName','lastName','email','phone']),
        JSON.stringify(optional_fields||[]),
-       JSON.stringify(field_labels||{})]);
+       JSON.stringify(field_labels||{}),
+       parseFloat(payout)||0,
+       buyer_notes||null]);
     res.json({ ok:true, campaign:r.rows[0] });
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
@@ -748,6 +758,7 @@ app.patch('/campaigns/:slug', requireKey, async (req, res) => {
   try {
     const sets=[],params=[],i={v:1};
     const add=(col,val)=>{ sets.push(`${col}=$${i.v++}`); params.push(val); };
+    const { name,vertical,apex_endpoint,websource,required_fields,optional_fields,field_labels,active,payout,buyer_notes } = req.body;
     if (name!==undefined)             add('name',name);
     if (vertical!==undefined)         add('vertical',vertical);
     if (apex_endpoint!==undefined)    add('apex_endpoint',apex_endpoint);
@@ -755,6 +766,8 @@ app.patch('/campaigns/:slug', requireKey, async (req, res) => {
     if (required_fields!==undefined)  add('required_fields',JSON.stringify(required_fields));
     if (optional_fields!==undefined)  add('optional_fields',JSON.stringify(optional_fields));
     if (field_labels!==undefined)     add('field_labels',JSON.stringify(field_labels));
+    if (payout!==undefined)           add('payout',parseFloat(payout)||0);
+    if (buyer_notes!==undefined)      add('buyer_notes',buyer_notes||null);
     if (active!==undefined)           add('active',active);
     sets.push(`updated_at=NOW()`);
     params.push(slug);
