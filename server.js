@@ -85,6 +85,10 @@ async function initCampaignsDB() {
       created_at    TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+  await pool.query(`
+    ALTER TABLE campaigns
+      ADD COLUMN IF NOT EXISTS config JSONB DEFAULT '{}'::jsonb;
+  `);
   console.log('✅ Campaigns table ready');
 }
 
