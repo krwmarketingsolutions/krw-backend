@@ -14,7 +14,7 @@ const app     = express();
 app.use(express.json());
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key, x-setup-key');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -142,6 +142,53 @@ app.get('/campaigns/:slug/config', async (req, res) => {
       name:   row.name,
       config: row.config || {},
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════
+//  SETUP ENDPOINTS (one-time data seeding)
+// ══════════════════════════════════════════════════════
+
+// POST /setup/campaigns — insert seed campaigns (requires x-setup-key header)
+app.post('/setup/campaigns', async (req, res) => {
+  const setupKey = process.env.SETUP_KEY;
+  const provided = (req.headers['x-setup-key'] || '').trim();
+  if (!setupKey || provided !== setupKey) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    // Check if depo already exists
+    const existing = await pool.query(
+      `SELECT id FROM campaigns WHERE slug = $1`,
+      ['depo']
+    );
+    if (existing.rows.length) {
+      return res.status(200).json({ error: 'Campaign already exists' });
+    }
+
+    const config = {
+      vertical: 'depo',
+      websource: 'https://krwmarketingsolutions.github.io/forms',
+      requiredFields: ['firstName', 'lastName', 'email', 'phone'],
+      optionalFields: ['street', 'city', 'state', 'zip', 'notes', 'trustedFormCertUrl', 'jornayaLeadId', 'publisherSub'],
+    };
+
+    await pool.query(
+      `INSERT INTO campaigns (slug, name, active, apex_endpoint, config)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        'depo',
+        'DEPO — Lead Tree (WTC)',
+        true,
+        'https://apex-services-nbd7z6aa7a-uc.a.run.app/intake/depo/depo/zapier/tuell/submit',
+        JSON.stringify(config),
+      ]
+    );
+
+    res.json({ status: 'ok', message: 'Campaign inserted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
