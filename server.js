@@ -122,6 +122,10 @@ async function initLeadsDB() {
     CREATE INDEX IF NOT EXISTS idx_leads_campaign ON leads (campaign);
     CREATE INDEX IF NOT EXISTS idx_leads_received ON leads (received_at);
   `);
+  await pool.query(`
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS zapier_status TEXT DEFAULT NULL;
+  `);
   console.log('✅ Leads table ready');
 }
 
