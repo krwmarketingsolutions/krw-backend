@@ -162,12 +162,25 @@ app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
     // Respond immediately to publisher
     res.json({ status: 'received', leadId: leadRef, message: 'Lead accepted' });
 
-    // Fire to Zapier in background (don't block response)
-    const zapierUrl = process.env[`ZAPIER_WEBHOOK_${campaign.toUpperCase()}`] || process.env.ZAPIER_WEBHOOK;
-    if (zapierUrl) {
-      forwardToZapier(leadId, leadRef, campaign, b, zapierUrl);
+    // Forward to buyer in background (don't block response)
+    // Priority: 1) env var BUYER_ENDPOINT_DEPO  2) stored in DB  3) log and skip
+    const buyerUrl = process.env[`BUYER_ENDPOINT_${campaign.toUpperCase()}`];
+    if (buyerUrl) {
+      forwardToBuyer(leadId, leadRef, campaign, b, buyerUrl);
     } else {
-      console.log(`Lead ${leadRef} stored. No Zapier webhook set for campaign: ${campaign}`);
+      // Try to get endpoint from campaigns table
+      pool.query('SELECT apex_endpoint FROM campaigns WHERE slug=$1 AND active=true', [campaign])
+        .then(function(r) {
+          const endpoint = r.rows[0]?.apex_endpoint;
+          if (endpoint) {
+            forwardToBuyer(leadId, leadRef, campaign, b, endpoint);
+          } else {
+            console.log(`Lead ${leadRef} stored. No buyer endpoint set for campaign: ${campaign}`);
+            console.log(`Set env var BUYER_ENDPOINT_${campaign.toUpperCase()} or add endpoint in Campaigns tab`);
+          }
+        }).catch(function() {
+          console.log(`Lead ${leadRef} stored. No buyer endpoint configured for: ${campaign}`);
+        });
     }
 
   } catch (err) {
@@ -176,46 +189,66 @@ app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
   }
 });
 
-async function forwardToZapier(leadId, leadRef, campaign, data, zapierUrl) {
+async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
   try {
     await pool.query(`UPDATE leads SET status='forwarding' WHERE id=$1`, [leadId]);
 
+    // Build payload — structured for standard buyer APIs
+    // For Apex (DEPO) the meta block is required
     const payload = {
-      leadId:    leadRef,
-      campaign:  campaign,
       firstName: data.firstName,
       lastName:  data.lastName,
       email:     data.email,
       phone:     String(data.phone).replace(/\D/g,''),
-      street:    data.street   || '',
-      city:      data.city     || '',
-      state:     data.state    || '',
-      zip:       data.zip      || '',
-      notes:     data.notes    || '',
-      trustedFormCertUrl: data.trustedFormCertUrl || '',
-      jornayaLeadId:      data.jornayaLeadId      || '',
-      facebookLeadId:     data.facebookLeadId     || '',
-      publisherSub:       data.publisherSub        || '',
-      websource:          data.websource           || '',
-      receivedAt:         new Date().toISOString(),
+      street:    data.street || null,
+      city:      data.city   || null,
+      state:     data.state  || null,
+      zip:       data.zip    || null,
+      notes:     data.notes  || null,
+      meta: {
+        id:                 leadRef,
+        Timestamp:          new Date().toISOString(),
+        createDt:           new Date().toISOString(),
+        claimant:           `${data.firstName} ${data.lastName}`,
+        websource:          data.websource || `https://krwmarketingsolutions.github.io/forms`,
+        trustedFormCertUrl: data.trustedFormCertUrl || null,
+        jornayaLeadId:      data.jornayaLeadId      || null,
+        facebookLeadId:     data.facebookLeadId     || null,
+        seller:             process.env[`BUYER_SELLER_${campaign.toUpperCase()}`] || 'tuell',
+        campaign:           campaign,
+        publisherSub:       data.publisherSub || null,
+      },
     };
 
-    const resp = await fetch(zapierUrl, {
+    const resp = await fetch(buyerUrl, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(payload),
     });
 
-    if (resp.ok) {
-      await pool.query(`UPDATE leads SET status='forwarded', zapier_status='sent' WHERE id=$1`, [leadId]);
-      console.log(`✅ Lead ${leadRef} forwarded to Zapier`);
+    const result = await resp.json().catch(() => ({ status: resp.status }));
+
+    if (resp.ok && (result.status === 'Success' || result.status === 'success' || result.ok)) {
+      const buyerId = String(result.ids?.[0] || result.id || result.leadId || '');
+      await pool.query(
+        `UPDATE leads SET status='forwarded', buyer_intake_id=$1, buyer_error=null WHERE id=$2`,
+        [buyerId, leadId]
+      );
+      console.log(`✅ Lead ${leadRef} → buyer accepted. Buyer ID: ${buyerId}`);
     } else {
-      await pool.query(`UPDATE leads SET status='zapier_failed', buyer_error=$1 WHERE id=$2`, [`HTTP ${resp.status}`, leadId]);
-      console.log(`⚠️  Lead ${leadRef} Zapier returned ${resp.status}`);
+      const errMsg = result.statusDetail || result.error || result.message || `HTTP ${resp.status}`;
+      await pool.query(
+        `UPDATE leads SET status='buyer_rejected', buyer_error=$1 WHERE id=$2`,
+        [errMsg, leadId]
+      );
+      console.log(`⚠️  Lead ${leadRef} → buyer rejected: ${errMsg}`);
     }
   } catch (err) {
-    await pool.query(`UPDATE leads SET status='zapier_failed', buyer_error=$1 WHERE id=$2`, [err.message, leadId]);
-    console.error(`❌ Lead ${leadRef} Zapier error: ${err.message}`);
+    await pool.query(
+      `UPDATE leads SET status='forward_failed', buyer_error=$1 WHERE id=$2`,
+      [err.message, leadId]
+    );
+    console.error(`❌ Lead ${leadRef} → forward error: ${err.message}`);
   }
 }
 
