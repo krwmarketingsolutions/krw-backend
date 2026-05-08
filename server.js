@@ -193,32 +193,76 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
   try {
     await pool.query(`UPDATE leads SET status='forwarding' WHERE id=$1`, [leadId]);
 
-    // Build payload — structured for standard buyer APIs
-    // For Apex (DEPO) the meta block is required
-    const payload = {
-      firstName: data.firstName,
-      lastName:  data.lastName,
-      email:     data.email,
-      phone:     String(data.phone).replace(/\D/g,''),
-      street:    data.street || null,
-      city:      data.city   || null,
-      state:     data.state  || null,
-      zip:       data.zip    || null,
-      notes:     data.notes  || null,
-      meta: {
-        id:                 leadRef,
-        Timestamp:          new Date().toISOString(),
-        createDt:           new Date().toISOString(),
-        claimant:           `${data.firstName} ${data.lastName}`,
-        websource:          data.websource || `https://krwmarketingsolutions.github.io/forms`,
-        trustedFormCertUrl: data.trustedFormCertUrl || null,
-        jornayaLeadId:      data.jornayaLeadId      || null,
-        facebookLeadId:     data.facebookLeadId     || null,
-        seller:             process.env[`BUYER_SELLER_${campaign.toUpperCase()}`] || 'tuell',
-        campaign:           campaign,
-        publisherSub:       data.publisherSub || null,
-      },
-    };
+    // Get campaign config from DB to know buyer format + LP credentials
+    let campRow = null;
+    try {
+      const cr = await pool.query('SELECT * FROM campaigns WHERE slug=$1', [campaign]);
+      campRow = cr.rows[0] || null;
+    } catch(e) {}
+
+    const buyerNotes  = campRow?.buyer_notes || '';
+    const isLeadProsper = buyerUrl.includes('leadprosper') || buyerUrl.includes('direct_post');
+
+    // Extract LP credentials from buyer_notes if present
+    const lpCampId  = (buyerNotes.match(/LP Campaign ID:\s*(\d+)/i)||[])[1] || '';
+    const lpSuppId  = (buyerNotes.match(/LP Supplier ID:\s*(\d+)/i)||[])[1] || '';
+    const lpKey     = (buyerNotes.match(/LP Key:\s*(\S+)/i)||[])[1] || '';
+
+    let payload;
+
+    if (isLeadProsper && lpCampId && lpSuppId && lpKey) {
+      // ── LeadProsper format ──────────────────────────────
+      payload = {
+        lp_campaign_id: lpCampId,
+        lp_supplier_id: lpSuppId,
+        lp_key:         lpKey,
+        lp_subid1:      data.publisherSub || '',
+        first_name:     data.firstName,
+        last_name:      data.lastName,
+        email:          data.email,
+        phone:          String(data.phone).replace(/\D/g,''),
+        date_of_birth:  data.dateOfBirth   || null,
+        gender:         data.gender        || null,
+        address:        data.street        || null,
+        city:           data.city          || null,
+        state:          data.state         || null,
+        zip_code:       data.zip           || null,
+        jornaya_leadid:      data.jornayaLeadId      || null,
+        trustedform_cert_url: data.trustedFormCertUrl || null,
+        tcpa_text:      data.tcpaText      || null,
+        incident_state: data.incidentState || null,
+        case_description: data.caseDescription || data.notes || null,
+        ip_address:     data.ipAddress     || null,
+        landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
+      };
+      // Remove null values
+      Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
+    } else {
+      // ── Apex / generic format ───────────────────────────
+      payload = {
+        firstName: data.firstName,
+        lastName:  data.lastName,
+        email:     data.email,
+        phone:     String(data.phone).replace(/\D/g,''),
+        street:    data.street || null,
+        city:      data.city   || null,
+        state:     data.state  || null,
+        zip:       data.zip    || null,
+        notes:     data.notes  || null,
+        meta: {
+          id:                 leadRef,
+          Timestamp:          new Date().toISOString(),
+          createDt:           new Date().toISOString(),
+          claimant:           `${data.firstName} ${data.lastName}`,
+          websource:          data.websource || 'https://krwmarketingsolutions.github.io/forms',
+          trustedFormCertUrl: data.trustedFormCertUrl || null,
+          jornayaLeadId:      data.jornayaLeadId      || null,
+          seller:             process.env[`BUYER_SELLER_${campaign.toUpperCase()}`] || 'tuell',
+          campaign:           campaign,
+          publisherSub:       data.publisherSub || null,
+        },
+      };
+    }
 
     const resp = await fetch(buyerUrl, {
       method:  'POST',
@@ -228,15 +272,17 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
 
     const result = await resp.json().catch(() => ({ status: resp.status }));
 
-    if (resp.ok && (result.status === 'Success' || result.status === 'success' || result.ok)) {
-      const buyerId = String(result.ids?.[0] || result.id || result.leadId || '');
+    const accepted = result.status === 'ACCEPTED' || result.status === 'Success' ||
+                     result.status === 'success' || result.ok === true;
+    if (resp.ok && accepted) {
+      const buyerId = String(result.lead_id || result.id || result.ids?.[0] || result.leadId || '');
       await pool.query(
         `UPDATE leads SET status='forwarded', buyer_intake_id=$1, buyer_error=null WHERE id=$2`,
         [buyerId, leadId]
       );
       console.log(`✅ Lead ${leadRef} → buyer accepted. Buyer ID: ${buyerId}`);
     } else {
-      const errMsg = result.statusDetail || result.error || result.message || `HTTP ${resp.status}`;
+      const errMsg = result.message || result.statusDetail || result.error || result.status || `HTTP ${resp.status}`;
       await pool.query(
         `UPDATE leads SET status='buyer_rejected', buyer_error=$1 WHERE id=$2`,
         [errMsg, leadId]
@@ -456,16 +502,6 @@ async function initCampaignsDB() {
       updated_at       TIMESTAMPTZ DEFAULT NOW()
     );
   `);
-  // Add missing columns if they don't exist (migrates tables created before these columns were added)
-  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS payout NUMERIC(10,2) DEFAULT 0`);
-  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS buyer_notes TEXT`);
-  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS required_fields JSONB DEFAULT '["firstName","lastName","email","phone"]'`);
-  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS optional_fields JSONB DEFAULT '["state","zip","notes","trustedFormCertUrl","jornayaLeadId","publisherSub"]'`);
-  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS field_labels JSONB DEFAULT '{}'`);
-  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS description TEXT`);
-  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true`);
-  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`);
-
   // Seed DEPO if not exists
   const existing = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['depo']);
   if (!existing.rows.length) {
