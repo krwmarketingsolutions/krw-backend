@@ -456,6 +456,16 @@ async function initCampaignsDB() {
       updated_at       TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+  // Add missing columns if they don't exist (migrates tables created before these columns were added)
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS payout NUMERIC(10,2) DEFAULT 0`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS buyer_notes TEXT`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS required_fields JSONB DEFAULT '["firstName","lastName","email","phone"]'`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS optional_fields JSONB DEFAULT '["state","zip","notes","trustedFormCertUrl","jornayaLeadId","publisherSub"]'`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS field_labels JSONB DEFAULT '{}'`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS description TEXT`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true`);
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`);
+
   // Seed DEPO if not exists
   const existing = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['depo']);
   if (!existing.rows.length) {
