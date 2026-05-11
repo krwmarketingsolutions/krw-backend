@@ -264,6 +264,13 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
       };
     }
 
+    // ── DEBUG: log exactly what we're sending to Apex ──────────────────
+    console.log(`[DEBUG] Lead ${leadRef} → forwarding to buyer`);
+    console.log(`[DEBUG]   campaign slug : ${campaign}`);
+    console.log(`[DEBUG]   buyerUrl      : ${buyerUrl}`);
+    console.log(`[DEBUG]   payload       : ${JSON.stringify(payload)}`);
+    // ───────────────────────────────────────────────────────────────────
+
     const resp = await fetch(buyerUrl, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -271,6 +278,12 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
     });
 
     const result = await resp.json().catch(() => ({ status: resp.status }));
+
+    // ── DEBUG: log what Apex returned ───────────────────────────────────
+    console.log(`[DEBUG] Lead ${leadRef} → Apex response`);
+    console.log(`[DEBUG]   HTTP status   : ${resp.status}`);
+    console.log(`[DEBUG]   response body : ${JSON.stringify(result)}`);
+    // ───────────────────────────────────────────────────────────────────
 
     const accepted = result.status === 'ACCEPTED' || result.status === 'Success' ||
                      result.status === 'success' || result.ok === true;
