@@ -509,21 +509,58 @@ async function initCampaignsDB() {
       updated_at       TIMESTAMPTZ DEFAULT NOW()
     );
   `);
-  // Seed DEPO if not exists
-  const existing = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['depo']);
-  if (!existing.rows.length) {
-    await pool.query(`
+  // Seed all campaigns if not present (idempotent — ON CONFLICT DO NOTHING)
+  const seedCampaigns = [
+    {
+      slug:            'depo',
+      name:            'DEPO — Lead Tree (WTC)',
+      vertical:        'Mass Tort - Depo',
+      apex_endpoint:   'https://apex-services-nbd7z6aa7a-uc.a.run.app/intake/depo/depo/zapier/tuell/submit',
+      required_fields: ['firstName','lastName','email','phone'],
+      optional_fields: ['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','publisherSub'],
+    },
+    {
+      slug:            'talc',
+      name:            'TALC — Lead Tree (WTC)',
+      vertical:        'Mass Tort - Talc',
+      apex_endpoint:   'https://apex-services-nbd7z6aa7a-uc.a.run.app/intake/talc/talc-leads/zapier/leadtree/submit',
+      required_fields: ['firstName','lastName','email','phone','trustedFormCertUrl'],
+      optional_fields: ['street','city','state','zip','notes','jornayaLeadId','publisherSub'],
+    },
+    {
+      slug:            'mva',
+      name:            'MVA — Motor Vehicle Accident',
+      vertical:        'Motor Vehicle Accident',
+      apex_endpoint:   'https://api.leadprosper.io/direct_post',
+      required_fields: ['firstName','lastName','email','phone','incidentState','caseDescription'],
+      optional_fields: ['dateOfBirth','gender','street','city','state','zip','trustedFormCertUrl','jornayaLeadId','tcpaText','publisherSub'],
+    },
+    {
+      slug:            'rideshare',
+      name:            'Rideshare — Mass Tort',
+      vertical:        'Mass Tort - Rideshare',
+      apex_endpoint:   'https://api.leadprosper.io/direct_post',
+      required_fields: ['firstName','lastName','email','phone','gender','city','state','zip','ipAddress','landingPageUrl','trustedFormCertUrl'],
+      optional_fields: ['dateOfBirth','street','jornayaLeadId','tcpaText','publisherSub'],
+    },
+  ];
+
+  for (const c of seedCampaigns) {
+    const result = await pool.query(`
       INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields)
       VALUES ($1,$2,$3,$4,$5,$6)
+      ON CONFLICT (slug) DO NOTHING
     `, [
-      'depo',
-      'DEPO — Lead Tree (WTC)',
-      'Mass Tort - Depo',
-      process.env.BUYER_ENDPOINT_DEPO || '',
-      JSON.stringify(['firstName','lastName','email','phone']),
-      JSON.stringify(['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','facebookLeadId','publisherSub']),
+      c.slug,
+      c.name,
+      c.vertical,
+      c.apex_endpoint,
+      JSON.stringify(c.required_fields),
+      JSON.stringify(c.optional_fields),
     ]);
-    console.log('✅ DEPO campaign seeded');
+    if (result.rowCount > 0) {
+      console.log(`✅ Campaign seeded: ${c.slug}`);
+    }
   }
   console.log('✅ Campaigns table ready');
 }
