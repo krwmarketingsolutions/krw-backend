@@ -257,19 +257,19 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
           websource:          data.websource || 'https://krwmarketingsolutions.github.io/forms',
           trustedFormCertUrl: data.trustedFormCertUrl || null,
           jornayaLeadId:      data.jornayaLeadId      || null,
-          seller:             process.env[`BUYER_SELLER_${campaign.toUpperCase()}`] || 'tuell',
+          seller:             (function(){
+            // Try env var first, then extract from URL path, then default
+            var envSeller = process.env['BUYER_SELLER_'+campaign.toUpperCase()];
+            if(envSeller) return envSeller;
+            // Extract seller from Apex URL pattern: /zapier/<seller>/submit
+            var urlMatch = buyerUrl.match(/\/zapier\/([^/]+)\/submit/);
+            return urlMatch ? urlMatch[1] : 'tuell';
+          })(),
           campaign:           campaign,
           publisherSub:       data.publisherSub || null,
         },
       };
     }
-
-    // ── DEBUG: log exactly what we're sending to Apex ──────────────────
-    console.log(`[DEBUG] Lead ${leadRef} → forwarding to buyer`);
-    console.log(`[DEBUG]   campaign slug : ${campaign}`);
-    console.log(`[DEBUG]   buyerUrl      : ${buyerUrl}`);
-    console.log(`[DEBUG]   payload       : ${JSON.stringify(payload)}`);
-    // ───────────────────────────────────────────────────────────────────
 
     const resp = await fetch(buyerUrl, {
       method:  'POST',
@@ -278,12 +278,6 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
     });
 
     const result = await resp.json().catch(() => ({ status: resp.status }));
-
-    // ── DEBUG: log what Apex returned ───────────────────────────────────
-    console.log(`[DEBUG] Lead ${leadRef} → Apex response`);
-    console.log(`[DEBUG]   HTTP status   : ${resp.status}`);
-    console.log(`[DEBUG]   response body : ${JSON.stringify(result)}`);
-    // ───────────────────────────────────────────────────────────────────
 
     const accepted = result.status === 'ACCEPTED' || result.status === 'Success' ||
                      result.status === 'success' || result.ok === true;
@@ -530,22 +524,6 @@ async function initCampaignsDB() {
       JSON.stringify(['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','facebookLeadId','publisherSub']),
     ]);
     console.log('✅ DEPO campaign seeded');
-  }
-  // Seed TALC if not exists
-  const existingTalc = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['talc']);
-  if (!existingTalc.rows.length) {
-    await pool.query(`
-      INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields)
-      VALUES ($1,$2,$3,$4,$5,$6)
-    `, [
-      'talc',
-      'TALC — Cancer Leads',
-      'Mass Tort - TALC',
-      'https://apex-services-nbd7z6aa7a-uc.a.run.app/intake/talc/talc-leads/zapier/leadtree/submit',
-      JSON.stringify(['firstName','lastName','email','phone']),
-      JSON.stringify(['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','publisherSub']),
-    ]);
-    console.log('✅ TALC campaign seeded');
   }
   console.log('✅ Campaigns table ready');
 }
