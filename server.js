@@ -531,6 +531,22 @@ async function initCampaignsDB() {
     ]);
     console.log('✅ DEPO campaign seeded');
   }
+  // Seed TALC if not exists
+  const existingTalc = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['talc']);
+  if (!existingTalc.rows.length) {
+    await pool.query(`
+      INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields)
+      VALUES ($1,$2,$3,$4,$5,$6)
+    `, [
+      'talc',
+      'TALC — Cancer Leads',
+      'Mass Tort - TALC',
+      'https://apex-services-nbd7z6aa7a-uc.a.run.app/intake/talc/talc-leads/zapier/leadtree/submit',
+      JSON.stringify(['firstName','lastName','email','phone']),
+      JSON.stringify(['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','publisherSub']),
+    ]);
+    console.log('✅ TALC campaign seeded');
+  }
   console.log('✅ Campaigns table ready');
 }
 
