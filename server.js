@@ -203,10 +203,20 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
     const buyerNotes  = campRow?.buyer_notes || '';
     const isLeadProsper = buyerUrl.includes('leadprosper') || buyerUrl.includes('direct_post');
 
-    // Extract LP credentials from buyer_notes if present
-    const lpCampId  = (buyerNotes.match(/LP Campaign ID:\s*(\d+)/i)||[])[1] || '';
-    const lpSuppId  = (buyerNotes.match(/LP Supplier ID:\s*(\d+)/i)||[])[1] || '';
-    const lpKey     = (buyerNotes.match(/LP Key:\s*(\S+)/i)||[])[1] || '';
+    // Hardcoded LP credentials per campaign (always reliable)
+    const LP_CREDS = {
+      'mva':      { id: '31080',  sup: '110928', key: 'ke21sx0koi7dld' },
+      'rideshare':{ id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
+      'lyft':     { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
+      'uber':     { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
+      'roundup':  { id: '30976',  sup: '96279',  key: '6l5rtdz61ay1n2' },
+    };
+
+    // Use hardcoded first, then fall back to buyer_notes
+    const hardcoded = LP_CREDS[campaign] || {};
+    const lpCampId  = hardcoded.id  || (buyerNotes.match(/LP Campaign ID:\s*(\d+)/i)||[])[1] || '';
+    const lpSuppId  = hardcoded.sup || (buyerNotes.match(/LP Supplier ID:\s*(\d+)/i)||[])[1] || '';
+    const lpKey     = hardcoded.key || (buyerNotes.match(/LP Key:\s*(\S+)/i)||[])[1] || '';
 
     // Extract Apex URL parts: /intake/<vertical>/<apexCampaign>/zapier/<seller>/submit
     const apexMatch   = buyerUrl.match(/\/intake\/([^/]+)\/([^/]+)\/zapier\/([^/]+)\/submit/);
