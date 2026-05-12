@@ -509,7 +509,7 @@ async function initCampaignsDB() {
       updated_at       TIMESTAMPTZ DEFAULT NOW()
     );
   `);
-  // Seed all campaigns if not present (idempotent — ON CONFLICT DO NOTHING)
+  // Seed all campaigns (idempotent — ON CONFLICT DO UPDATE ensures stale rows are corrected)
   const seedCampaigns = [
     {
       slug:            'depo',
@@ -557,7 +557,12 @@ async function initCampaignsDB() {
     const result = await pool.query(`
       INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields)
       VALUES ($1,$2,$3,$4,$5,$6)
-      ON CONFLICT (slug) DO NOTHING
+      ON CONFLICT (slug) DO UPDATE SET
+        name            = EXCLUDED.name,
+        vertical        = EXCLUDED.vertical,
+        apex_endpoint   = EXCLUDED.apex_endpoint,
+        required_fields = EXCLUDED.required_fields,
+        optional_fields = EXCLUDED.optional_fields
     `, [
       c.slug,
       c.name,
