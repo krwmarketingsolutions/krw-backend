@@ -208,6 +208,11 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
     const lpSuppId  = (buyerNotes.match(/LP Supplier ID:\s*(\d+)/i)||[])[1] || '';
     const lpKey     = (buyerNotes.match(/LP Key:\s*(\S+)/i)||[])[1] || '';
 
+    // Extract Apex URL parts: /intake/<vertical>/<apexCampaign>/zapier/<seller>/submit
+    const apexMatch   = buyerUrl.match(/\/intake\/([^/]+)\/([^/]+)\/zapier\/([^/]+)\/submit/);
+    const apexCampaign = apexMatch ? apexMatch[2] : campaign;  // e.g. 'talc-leads', 'depo'
+    const apexSeller   = apexMatch ? apexMatch[3] : (process.env['BUYER_SELLER_'+campaign.toUpperCase()] || 'tuell');
+
     let payload;
 
     if (isLeadProsper && lpCampId && lpSuppId && lpKey) {
@@ -257,15 +262,8 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
           websource:          data.websource || 'https://krwmarketingsolutions.github.io/forms',
           trustedFormCertUrl: data.trustedFormCertUrl || null,
           jornayaLeadId:      data.jornayaLeadId      || null,
-          seller:             (function(){
-            // Try env var first, then extract from URL path, then default
-            var envSeller = process.env['BUYER_SELLER_'+campaign.toUpperCase()];
-            if(envSeller) return envSeller;
-            // Extract seller from Apex URL pattern: /zapier/<seller>/submit
-            var urlMatch = buyerUrl.match(/\/zapier\/([^/]+)\/submit/);
-            return urlMatch ? urlMatch[1] : 'tuell';
-          })(),
-          campaign:           campaign,
+          seller:             apexSeller,
+          campaign:           apexCampaign,
           publisherSub:       data.publisherSub || null,
         },
       };
@@ -509,71 +507,21 @@ async function initCampaignsDB() {
       updated_at       TIMESTAMPTZ DEFAULT NOW()
     );
   `);
-  // Seed all campaigns (idempotent — ON CONFLICT DO UPDATE ensures stale rows are corrected)
-  const seedCampaigns = [
-    {
-      slug:            'depo',
-      name:            'DEPO — Lead Tree (WTC)',
-      vertical:        'Mass Tort - Depo',
-      apex_endpoint:   'https://apex-services-nbd7z6aa7a-uc.a.run.app/intake/depo/depo/zapier/tuell/submit',
-      required_fields: ['firstName','lastName','email','phone'],
-      optional_fields: ['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','publisherSub'],
-    },
-    {
-      slug:            'talc',
-      name:            'TALC — Lead Tree (WTC)',
-      vertical:        'Mass Tort - Talc',
-      apex_endpoint:   'https://apex-services-nbd7z6aa7a-uc.a.run.app/intake/talc/talc-leads/zapier/leadtree/submit',
-      required_fields: ['firstName','lastName','email','phone','trustedFormCertUrl'],
-      optional_fields: ['street','city','state','zip','notes','jornayaLeadId','publisherSub'],
-    },
-    {
-      slug:            'mva',
-      name:            'MVA — Motor Vehicle Accident',
-      vertical:        'Motor Vehicle Accident',
-      apex_endpoint:   'https://api.leadprosper.io/direct_post',
-      required_fields: ['firstName','lastName','email','phone','incidentState','caseDescription'],
-      optional_fields: ['dateOfBirth','gender','street','city','state','zip','trustedFormCertUrl','jornayaLeadId','tcpaText','publisherSub'],
-    },
-    {
-      slug:            'rideshare',
-      name:            'Rideshare — Mass Tort',
-      vertical:        'Mass Tort - Rideshare',
-      apex_endpoint:   'https://api.leadprosper.io/direct_post',
-      required_fields: ['firstName','lastName','email','phone','gender','city','state','zip','ipAddress','landingPageUrl','trustedFormCertUrl'],
-      optional_fields: ['dateOfBirth','street','jornayaLeadId','tcpaText','publisherSub'],
-    },
-    {
-      slug:            'lyft',
-      name:            'LYFT Rideshare — Mass Tort',
-      vertical:        'Mass Tort - Rideshare',
-      apex_endpoint:   'https://api.leadprosper.io/direct_post',
-      required_fields: ['firstName','lastName','email','phone','gender','city','state','zip','ipAddress','landingPageUrl','trustedFormCertUrl'],
-      optional_fields: ['dateOfBirth','street','jornayaLeadId','tcpaText','publisherSub'],
-    },
-  ];
-
-  for (const c of seedCampaigns) {
-    const result = await pool.query(`
+  // Seed DEPO if not exists
+  const existing = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['depo']);
+  if (!existing.rows.length) {
+    await pool.query(`
       INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields)
       VALUES ($1,$2,$3,$4,$5,$6)
-      ON CONFLICT (slug) DO UPDATE SET
-        name            = EXCLUDED.name,
-        vertical        = EXCLUDED.vertical,
-        apex_endpoint   = EXCLUDED.apex_endpoint,
-        required_fields = EXCLUDED.required_fields,
-        optional_fields = EXCLUDED.optional_fields
     `, [
-      c.slug,
-      c.name,
-      c.vertical,
-      c.apex_endpoint,
-      JSON.stringify(c.required_fields),
-      JSON.stringify(c.optional_fields),
+      'depo',
+      'DEPO — Lead Tree (WTC)',
+      'Mass Tort - Depo',
+      process.env.BUYER_ENDPOINT_DEPO || '',
+      JSON.stringify(['firstName','lastName','email','phone']),
+      JSON.stringify(['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','facebookLeadId','publisherSub']),
     ]);
-    if (result.rowCount > 0) {
-      console.log(`✅ Campaign seeded: ${c.slug}`);
-    }
+    console.log('✅ DEPO campaign seeded');
   }
   console.log('✅ Campaigns table ready');
 }
