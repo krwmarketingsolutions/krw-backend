@@ -543,6 +543,14 @@ async function initCampaignsDB() {
       required_fields: ['firstName','lastName','email','phone','gender','city','state','zip','ipAddress','landingPageUrl','trustedFormCertUrl'],
       optional_fields: ['dateOfBirth','street','jornayaLeadId','tcpaText','publisherSub'],
     },
+    {
+      slug:            'lyft',
+      name:            'LYFT Rideshare — Mass Tort',
+      vertical:        'Mass Tort - Rideshare',
+      apex_endpoint:   'https://api.leadprosper.io/direct_post',
+      required_fields: ['firstName','lastName','email','phone','gender','city','state','zip','ipAddress','landingPageUrl','trustedFormCertUrl'],
+      optional_fields: ['dateOfBirth','street','jornayaLeadId','tcpaText','publisherSub'],
+    },
   ];
 
   for (const c of seedCampaigns) {
