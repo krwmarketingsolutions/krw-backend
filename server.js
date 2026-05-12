@@ -239,6 +239,12 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         case_description: data.caseDescription || data.notes || null,
         ip_address:     data.ipAddress     || null,
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
+        // Roundup-specific fields (passed through if present)
+        have_attorney:    data.haveAttorney    || null,
+        used_roundup:     data.usedRoundup     || null,
+        which_cancer:     data.whichCancer     || null,
+        what_year:        data.whatYear        || null,
+        exposed_location: data.exposedLocation || null,
       };
       // Remove null values
       Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
