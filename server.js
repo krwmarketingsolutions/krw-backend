@@ -570,6 +570,58 @@ async function initCampaignsDB() {
     ]);
     console.log('✅ DEPO campaign seeded');
   }
+  // Seed Lyft if not exists
+  const existingLyft = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['lyft']);
+  if (!existingLyft.rows.length) {
+    await pool.query(`
+      INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields, field_labels)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+    `, [
+      'lyft',
+      'Lyft — Rideshare',
+      'Rideshare - Lyft',
+      'https://api.leadprosper.io/direct_post',
+      JSON.stringify(['firstName','lastName','email','phone','zip','ipAddress','trustedFormCertUrl','haveAttorney','usedLyft','injuryType','incidentDate','incidentState']),
+      JSON.stringify(['dateOfBirth','gender','street','city','state','jornayaLeadId','publisherSub','userAgent','landingPageUrl','tcpaText']),
+      JSON.stringify({
+        haveAttorney:       'Do You Have an Attorney?',
+        usedLyft:           'Were You a Lyft Passenger?',
+        injuryType:         'Type of Injury',
+        incidentDate:       'Date of Incident',
+        incidentState:      'State Where Incident Occurred',
+        ipAddress:          'IP Address',
+        trustedFormCertUrl: 'TrustedForm URL',
+        zip:                'Zip Code',
+      }),
+    ]);
+    console.log('✅ Lyft campaign seeded');
+  }
+  // Seed Uber if not exists
+  const existingUber = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['uber']);
+  if (!existingUber.rows.length) {
+    await pool.query(`
+      INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields, field_labels)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+    `, [
+      'uber',
+      'Uber — Rideshare',
+      'Rideshare - Uber',
+      'https://api.leadprosper.io/direct_post',
+      JSON.stringify(['firstName','lastName','email','phone','zip','ipAddress','trustedFormCertUrl','haveAttorney','usedUber','injuryType','incidentDate','incidentState']),
+      JSON.stringify(['dateOfBirth','gender','street','city','state','jornayaLeadId','publisherSub','userAgent','landingPageUrl','tcpaText']),
+      JSON.stringify({
+        haveAttorney:       'Do You Have an Attorney?',
+        usedUber:           'Were You an Uber Passenger?',
+        injuryType:         'Type of Injury',
+        incidentDate:       'Date of Incident',
+        incidentState:      'State Where Incident Occurred',
+        ipAddress:          'IP Address',
+        trustedFormCertUrl: 'TrustedForm URL',
+        zip:                'Zip Code',
+      }),
+    ]);
+    console.log('✅ Uber campaign seeded');
+  }
   console.log('✅ Campaigns table ready');
 }
 
