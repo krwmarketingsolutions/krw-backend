@@ -116,17 +116,9 @@ app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
   const campaign = req.params.campaign.toLowerCase();
   const b        = req.body || {};
 
-  // Get campaign config to know required fields
-  let requiredFields = ['firstName', 'lastName', 'email', 'phone']; // default
-  try {
-    const campRow = await pool.query('SELECT required_fields FROM campaigns WHERE slug=$1', [campaign]);
-    if (campRow.rows[0]?.required_fields) {
-      requiredFields = campRow.rows[0].required_fields;
-    }
-  } catch(e) {}
-
-  // Validate required fields from campaign config
-  const missing = requiredFields.filter(f => !b[f] || !String(b[f]).trim());
+  // Validate required fields
+  const required = ['firstName', 'lastName', 'email', 'phone'];
+  const missing  = required.filter(f => !b[f] || !String(b[f]).trim());
   if (missing.length) {
     return res.status(422).json({ status: 'rejected', reason: `Missing required fields: ${missing.join(', ')}` });
   }
@@ -213,11 +205,12 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
 
     // Hardcoded LP credentials per campaign (always reliable)
     const LP_CREDS = {
-      'mva':      { id: '31080',  sup: '110928', key: 'ke21sx0koi7dld' },
-      'rideshare':{ id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
-      'lyft':     { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
-      'uber':     { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
-      'roundup':  { id: '30976',  sup: '96279',  key: '6l5rtdz61ay1n2' },
+      'mva':       { id: '31080',  sup: '110928', key: 'ke21sx0koi7dld' },
+      'rideshare': { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
+      'lyft':      { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
+      'uber':      { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
+      'roundup':   { id: '30976',  sup: '96279',  key: '6l5rtdz61ay1n2' },
+      'roundup2':  { id: '30976',  sup: '96279',  key: '6l5rtdz61ay1n2' },
     };
 
     // Use hardcoded first, then fall back to buyer_notes
@@ -531,72 +524,21 @@ async function initCampaignsDB() {
       updated_at       TIMESTAMPTZ DEFAULT NOW()
     );
   `);
-  // Seed campaigns if not exists
-  const seedCampaigns = [
-    {
-      slug:            'depo',
-      name:            'DEPO — Lead Tree (WTC)',
-      vertical:        'Mass Tort - Depo',
-      apex_endpoint:   process.env.BUYER_ENDPOINT_DEPO || '',
-      required_fields: ['firstName','lastName','email','phone'],
-      optional_fields: ['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','facebookLeadId','publisherSub'],
-      field_labels:    {},
-    },
-    {
-      slug:            'lyft',
-      name:            'Lyft — Rideshare',
-      vertical:        'Rideshare - Lyft',
-      apex_endpoint:   'https://api.leadprosper.io/direct_post',
-      required_fields: ['firstName','lastName','email','phone','zip','ipAddress','trustedFormCertUrl','haveAttorney','usedLyft','injuryType','incidentDate','incidentState'],
-      optional_fields: ['dateOfBirth','gender','street','city','state','jornayaLeadId','publisherSub','userAgent','landingPageUrl','tcpaText'],
-      field_labels:    {
-        haveAttorney:       'Do You Have an Attorney?',
-        usedLyft:           'Were You a Lyft Passenger?',
-        injuryType:         'Type of Injury',
-        incidentDate:       'Date of Incident',
-        incidentState:      'State Where Incident Occurred',
-        ipAddress:          'IP Address',
-        trustedFormCertUrl: 'TrustedForm URL',
-        zip:                'Zip Code',
-      },
-    },
-    {
-      slug:            'roundup',
-      name:            'Roundup — Mass Tort',
-      vertical:        'Mass Tort - Roundup',
-      apex_endpoint:   'https://api.leadprosper.io/direct_post',
-      required_fields: ['firstName','lastName','email','phone','zip','ipAddress','trustedFormCertUrl','haveAttorney','usedRoundup','whichCancer','whatYear','exposedLocation'],
-      optional_fields: ['dateOfBirth','gender','street','city','state','jornayaLeadId','publisherSub','userAgent','landingPageUrl','tcpaText'],
-      field_labels:    {
-        haveAttorney:       'Do You Have an Attorney?',
-        usedRoundup:        'Were You Exposed to Roundup?',
-        whichCancer:        'Cancer Diagnosis',
-        whatYear:           'Year Diagnosed',
-        exposedLocation:    'Where Were You Exposed?',
-        ipAddress:          'IP Address',
-        trustedFormCertUrl: 'TrustedForm URL',
-        zip:                'Zip Code',
-      },
-    },
-  ];
-
-  for (const c of seedCampaigns) {
-    const { rows } = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', [c.slug]);
-    if (!rows.length) {
-      await pool.query(`
-        INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields, field_labels)
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
-      `, [
-        c.slug,
-        c.name,
-        c.vertical,
-        c.apex_endpoint,
-        JSON.stringify(c.required_fields),
-        JSON.stringify(c.optional_fields),
-        JSON.stringify(c.field_labels),
-      ]);
-      console.log(`✅ ${c.slug} campaign seeded`);
-    }
+  // Seed DEPO if not exists
+  const existing = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['depo']);
+  if (!existing.rows.length) {
+    await pool.query(`
+      INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields)
+      VALUES ($1,$2,$3,$4,$5,$6)
+    `, [
+      'depo',
+      'DEPO — Lead Tree (WTC)',
+      'Mass Tort - Depo',
+      process.env.BUYER_ENDPOINT_DEPO || '',
+      JSON.stringify(['firstName','lastName','email','phone']),
+      JSON.stringify(['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','facebookLeadId','publisherSub']),
+    ]);
+    console.log('✅ DEPO campaign seeded');
   }
   console.log('✅ Campaigns table ready');
 }
