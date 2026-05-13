@@ -116,9 +116,17 @@ app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
   const campaign = req.params.campaign.toLowerCase();
   const b        = req.body || {};
 
-  // Validate required fields
-  const required = ['firstName', 'lastName', 'email', 'phone'];
-  const missing  = required.filter(f => !b[f] || !String(b[f]).trim());
+  // Get campaign config to know required fields
+  let requiredFields = ['firstName', 'lastName', 'email', 'phone']; // default
+  try {
+    const campRow = await pool.query('SELECT required_fields FROM campaigns WHERE slug=$1', [campaign]);
+    if (campRow.rows[0]?.required_fields) {
+      requiredFields = campRow.rows[0].required_fields;
+    }
+  } catch(e) {}
+
+  // Validate required fields from campaign config
+  const missing = requiredFields.filter(f => !b[f] || !String(b[f]).trim());
   if (missing.length) {
     return res.status(422).json({ status: 'rejected', reason: `Missing required fields: ${missing.join(', ')}` });
   }
