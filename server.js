@@ -202,6 +202,7 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
 
     const buyerNotes  = campRow?.buyer_notes || '';
     const isLeadProsper = buyerUrl.includes('leadprosper') || buyerUrl.includes('direct_post');
+    const isLawmatics   = buyerUrl.includes('lawmatics.com');
 
     // Hardcoded LP credentials per campaign (always reliable)
     const LP_CREDS = {
@@ -259,6 +260,34 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
       };
       // Remove null values
       Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
+    } else if (isLawmatics) {
+      // ── Lawmatics format (Rideshare Uber/Lyft) ──────────
+      payload = {
+        first_name:               data.firstName,
+        last_name:                data.lastName,
+        email:                    data.email,
+        phone:                    String(data.phone).replace(/\D/g,''),
+        birthdate:                data.dateOfBirth    || null,
+        zipcode:                  data.zip            || null,
+        state:                    data.state          || null,
+        city:                     data.city           || null,
+        street:                   data.street         || null,
+        custom_field_368623:      data.trustedFormCertUrl || null,  // TrustedForm
+        custom_field_266045:      data.publisherSub   || null,      // Publisher
+        custom_field_766975:      data.rideshareGender     || null, // Gender ID
+        custom_field_766959:      data.sexuallyAssaulted   || null, // Assaulted?
+        custom_field_766960:      data.rideshareCompany    || null, // Uber/Lyft ID
+        custom_field_766964:      data.driverOrPassenger   || null, // Passenger?
+        custom_field_766968:      data.abuseType           || null, // Abuse type ID
+        custom_field_766962:      data.incidentDate        || null, // Incident date
+        custom_field_766980:      data.incidentStateText   || null, // Incident state
+        custom_field_631075:      data.hasReceipt          || null, // Receipt?
+        custom_field_766976:      data.fraudConviction     || null, // Fraud?
+        'custom_field_812732[]':  data.reportedTo          || null, // Reported to
+        'custom_field_375335[]':  data.bestTimeToCall      || null, // Best time
+      };
+      // Remove null values
+      Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
     } else {
       // ── Apex / generic format ───────────────────────────
       payload = {
@@ -295,7 +324,8 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
     const result = await resp.json().catch(() => ({ status: resp.status }));
 
     const accepted = result.status === 'ACCEPTED' || result.status === 'Success' ||
-                     result.status === 'success' || result.ok === true;
+                     result.status === 'success' || result.ok === true ||
+                     (isLawmatics && resp.ok);
     if (resp.ok && accepted) {
       const buyerId = String(result.lead_id || result.id || result.ids?.[0] || result.leadId || '');
       await pool.query(
