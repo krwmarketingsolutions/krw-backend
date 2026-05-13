@@ -205,12 +205,12 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
 
     // Hardcoded LP credentials per campaign (always reliable)
     const LP_CREDS = {
-      'mva':       { id: '31080',  sup: '110928', key: 'ke21sx0koi7dld' },
-      'rideshare': { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
-      'lyft':      { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
-      'uber':      { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
-      'roundup':   { id: '30976',  sup: '96279',  key: '6l5rtdz61ay1n2' },
-      'roundup2':  { id: '30976',  sup: '96279',  key: '6l5rtdz61ay1n2' },
+      'mva':        { id: '31080',  sup: '110928', key: 'ke21sx0koi7dld' },
+      'rideshare':  { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
+      'lyft':       { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
+      'uber':       { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
+      'roundup':    { id: '30976',  sup: '96279',  key: '6l5rtdz61ay1n2' },
+      'roundup-lt': { id: '30976',  sup: '96279',  key: '6l5rtdz61ay1n2' },
     };
 
     // Use hardcoded first, then fall back to buyer_notes
