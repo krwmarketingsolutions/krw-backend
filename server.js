@@ -62,7 +62,8 @@ async function initDB() {
       revenue         NUMERIC(10,2),
       cost            NUMERIC(10,2),
       profit          NUMERIC(10,2),
-      billable        BOOLEAN DEFAULT true,
+      billable        BOOLEAN DEFAULT NULL,
+      call_status_label TEXT DEFAULT 'pending',
       disposition     TEXT,
       call_status     TEXT,
       invoice_status  TEXT DEFAULT 'pending',
@@ -76,6 +77,9 @@ async function initDB() {
     ALTER TABLE calls ADD COLUMN IF NOT EXISTS caller_name   TEXT;
     ALTER TABLE calls ADD COLUMN IF NOT EXISTS publisher_sub TEXT;
     ALTER TABLE calls ADD COLUMN IF NOT EXISTS source_system TEXT DEFAULT 'partner';
+    ALTER TABLE calls ADD COLUMN IF NOT EXISTS call_status_label TEXT DEFAULT 'pending';
+    -- Set existing calls that have billable value to correct label
+    UPDATE calls SET call_status_label = CASE WHEN billable=true THEN 'cpa' WHEN billable=false THEN 'not_converted' ELSE 'pending' END WHERE call_status_label IS NULL OR call_status_label='pending';
   `);
   console.log('✅ DB ready');
 }
@@ -730,14 +734,14 @@ app.get('/publishers/:pub_id/calls', async (req, res) => {
 });
 
 // CRUD publishers (dashboard only)
-app.get('/publishers', requireKey, async (req, res) => {
+app.get('/publishers', requireApiKey, async (req, res) => {
   try {
     const r = await pool.query('SELECT * FROM publishers ORDER BY created_at DESC');
     res.json({ ok: true, publishers: r.rows });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-app.post('/publishers', requireKey, async (req, res) => {
+app.post('/publishers', requireApiKey, async (req, res) => {
   const { pub_id, name, email, campaign, did, payout_rate } = req.body || {};
   if (!pub_id || !name) return res.status(400).json({ ok: false, error: 'pub_id and name required' });
   try {
@@ -752,7 +756,7 @@ app.post('/publishers', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-app.delete('/publishers/:pub_id', requireKey, async (req, res) => {
+app.delete('/publishers/:pub_id', requireApiKey, async (req, res) => {
   try {
     await pool.query('UPDATE publishers SET active=false WHERE pub_id=$1', [req.params.pub_id]);
     res.json({ ok: true });
@@ -817,13 +821,22 @@ app.post('/calls/postback', async (req, res) => {
       }
     }
 
+    // Determine status label
+    let statusLabel = 'pending';
+    if (b.billable === true  || b.billable === 'true'  || b.billable === 1)  statusLabel = 'cpa';
+    if (b.billable === false || b.billable === 'false' || b.billable === 0)  statusLabel = 'not_converted';
+    // If billable field not sent at all, keep as pending
+    if (b.billable === undefined || b.billable === null) { statusLabel = 'pending'; }
+
     await pool.query(
       `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
                           publisher_sub, payout_amount, campaign_name, disposition,
-                          source_system, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [callDate, callerId, callerName, duration, billable,
-       pubSub, finalPayout, campaign, disposition, sourceSystem, JSON.stringify(b)]
+                          source_system, call_status_label, raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [callDate, callerId, callerName, duration,
+       statusLabel === 'pending' ? null : billable,
+       pubSub, statusLabel === 'cpa' ? finalPayout : null,
+       campaign, disposition, sourceSystem, statusLabel, JSON.stringify(b)]
     );
     res.json({ ok: true, message: 'Call recorded' });
   } catch(err) {
@@ -832,8 +845,93 @@ app.post('/calls/postback', async (req, res) => {
   }
 });
 
+// ── END OF DAY SWEEP ENDPOINT ────────────────────────
+// Partner posts all calls with final billable status
+// Matched by did + call_date, updates existing records
+app.patch('/calls/update', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+    process.env.PARTNER_API_KEY || '',
+    process.env.BUYER_API_KEY || '',
+  ].filter(Boolean);
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const updates = req.body.calls || [req.body];
+  const results = { updated: 0, not_found: 0, errors: 0 };
+
+  for (const item of updates) {
+    try {
+      // Normalize DID
+      const did       = String(item.did || item.DID || '').replace(/\D/g, '');
+      const callDate  = item.call_date || item.callDate || new Date().toISOString().split('T')[0];
+      const billable  = item.billable === true || item.billable === 'true' || item.billable === 1;
+      const statusLabel = billable ? 'cpa' : 'not_converted';
+
+      if (!did) { results.errors++; continue; }
+
+      // Find publisher from DID
+      let pubSub = item.publisher_sub || null;
+      if (!pubSub) {
+        const didLookup = await pool.query(
+          'SELECT pub_id, payout_rate FROM publishers WHERE did=$1 AND active=true LIMIT 1',
+          [did]
+        );
+        if (didLookup.rows.length) {
+          pubSub = didLookup.rows[0].pub_id;
+        }
+      }
+
+      // Get payout rate
+      let payout = parseFloat(item.payout_amount || item.payout || 0);
+      if (!payout && billable && pubSub) {
+        const rateQ = await pool.query(
+          'SELECT payout_rate FROM publishers WHERE pub_id=$1 LIMIT 1', [pubSub]
+        );
+        if (rateQ.rows.length) payout = parseFloat(rateQ.rows[0].payout_rate || 0);
+      }
+
+      // Update existing record matched by did (via publisher_sub) + call_date
+      const updateQ = await pool.query(
+        `UPDATE calls SET
+          billable          = $1,
+          call_status_label = $2,
+          payout_amount     = $3
+        WHERE publisher_sub = $4
+          AND call_date     = $5
+          AND (call_status_label = 'pending' OR caller_id = $6)
+        RETURNING id`,
+        [billable, statusLabel, billable ? payout : null,
+         pubSub, callDate, String(item.caller_id || '').replace(/\D/g,'')]
+      );
+
+      if (updateQ.rowCount > 0) {
+        results.updated++;
+      } else {
+        // Record not found — insert it
+        await pool.query(
+          `INSERT INTO calls (call_date, caller_id, billable, publisher_sub,
+                              payout_amount, call_status_label, source_system, raw)
+           VALUES ($1,$2,$3,$4,$5,$6,'partner',$7)`,
+          [callDate, String(item.caller_id||'').replace(/\D/g,''),
+           billable, pubSub, billable ? payout : null,
+           statusLabel, JSON.stringify(item)]
+        );
+        results.not_found++;
+      }
+    } catch (err) {
+      console.error('Update error:', err.message);
+      results.errors++;
+    }
+  }
+
+  res.json({ ok: true, message: 'End-of-day sweep complete', ...results });
+});
+
 // Get calls feed (dashboard)
-app.get('/calls/feed', requireKey, async (req, res) => {
+app.get('/calls/feed', requireApiKey, async (req, res) => {
   const { days = 30, pub } = req.query;
   try {
     let query = `SELECT * FROM calls WHERE received_at >= NOW() - INTERVAL '${parseInt(days)} days'`;
@@ -845,7 +943,7 @@ app.get('/calls/feed', requireKey, async (req, res) => {
 });
 
 // Calls summary (dashboard KPIs)
-app.get('/calls/summary', requireKey, async (req, res) => {
+app.get('/calls/summary', requireApiKey, async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT
