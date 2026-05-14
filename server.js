@@ -696,7 +696,7 @@ app.post('/publishers/login', async (req, res) => {
     const r = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
     if (!r.rows.length) return res.status(401).json({ ok: false, error: 'Publisher not found' });
     const pub = r.rows[0];
-    res.json({ ok: true, name: pub.name, pub_id: pub.pub_id, campaign: pub.campaign });
+    res.json({ ok: true, name: pub.name, pub_id: pub.pub_id, campaign: pub.campaign, did: pub.did||null });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
@@ -728,14 +728,14 @@ app.get('/publishers/:pub_id/calls', async (req, res) => {
 });
 
 // CRUD publishers (dashboard only)
-app.get('/publishers', requireKey, async (req, res) => {
+app.get('/publishers', requireApiKey, async (req, res) => {
   try {
     const r = await pool.query('SELECT * FROM publishers ORDER BY created_at DESC');
     res.json({ ok: true, publishers: r.rows });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-app.post('/publishers', requireKey, async (req, res) => {
+app.post('/publishers', requireApiKey, async (req, res) => {
   const { pub_id, name, email, campaign, did } = req.body || {};
   if (!pub_id || !name) return res.status(400).json({ ok: false, error: 'pub_id and name required' });
   try {
@@ -750,7 +750,7 @@ app.post('/publishers', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-app.delete('/publishers/:pub_id', requireKey, async (req, res) => {
+app.delete('/publishers/:pub_id', requireApiKey, async (req, res) => {
   try {
     await pool.query('UPDATE publishers SET active=false WHERE pub_id=$1', [req.params.pub_id]);
     res.json({ ok: true });
@@ -819,7 +819,7 @@ app.post('/calls/postback', async (req, res) => {
 });
 
 // Get calls feed (dashboard)
-app.get('/calls/feed', requireKey, async (req, res) => {
+app.get('/calls/feed', requireApiKey, async (req, res) => {
   const { days = 30, pub } = req.query;
   try {
     let query = `SELECT * FROM calls WHERE received_at >= NOW() - INTERVAL '${parseInt(days)} days'`;
@@ -831,7 +831,7 @@ app.get('/calls/feed', requireKey, async (req, res) => {
 });
 
 // Calls summary (dashboard KPIs)
-app.get('/calls/summary', requireKey, async (req, res) => {
+app.get('/calls/summary', requireApiKey, async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT
