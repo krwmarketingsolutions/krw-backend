@@ -56,6 +56,8 @@ async function initDB() {
       buyer_id        TEXT,
       supplier_name   TEXT,
       caller_id       TEXT,
+      caller_name     TEXT,
+      publisher_sub   TEXT,
       payout_amount   NUMERIC(10,2),
       revenue         NUMERIC(10,2),
       cost            NUMERIC(10,2),
@@ -67,8 +69,13 @@ async function initDB() {
       invoice_id      TEXT,
       invoice_date    TEXT,
       paid_date       TEXT,
+      source_system   TEXT DEFAULT 'partner',
       raw             JSONB
     );
+    -- Add columns if upgrading existing table
+    ALTER TABLE calls ADD COLUMN IF NOT EXISTS caller_name   TEXT;
+    ALTER TABLE calls ADD COLUMN IF NOT EXISTS publisher_sub TEXT;
+    ALTER TABLE calls ADD COLUMN IF NOT EXISTS source_system TEXT DEFAULT 'partner';
   `);
   console.log('✅ DB ready');
 }
@@ -661,10 +668,171 @@ app.patch('/campaigns/:slug', requireKey, async (req, res) => {
 });
 
 
+// ── Publishers table ──────────────────────────────────
+async function initPublishersDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS publishers (
+      id            SERIAL PRIMARY KEY,
+      pub_id        TEXT UNIQUE NOT NULL,
+      name          TEXT NOT NULL,
+      email         TEXT,
+      campaign      TEXT,
+      active        BOOLEAN DEFAULT true,
+      created_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  console.log('Publishers table ready');
+}
+
+// ── PUBLISHER ENDPOINTS ───────────────────────────────
+
+// Verify publisher login (pub_id lookup)
+app.post('/publishers/login', async (req, res) => {
+  const { pub_id } = req.body || {};
+  if (!pub_id) return res.status(400).json({ ok: false, error: 'pub_id required' });
+  try {
+    const r = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
+    if (!r.rows.length) return res.status(401).json({ ok: false, error: 'Publisher not found' });
+    const pub = r.rows[0];
+    res.json({ ok: true, name: pub.name, pub_id: pub.pub_id, campaign: pub.campaign });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Get calls for a publisher
+app.get('/publishers/:pub_id/calls', async (req, res) => {
+  const { pub_id } = req.params;
+  const { days = 30, billable_only } = req.query;
+  try {
+    // Verify publisher exists
+    const pubCheck = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
+    if (!pubCheck.rows.length) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+
+    let query = `SELECT id, call_date, call_datetime, caller_id, caller_name,
+                        call_duration, billable, disposition, payout_amount,
+                        campaign_name, received_at
+                 FROM calls
+                 WHERE publisher_sub=$1
+                 AND received_at >= NOW() - INTERVAL '${parseInt(days)} days'`;
+    if (billable_only === 'true') query += ' AND billable=true';
+    query += ' ORDER BY received_at DESC LIMIT 500';
+
+    const r = await pool.query(query, [pub_id]);
+    const total = r.rows.length;
+    const billable_count = r.rows.filter(c => c.billable).length;
+    const total_payout = r.rows.filter(c => c.billable).reduce((sum, c) => sum + parseFloat(c.payout_amount||0), 0);
+
+    res.json({ ok: true, calls: r.rows, total, billable_count, total_payout: total_payout.toFixed(2) });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// CRUD publishers (dashboard only)
+app.get('/publishers', requireApiKey, async (req, res) => {
+  try {
+    const r = await pool.query('SELECT * FROM publishers ORDER BY created_at DESC');
+    res.json({ ok: true, publishers: r.rows });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.post('/publishers', requireApiKey, async (req, res) => {
+  const { pub_id, name, email, campaign } = req.body || {};
+  if (!pub_id || !name) return res.status(400).json({ ok: false, error: 'pub_id and name required' });
+  try {
+    const r = await pool.query(
+      `INSERT INTO publishers (pub_id, name, email, campaign)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (pub_id) DO UPDATE SET name=$2, email=$3, campaign=$4, active=true
+       RETURNING *`,
+      [pub_id, name, email||null, campaign||null]
+    );
+    res.json({ ok: true, publisher: r.rows[0] });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.delete('/publishers/:pub_id', requireApiKey, async (req, res) => {
+  try {
+    await pool.query('UPDATE publishers SET active=false WHERE pub_id=$1', [req.params.pub_id]);
+    res.json({ ok: true });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── CALLS POSTBACK ENDPOINT ───────────────────────────
+// Called by partner system or buyer at end of day
+// Accepts flexible field names to support multiple sources
+app.post('/calls/postback', async (req, res) => {
+  // Accept any API key from configured sources
+  const key = req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.LEAD_API_KEY || 'krwleads2026secure',  // your key
+    process.env.PARTNER_API_KEY || '',                   // partner key (set in Railway env vars)
+    process.env.BUYER_API_KEY || '',                     // future buyer key
+  ].filter(Boolean);
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Normalize fields — accept multiple naming conventions
+  const callDate     = b.call_date   || b.callDate   || b.date        || new Date().toISOString().split('T')[0];
+  const callerId     = b.caller_id   || b.callerId   || b.phone       || b.ani        || null;
+  const callerName   = b.caller_name || b.callerName || b.name        || b.contact    || null;
+  const duration     = parseInt(b.call_duration || b.duration || b.talk_time || 0);
+  const billable     = b.billable === true || b.billable === 'true' || b.billable === 1 || b.status === 'billable';
+  const pubSub       = b.publisher_sub || b.pub_id || b.sub_id || b.publisher || null;
+  const payout       = parseFloat(b.payout_amount || b.payout || b.revenue || b.amount || 0);
+  const campaign     = b.campaign_name || b.campaign || b.vertical || null;
+  const disposition  = b.disposition || b.call_status || b.status || null;
+  const sourceSystem = b.source_system || b.source || 'partner';
+
+  try {
+    await pool.query(
+      `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
+                          publisher_sub, payout_amount, campaign_name, disposition,
+                          source_system, raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [callDate, callerId, callerName, duration, billable,
+       pubSub, payout, campaign, disposition, sourceSystem, JSON.stringify(b)]
+    );
+    res.json({ ok: true, message: 'Call recorded' });
+  } catch(err) {
+    console.error('Postback error:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Get calls feed (dashboard)
+app.get('/calls/feed', requireApiKey, async (req, res) => {
+  const { days = 30, pub } = req.query;
+  try {
+    let query = `SELECT * FROM calls WHERE received_at >= NOW() - INTERVAL '${parseInt(days)} days'`;
+    if (pub) query += ` AND publisher_sub=$1`;
+    query += ' ORDER BY received_at DESC LIMIT 1000';
+    const r = await pool.query(query, pub ? [pub] : []);
+    res.json({ ok: true, calls: r.rows });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Calls summary (dashboard KPIs)
+app.get('/calls/summary', requireApiKey, async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT
+        COUNT(*)                                          AS total,
+        COUNT(*) FILTER(WHERE billable=true)              AS billable,
+        COUNT(*) FILTER(WHERE DATE(received_at)=CURRENT_DATE) AS today,
+        COALESCE(SUM(payout_amount) FILTER(WHERE billable=true),0) AS total_payout
+      FROM calls
+      WHERE received_at >= NOW() - INTERVAL '30 days'
+    `);
+    res.json({ ok: true, ...r.rows[0] });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // ── Start ─────────────────────────────────────────────
 initDB()
   .then(() => initLeadsDB())
   .then(() => initCampaignsDB())
+  .then(() => initPublishersDB())
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
