@@ -668,103 +668,154 @@ app.patch('/campaigns/:slug', requireKey, async (req, res) => {
 });
 
 
-// ── Publishers table ──────────────────────────────────
+// ══════════════════════════════════════════════════════
+//  PUBLISHERS — track publisher info and campaign associations
+// ══════════════════════════════════════════════════════
+
 async function initPublishersDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS publishers (
-      id            SERIAL PRIMARY KEY,
-      pub_id        TEXT UNIQUE NOT NULL,
-      name          TEXT NOT NULL,
-      email         TEXT,
-      campaign      TEXT,
-      active        BOOLEAN DEFAULT true,
-      created_at    TIMESTAMPTZ DEFAULT NOW()
+      id          SERIAL PRIMARY KEY,
+      pub_id      TEXT UNIQUE NOT NULL,
+      name        TEXT NOT NULL,
+      email       TEXT,
+      campaign    TEXT,
+      status      TEXT DEFAULT 'active',
+      payout_rate NUMERIC,
+      created_at  TIMESTAMPTZ DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ DEFAULT NOW()
     );
+    CREATE INDEX IF NOT EXISTS idx_publishers_pub_id   ON publishers (pub_id);
+    CREATE INDEX IF NOT EXISTS idx_publishers_campaign ON publishers (campaign);
+    -- Add columns if upgrading existing table
+    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS status      TEXT DEFAULT 'active';
+    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS payout_rate NUMERIC;
+    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ DEFAULT NOW();
   `);
-  console.log('Publishers table ready');
+  console.log('✅ Publishers table ready');
 }
 
-// ── PUBLISHER ENDPOINTS ───────────────────────────────
-
-// Verify publisher login (pub_id lookup)
+// ── Publisher login (public — pub_id lookup) ──────────
 app.post('/publishers/login', async (req, res) => {
   const { pub_id } = req.body || {};
   if (!pub_id) return res.status(400).json({ ok: false, error: 'pub_id required' });
   try {
-    const r = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
+    const r = await pool.query(
+      "SELECT * FROM publishers WHERE pub_id=$1 AND status='active'",
+      [pub_id]
+    );
     if (!r.rows.length) return res.status(401).json({ ok: false, error: 'Publisher not found' });
     const pub = r.rows[0];
     res.json({ ok: true, name: pub.name, pub_id: pub.pub_id, campaign: pub.campaign });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-// Get calls for a publisher
+// ── Get calls for a publisher (public — verified by pub_id) ──
 app.get('/publishers/:pub_id/calls', async (req, res) => {
   const { pub_id } = req.params;
   const { days = 30, billable_only } = req.query;
   try {
-    // Verify publisher exists
-    const pubCheck = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
+    // Verify publisher exists and is active
+    const pubCheck = await pool.query(
+      "SELECT * FROM publishers WHERE pub_id=$1 AND status='active'",
+      [pub_id]
+    );
     if (!pubCheck.rows.length) return res.status(401).json({ ok: false, error: 'Unauthorized' });
 
-    let query = `SELECT id, call_date, call_datetime, caller_id, caller_name,
-                        call_duration, billable, disposition, payout_amount,
-                        campaign_name, received_at
-                 FROM calls
-                 WHERE publisher_sub=$1
-                 AND received_at >= NOW() - INTERVAL '${parseInt(days)} days'`;
+    let query = 'SELECT id, call_date, call_datetime, caller_id, caller_name, call_duration, billable, disposition, payout_amount, campaign_name, received_at FROM calls WHERE publisher_sub=$1 AND received_at >= NOW() - INTERVAL \'' + parseInt(days) + ' days\'';
     if (billable_only === 'true') query += ' AND billable=true';
     query += ' ORDER BY received_at DESC LIMIT 500';
 
     const r = await pool.query(query, [pub_id]);
-    const total = r.rows.length;
+    const total          = r.rows.length;
     const billable_count = r.rows.filter(c => c.billable).length;
-    const total_payout = r.rows.filter(c => c.billable).reduce((sum, c) => sum + parseFloat(c.payout_amount||0), 0);
+    const total_payout   = r.rows
+      .filter(c => c.billable)
+      .reduce((sum, c) => sum + parseFloat(c.payout_amount || 0), 0);
 
     res.json({ ok: true, calls: r.rows, total, billable_count, total_payout: total_payout.toFixed(2) });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-// CRUD publishers (dashboard only)
-app.get('/publishers', requireApiKey, async (req, res) => {
+// ── GET /publishers — list all publishers (requires API key) ──
+app.get('/publishers', requireKey, async (req, res) => {
   try {
     const r = await pool.query('SELECT * FROM publishers ORDER BY created_at DESC');
     res.json({ ok: true, publishers: r.rows });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-app.post('/publishers', requireApiKey, async (req, res) => {
-  const { pub_id, name, email, campaign } = req.body || {};
+// ── GET /publishers/:pub_id — get a specific publisher (requires API key) ──
+app.get('/publishers/:pub_id', requireKey, async (req, res) => {
+  try {
+    const r = await pool.query('SELECT * FROM publishers WHERE pub_id=$1', [req.params.pub_id]);
+    if (!r.rows.length) return res.status(404).json({ ok: false, error: 'Publisher not found' });
+    res.json({ ok: true, publisher: r.rows[0] });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── POST /publishers — create a new publisher (requires API key) ──
+app.post('/publishers', requireKey, async (req, res) => {
+  const { pub_id, name, email, campaign, status, payout_rate } = req.body || {};
   if (!pub_id || !name) return res.status(400).json({ ok: false, error: 'pub_id and name required' });
   try {
     const r = await pool.query(
-      `INSERT INTO publishers (pub_id, name, email, campaign)
-       VALUES ($1,$2,$3,$4)
-       ON CONFLICT (pub_id) DO UPDATE SET name=$2, email=$3, campaign=$4, active=true
-       RETURNING *`,
-      [pub_id, name, email||null, campaign||null]
+      'INSERT INTO publishers (pub_id, name, email, campaign, status, payout_rate) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (pub_id) DO UPDATE SET name=$2, email=$3, campaign=$4, status=$5, payout_rate=$6, updated_at=NOW() RETURNING *',
+      [pub_id, name, email || null, campaign || null, status || 'active', payout_rate || null]
     );
     res.json({ ok: true, publisher: r.rows[0] });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-app.delete('/publishers/:pub_id', requireApiKey, async (req, res) => {
+// ── PATCH /publishers/:pub_id — update a publisher (requires API key) ──
+app.patch('/publishers/:pub_id', requireKey, async (req, res) => {
   try {
-    await pool.query('UPDATE publishers SET active=false WHERE pub_id=$1', [req.params.pub_id]);
+    const pub_id  = req.params.pub_id;
+    const allowed = ['name', 'email', 'campaign', 'status', 'payout_rate'];
+    const sets = [], params = [];
+    let i = 1;
+    allowed.forEach(function(col) {
+      if (req.body[col] !== undefined) {
+        sets.push(col + '=$' + i);
+        i = i + 1;
+        params.push(req.body[col]);
+      }
+    });
+    if (!sets.length) return res.status(400).json({ ok: false, error: 'Nothing to update' });
+    sets.push('updated_at=NOW()');
+    params.push(pub_id);
+    const r = await pool.query(
+      'UPDATE publishers SET ' + sets.join(',') + ' WHERE pub_id=$' + i + ' RETURNING *',
+      params
+    );
+    if (!r.rows.length) return res.status(404).json({ ok: false, error: 'Publisher not found' });
+    res.json({ ok: true, publisher: r.rows[0] });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── DELETE /publishers/:pub_id — soft-delete (set status=inactive) ──
+app.delete('/publishers/:pub_id', requireKey, async (req, res) => {
+  try {
+    await pool.query(
+      "UPDATE publishers SET status='inactive', updated_at=NOW() WHERE pub_id=$1",
+      [req.params.pub_id]
+    );
     res.json({ ok: true });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-// ── CALLS POSTBACK ENDPOINT ───────────────────────────
-// Called by partner system or buyer at end of day
-// Accepts flexible field names to support multiple sources
+
+// ══════════════════════════════════════════════════════
+//  CALLS POSTBACK — flexible inbound from partners/buyers
+// ══════════════════════════════════════════════════════
+
 app.post('/calls/postback', async (req, res) => {
   // Accept any API key from configured sources
   const key = req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '';
   const validKeys = [
-    process.env.LEAD_API_KEY || 'krwleads2026secure',  // your key
-    process.env.PARTNER_API_KEY || '',                   // partner key (set in Railway env vars)
-    process.env.BUYER_API_KEY || '',                     // future buyer key
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+    process.env.PARTNER_API_KEY || '',
+    process.env.BUYER_API_KEY   || '',
   ].filter(Boolean);
   if (!validKeys.includes(key)) {
     return res.status(401).json({ ok: false, error: 'Invalid API key' });
@@ -773,9 +824,9 @@ app.post('/calls/postback', async (req, res) => {
   const b = req.body || {};
 
   // Normalize fields — accept multiple naming conventions
-  const callDate     = b.call_date   || b.callDate   || b.date        || new Date().toISOString().split('T')[0];
-  const callerId     = b.caller_id   || b.callerId   || b.phone       || b.ani        || null;
-  const callerName   = b.caller_name || b.callerName || b.name        || b.contact    || null;
+  const callDate     = b.call_date   || b.callDate   || b.date     || new Date().toISOString().split('T')[0];
+  const callerId     = b.caller_id   || b.callerId   || b.phone    || b.ani        || null;
+  const callerName   = b.caller_name || b.callerName || b.name     || b.contact    || null;
   const duration     = parseInt(b.call_duration || b.duration || b.talk_time || 0);
   const billable     = b.billable === true || b.billable === 'true' || b.billable === 1 || b.status === 'billable';
   const pubSub       = b.publisher_sub || b.pub_id || b.sub_id || b.publisher || null;
@@ -786,10 +837,7 @@ app.post('/calls/postback', async (req, res) => {
 
   try {
     await pool.query(
-      `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
-                          publisher_sub, payout_amount, campaign_name, disposition,
-                          source_system, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      'INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable, publisher_sub, payout_amount, campaign_name, disposition, source_system, raw) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
       [callDate, callerId, callerName, duration, billable,
        pubSub, payout, campaign, disposition, sourceSystem, JSON.stringify(b)]
     );
@@ -800,26 +848,26 @@ app.post('/calls/postback', async (req, res) => {
   }
 });
 
-// Get calls feed (dashboard)
-app.get('/calls/feed', requireApiKey, async (req, res) => {
+// ── GET /calls/feed — calls feed for dashboard ────────
+app.get('/calls/feed', requireKey, async (req, res) => {
   const { days = 30, pub } = req.query;
   try {
-    let query = `SELECT * FROM calls WHERE received_at >= NOW() - INTERVAL '${parseInt(days)} days'`;
-    if (pub) query += ` AND publisher_sub=$1`;
+    let query = 'SELECT * FROM calls WHERE received_at >= NOW() - INTERVAL \'' + parseInt(days) + ' days\'';
+    if (pub) query += ' AND publisher_sub=$1';
     query += ' ORDER BY received_at DESC LIMIT 1000';
     const r = await pool.query(query, pub ? [pub] : []);
     res.json({ ok: true, calls: r.rows });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-// Calls summary (dashboard KPIs)
-app.get('/calls/summary', requireApiKey, async (req, res) => {
+// ── GET /calls/summary — KPI summary for dashboard ───
+app.get('/calls/summary', requireKey, async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT
-        COUNT(*)                                          AS total,
-        COUNT(*) FILTER(WHERE billable=true)              AS billable,
-        COUNT(*) FILTER(WHERE DATE(received_at)=CURRENT_DATE) AS today,
+        COUNT(*)                                               AS total,
+        COUNT(*) FILTER(WHERE billable=true)                   AS billable,
+        COUNT(*) FILTER(WHERE DATE(received_at)=CURRENT_DATE)  AS today,
         COALESCE(SUM(payout_amount) FILTER(WHERE billable=true),0) AS total_payout
       FROM calls
       WHERE received_at >= NOW() - INTERVAL '30 days'
@@ -827,6 +875,7 @@ app.get('/calls/summary', requireApiKey, async (req, res) => {
     res.json({ ok: true, ...r.rows[0] });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
+
 
 // ── Start ─────────────────────────────────────────────
 initDB()
