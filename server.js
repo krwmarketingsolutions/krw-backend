@@ -277,11 +277,11 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
         // Roundup-specific fields — normalised to boolean (true/false) so
         // LeadProsper accepts them.  Raw strings like "yes"/"no"/"true"/"false"
-        // are all converted; unrecognised / empty values are omitted entirely.
-        // have_attorney and used_roundup are only included when true — LeadProsper
-        // rejects false values for these fields; omitting them is the correct signal.
-        ...(toBooleanField(data.haveAttorney) === true ? { have_attorney: true } : {}),
-        ...(toBooleanField(data.usedRoundup)  === true ? { used_roundup:  true } : {}),
+        // are all converted; unrecognised / empty values default to false.
+        // have_attorney and used_roundup are REQUIRED by LeadProsper and must
+        // always be sent as an explicit boolean — never omitted.
+        have_attorney:    toBooleanField(data.haveAttorney) ?? false,
+        used_roundup:     toBooleanField(data.usedRoundup)  ?? false,
         which_cancer:     data.whichCancer     || null,
         what_year:        data.whatYear        || null,
         exposed_location: data.exposedLocation || null,
