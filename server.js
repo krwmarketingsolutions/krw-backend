@@ -200,6 +200,15 @@ app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
   }
 });
 
+function toBooleanField(val) {
+  if (val === undefined || val === null || val === 'undefined') return null;
+  if (typeof val === 'boolean') return val;
+  const s = String(val).trim().toLowerCase();
+  if (s === 'true'  || s === 'yes' || s === '1') return true;
+  if (s === 'false' || s === 'no'  || s === '0') return false;
+  return null;
+}
+
 async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
   try {
     await pool.query(`UPDATE leads SET status='forwarding' WHERE id=$1`, [leadId]);
@@ -263,8 +272,8 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         ip_address:     data.ipAddress     || null,
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
         // Roundup-specific fields (passed through if present)
-        have_attorney:    data.haveAttorney    || null,
-        used_roundup:     data.usedRoundup     || null,
+        have_attorney:    toBooleanField(data.haveAttorney) ?? false,
+        used_roundup:     toBooleanField(data.usedRoundup)  ?? false,
         which_cancer:     data.whichCancer     || null,
         what_year:        data.whatYear        || null,
         exposed_location: data.exposedLocation || null,
@@ -324,6 +333,10 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
           publisherSub:       data.publisherSub || null,
         },
       };
+    }
+
+    if (campaign === 'roundup' || campaign === 'roundup-lt') {
+      console.log(`[${leadRef}] LP roundup fields → used_roundup=${payload.used_roundup} have_attorney=${payload.have_attorney} which_cancer=${payload.which_cancer} what_year=${payload.what_year} exposed_location=${payload.exposed_location}`);
     }
 
     const resp = await fetch(buyerUrl, {
