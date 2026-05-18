@@ -272,8 +272,8 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         ip_address:     data.ipAddress     || null,
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
         // Roundup-specific fields (passed through if present)
-        have_attorney:    toBooleanField(data.haveAttorney) ?? false,
-        used_roundup:     toBooleanField(data.usedRoundup)  ?? false,
+        ...(toBooleanField(data.haveAttorney) === true ? { have_attorney: true } : {}),
+        ...(toBooleanField(data.usedRoundup)  === true ? { used_roundup:  true } : {}),
         which_cancer:     data.whichCancer     || null,
         what_year:        data.whatYear        || null,
         exposed_location: data.exposedLocation || null,
@@ -492,7 +492,7 @@ app.get('/invoice-summary', requireKey, async (req, res) => {
     let i=1;
     if (from) { where.push(`received_at::date>=$${i++}`); params.push(from); }
     if (to)   { where.push(`received_at::date<=$${i++}`); params.push(to); }
-    const calls = await pool.query(`SELECT * FROM trackdrive_calls WHERE ${where.join(' AND ')} ORDER BY received_at DESC`, params);
+    const calls = await pool.query(`SELECT * FROM calls WHERE ${where.join(' AND ')} ORDER BY received_at DESC`, params);
     const byBuyer = {};
     calls.rows.forEach(c => {
       const k = (c.buyer_name||'Unknown')+'|'+(c.vertical||'');
