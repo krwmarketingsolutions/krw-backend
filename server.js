@@ -843,6 +843,10 @@ app.post('/calls/postback', async (req, res) => {
     // If billable field not sent at all, keep as pending
     if (b.billable === undefined || b.billable === null) { statusLabel = 'pending'; }
 
+    // Force campaign to SSDI and source to partner for all postbacks
+    const forcedCampaign = 'SSDI';
+    const forcedSource   = 'partner';
+
     await pool.query(
       `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
                           publisher_sub, payout_amount, campaign_name, disposition,
@@ -851,7 +855,7 @@ app.post('/calls/postback', async (req, res) => {
       [callDate, callerId, callerName, duration,
        statusLabel === 'pending' ? null : billable,
        pubSub, statusLabel === 'cpa' ? finalPayout : null,
-       campaign, disposition, sourceSystem, statusLabel, JSON.stringify(b)]
+       forcedCampaign, disposition, forcedSource, statusLabel, JSON.stringify(b)]
     );
     res.json({ ok: true, message: 'Call recorded' });
   } catch(err) {
