@@ -271,9 +271,9 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         case_description: data.caseDescription || data.notes || null,
         ip_address:     data.ipAddress     || null,
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
-        // Roundup-specific fields (only included when explicitly true; LeadProsper rejects false values)
-        ...(toBooleanField(data.haveAttorney) === true ? { have_attorney: true } : {}),
-        ...(toBooleanField(data.usedRoundup)  === true ? { used_roundup:  true } : {}),
+        // Roundup-specific fields (passed through if present)
+        have_attorney:    toBooleanField(data.haveAttorney) ?? false,
+        used_roundup:     toBooleanField(data.usedRoundup)  ?? false,
         which_cancer:     data.whichCancer     || null,
         what_year:        data.whatYear        || null,
         exposed_location: data.exposedLocation || null,
@@ -492,7 +492,7 @@ app.get('/invoice-summary', requireKey, async (req, res) => {
     let i=1;
     if (from) { where.push(`received_at::date>=$${i++}`); params.push(from); }
     if (to)   { where.push(`received_at::date<=$${i++}`); params.push(to); }
-    const calls = await pool.query(`SELECT * FROM calls WHERE ${where.join(' AND ')} ORDER BY received_at DESC`, params);
+    const calls = await pool.query(`SELECT * FROM trackdrive_calls WHERE ${where.join(' AND ')} ORDER BY received_at DESC`, params);
     const byBuyer = {};
     calls.rows.forEach(c => {
       const k = (c.buyer_name||'Unknown')+'|'+(c.vertical||'');
@@ -686,6 +686,32 @@ app.patch('/campaigns/:slug', requireKey, async (req, res) => {
 
 
 // ── Publishers table ──────────────────────────────────
+async function initTrackdriveDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS trackdrive_calls (
+      id              SERIAL PRIMARY KEY,
+      received_at     TIMESTAMPTZ DEFAULT NOW(),
+      call_date       TEXT,
+      call_datetime   TEXT,
+      call_duration   INTEGER,
+      vertical        TEXT,
+      campaign_name   TEXT,
+      buyer_name      TEXT,
+      caller_id       TEXT,
+      caller_name     TEXT,
+      publisher_sub   TEXT,
+      payout_amount   NUMERIC(10,2),
+      billable        BOOLEAN DEFAULT true,
+      invoice_status  TEXT DEFAULT 'pending',
+      invoice_id      TEXT,
+      invoice_date    TEXT,
+      paid_date       TEXT,
+      raw             JSONB
+    );
+  `);
+  console.log('Trackdrive calls table ready');
+}
+
 async function initPublishersDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS publishers (
@@ -778,7 +804,45 @@ app.delete('/publishers/:pub_id', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-// ── CALLS POSTBACK ENDPOINT ───────────────────────────
+// ── TRACKDRIVE POSTBACK ENDPOINT (FE calls → Invoicing) ─
+app.post('/trackdrive/postback', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+    process.env.TRACKDRIVE_API_KEY || '',
+  ].filter(Boolean);
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+  const b = req.body || {};
+  const callDate    = b.call_date   || b.date     || new Date().toISOString().split('T')[0];
+  const callerId    = b.caller_id   || b.ani      || b.phone    || null;
+  const callerName  = b.caller_name || b.name     || null;
+  const duration    = parseInt(b.call_duration || b.duration || 0);
+  const billable    = b.billable === true || b.billable === 'true' || b.billable === 1;
+  const pubSub      = b.publisher_sub || b.pub_id || null;
+  const payout      = parseFloat(b.payout_amount || b.payout || 0);
+  const buyerName   = b.buyer_name  || b.buyer    || null;
+  const vertical    = b.vertical    || b.campaign || 'FE';
+  const campaign    = b.campaign_name || vertical;
+
+  try {
+    await pool.query(
+      `INSERT INTO trackdrive_calls
+        (call_date, caller_id, caller_name, call_duration, billable,
+         publisher_sub, payout_amount, buyer_name, vertical, campaign_name, raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [callDate, callerId, callerName, duration, billable,
+       pubSub, payout, buyerName, vertical, campaign, JSON.stringify(b)]
+    );
+    res.json({ ok: true, message: 'TrackDrive call recorded' });
+  } catch(err) {
+    console.error('TrackDrive postback error:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── CALLS POSTBACK ENDPOINT (SSDI only) ─────────────────
 // Called by partner system or buyer at end of day
 // Accepts flexible field names to support multiple sources
 app.post('/calls/postback', async (req, res) => {
@@ -990,6 +1054,7 @@ app.get('/calls/summary', requireKey, async (req, res) => {
 initDB()
   .then(() => initLeadsDB())
   .then(() => initCampaignsDB())
+  .then(() => initTrackdriveDB())
   .then(() => initPublishersDB())
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
