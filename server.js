@@ -271,12 +271,12 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         case_description: data.caseDescription || data.notes || null,
         ip_address:     data.ipAddress     || null,
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
-        // Roundup-specific fields (passed through if present)
-        have_attorney:    toBooleanField(data.haveAttorney) ?? false,
-        used_roundup:     toBooleanField(data.usedRoundup)  ?? false,
-        which_cancer:     data.whichCancer     || null,
-        what_year:        data.whatYear        || null,
-        exposed_location: data.exposedLocation || null,
+        // Roundup-specific fields — only spread when true/present
+        ...(toBooleanField(data.haveAttorney) === true  ? { have_attorney:    true }                    : {}),
+        ...(toBooleanField(data.usedRoundup)  === true  ? { used_roundup:     true }                    : {}),
+        ...(data.whichCancer     ? { which_cancer:     data.whichCancer }     : {}),
+        ...(data.whatYear        ? { what_year:        data.whatYear }        : {}),
+        ...(data.exposedLocation ? { exposed_location: data.exposedLocation } : {}),
       };
       // Remove null values
       Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
@@ -488,11 +488,11 @@ app.get('/calls', requireKey, async (req, res) => {
 app.get('/invoice-summary', requireKey, async (req, res) => {
   try {
     const { from, to } = req.query;
-    const where=['billable=true',"invoice_status='pending'","payout_amount>0"], params=[];
+    const where=["source_system='trackdrive'",'billable=true',"invoice_status='pending'","payout_amount>0"], params=[];
     let i=1;
-    if (from) { where.push(`received_at::date>=$${i++}`); params.push(from); }
-    if (to)   { where.push(`received_at::date<=$${i++}`); params.push(to); }
-    const calls = await pool.query(`SELECT * FROM trackdrive_calls WHERE ${where.join(' AND ')} ORDER BY received_at DESC`, params);
+    if (from) { where.push('received_at::date>=$'+i++); params.push(from); }
+    if (to)   { where.push('received_at::date<=$'+i++); params.push(to); }
+    const calls = await pool.query(`SELECT * FROM calls WHERE ${where.join(' AND ')} ORDER BY received_at DESC`, params);
     const byBuyer = {};
     calls.rows.forEach(c => {
       const k = (c.buyer_name||'Unknown')+'|'+(c.vertical||'');
@@ -805,15 +805,8 @@ app.delete('/publishers/:pub_id', requireKey, async (req, res) => {
 });
 
 // ── TRACKDRIVE POSTBACK ENDPOINT (FE calls → Invoicing) ─
-app.post('/trackdrive/postback', async (req, res) => {
-  const key = req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '';
-  const validKeys = [
-    process.env.LEAD_API_KEY || 'krwleads2026secure',
-    process.env.TRACKDRIVE_API_KEY || '',
-  ].filter(Boolean);
-  if (!validKeys.includes(key)) {
-    return res.status(401).json({ ok: false, error: 'Invalid API key' });
-  }
+// Writes to calls table with source_system='trackdrive'
+app.post('/trackdrive/postback', requireKey, async (req, res) => {
   const b = req.body || {};
   const callDate    = b.call_date   || b.date     || new Date().toISOString().split('T')[0];
   const callerId    = b.caller_id   || b.ani      || b.phone    || null;
@@ -828,10 +821,11 @@ app.post('/trackdrive/postback', async (req, res) => {
 
   try {
     await pool.query(
-      `INSERT INTO trackdrive_calls
+      `INSERT INTO calls
         (call_date, caller_id, caller_name, call_duration, billable,
-         publisher_sub, payout_amount, buyer_name, vertical, campaign_name, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+         publisher_sub, payout_amount, buyer_name, vertical, campaign_name,
+         source_system, raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'trackdrive',$11)`,
       [callDate, callerId, callerName, duration, billable,
        pubSub, payout, buyerName, vertical, campaign, JSON.stringify(b)]
     );
