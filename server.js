@@ -200,19 +200,6 @@ app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
   }
 });
 
-// Normalize a value to boolean for LeadProsper boolean fields.
-// Accepts: true/false (boolean), "true"/"false" (string), "yes"/"no" (string).
-// Returns: true, false, or null (if the value is absent or unrecognised).
-function toBooleanField(val) {
-  if (val === null || val === undefined || val === '') return null;
-  if (typeof val === 'boolean') return val;
-  const s = String(val).trim().toLowerCase();
-  if (s === 'undefined') return null; // guard against literal "undefined" strings
-  if (s === 'true'  || s === 'yes' || s === '1') return true;
-  if (s === 'false' || s === 'no'  || s === '0') return false;
-  return null; // unrecognised — omit the field rather than send a bad value
-}
-
 async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
   try {
     await pool.query(`UPDATE leads SET status='forwarding' WHERE id=$1`, [leadId]);
@@ -275,23 +262,15 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         case_description: data.caseDescription || data.notes || null,
         ip_address:     data.ipAddress     || null,
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
-        // Roundup-specific fields — normalised to boolean (true/false) so
-        // LeadProsper accepts them.  Raw strings like "yes"/"no"/"true"/"false"
-        // are all converted; unrecognised / empty values default to false.
-        // have_attorney and used_roundup are REQUIRED by LeadProsper and must
-        // always be sent as an explicit boolean — never omitted.
-        have_attorney:    toBooleanField(data.haveAttorney) ?? false,
-        used_roundup:     toBooleanField(data.usedRoundup)  ?? false,
+        // Roundup-specific fields (passed through if present)
+        have_attorney:    data.haveAttorney    || null,
+        used_roundup:     data.usedRoundup     || null,
         which_cancer:     data.whichCancer     || null,
         what_year:        data.whatYear        || null,
         exposed_location: data.exposedLocation || null,
       };
       // Remove null values
       Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
-      // Debug log for roundup-specific fields so we can verify what was sent
-      if (['roundup','roundup-lt'].includes(campaign)) {
-        console.log(`[${leadRef}] LP roundup fields → used_roundup=${payload.used_roundup} have_attorney=${payload.have_attorney} which_cancer=${payload.which_cancer} what_year=${payload.what_year} exposed_location=${payload.exposed_location}`);
-      }
     } else if (isLawmatics) {
       // ── Lawmatics format (Rideshare Uber/Lyft) ──────────
       payload = {
@@ -736,12 +715,14 @@ app.get('/publishers/:pub_id/calls', async (req, res) => {
     const pubCheck = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
     if (!pubCheck.rows.length) return res.status(401).json({ ok: false, error: 'Unauthorized' });
 
+    const daysInt = parseInt(days) >= 9999 ? 36500 : parseInt(days);
     let query = `SELECT id, call_date, call_datetime, caller_id, caller_name,
-                        call_duration, billable, disposition, payout_amount,
+                        call_duration, billable, call_status_label, disposition, payout_amount,
                         campaign_name, received_at
                  FROM calls
                  WHERE publisher_sub=$1
-                 AND received_at >= NOW() - INTERVAL '${parseInt(days)} days'`;
+                   AND source_system='partner'`;
+    if (daysInt < 9999) query += ` AND received_at >= NOW() - INTERVAL '${daysInt} days'`;
     if (billable_only === 'true') query += ' AND billable=true';
     query += ' ORDER BY received_at DESC LIMIT 500';
 
@@ -755,14 +736,14 @@ app.get('/publishers/:pub_id/calls', async (req, res) => {
 });
 
 // CRUD publishers (dashboard only)
-app.get('/publishers', requireKey, async (req, res) => {
+app.get('/publishers', requireApiKey, async (req, res) => {
   try {
     const r = await pool.query('SELECT * FROM publishers ORDER BY created_at DESC');
     res.json({ ok: true, publishers: r.rows });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-app.post('/publishers', requireKey, async (req, res) => {
+app.post('/publishers', requireApiKey, async (req, res) => {
   const { pub_id, name, email, campaign, did, payout_rate } = req.body || {};
   if (!pub_id || !name) return res.status(400).json({ ok: false, error: 'pub_id and name required' });
   try {
@@ -777,7 +758,7 @@ app.post('/publishers', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-app.delete('/publishers/:pub_id', requireKey, async (req, res) => {
+app.delete('/publishers/:pub_id', requireApiKey, async (req, res) => {
   try {
     await pool.query('UPDATE publishers SET active=false WHERE pub_id=$1', [req.params.pub_id]);
     res.json({ ok: true });
@@ -952,19 +933,27 @@ app.patch('/calls/update', async (req, res) => {
 });
 
 // Get calls feed (dashboard)
-app.get('/calls/feed', requireKey, async (req, res) => {
+app.get('/calls/feed', requireApiKey, async (req, res) => {
   const { days = 30, pub } = req.query;
   try {
-    let query = `SELECT * FROM calls WHERE received_at >= NOW() - INTERVAL '${parseInt(days)} days'`;
-    if (pub) query += ` AND publisher_sub=$1`;
+    const daysInt = parseInt(days) >= 9999 ? 36500 : parseInt(days);
+    const params = [];
+    let query = `SELECT * FROM calls WHERE source_system='partner'`;
+    if (daysInt < 9999) {
+      query += ` AND received_at >= NOW() - INTERVAL '${daysInt} days'`;
+    }
+    if (pub) {
+      params.push(pub);
+      query += ` AND publisher_sub=$${params.length}`;
+    }
     query += ' ORDER BY received_at DESC LIMIT 1000';
-    const r = await pool.query(query, pub ? [pub] : []);
+    const r = await pool.query(query, params);
     res.json({ ok: true, calls: r.rows });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 // Calls summary (dashboard KPIs)
-app.get('/calls/summary', requireKey, async (req, res) => {
+app.get('/calls/summary', requireApiKey, async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT
@@ -973,7 +962,8 @@ app.get('/calls/summary', requireKey, async (req, res) => {
         COUNT(*) FILTER(WHERE DATE(received_at)=CURRENT_DATE) AS today,
         COALESCE(SUM(payout_amount) FILTER(WHERE billable=true),0) AS total_payout
       FROM calls
-      WHERE received_at >= NOW() - INTERVAL '30 days'
+      WHERE source_system='partner'
+        AND received_at >= NOW() - INTERVAL '30 days'
     `);
     res.json({ ok: true, ...r.rows[0] });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
