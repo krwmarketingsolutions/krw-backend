@@ -207,6 +207,7 @@ function toBooleanField(val) {
   if (val === null || val === undefined || val === '') return null;
   if (typeof val === 'boolean') return val;
   const s = String(val).trim().toLowerCase();
+  if (s === 'undefined') return null; // guard against literal "undefined" strings
   if (s === 'true'  || s === 'yes' || s === '1') return true;
   if (s === 'false' || s === 'no'  || s === '0') return false;
   return null; // unrecognised — omit the field rather than send a bad value
@@ -277,8 +278,10 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         // Roundup-specific fields — normalised to boolean (true/false) so
         // LeadProsper accepts them.  Raw strings like "yes"/"no"/"true"/"false"
         // are all converted; unrecognised / empty values are omitted entirely.
-        have_attorney:    toBooleanField(data.haveAttorney),
-        used_roundup:     toBooleanField(data.usedRoundup),
+        // have_attorney and used_roundup are only included when true — LeadProsper
+        // rejects false values for these fields; omitting them is the correct signal.
+        ...(toBooleanField(data.haveAttorney) === true ? { have_attorney: true } : {}),
+        ...(toBooleanField(data.usedRoundup)  === true ? { used_roundup:  true } : {}),
         which_cancer:     data.whichCancer     || null,
         what_year:        data.whatYear        || null,
         exposed_location: data.exposedLocation || null,
