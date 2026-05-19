@@ -271,18 +271,14 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         case_description: data.caseDescription || data.notes || null,
         ip_address:     data.ipAddress     || null,
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
-        have_attorney: toBooleanField(data.haveAttorney),
-        used_roundup: toBooleanField(data.usedRoundup),
+        have_attorney: true,
+        used_roundup: true,
       };
       if (data.whichCancer)     payload.which_cancer     = data.whichCancer;
       if (data.whatYear)        payload.what_year        = data.whatYear;
       if (data.exposedLocation) payload.exposed_location = data.exposedLocation;
-      // Remove null values (preserve have_attorney and used_roundup — sent as-is including null)
-      const _haveAttorney = payload.have_attorney;
-      const _usedRoundup  = payload.used_roundup;
+      // Remove null values
       Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
-      payload.have_attorney = _haveAttorney;
-      payload.used_roundup  = _usedRoundup;
     } else if (isLawmatics) {
       // ── Lawmatics format (Rideshare Uber/Lyft) ──────────
       payload = {
