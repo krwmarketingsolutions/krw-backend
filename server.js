@@ -117,6 +117,48 @@ async function initLeadsDB() {
   console.log('✅ Leads table ready');
 }
 
+async function initCampaignsDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id               SERIAL PRIMARY KEY,
+      slug             TEXT UNIQUE NOT NULL,
+      name             TEXT NOT NULL,
+      vertical         TEXT,
+      apex_endpoint    TEXT,
+      payout           NUMERIC(10,2),
+      buyer_notes      TEXT,
+      required_fields  TEXT[],
+      optional_fields  TEXT[],
+      field_labels     JSONB,
+      description      TEXT,
+      active           BOOLEAN DEFAULT true,
+      created_at       TIMESTAMPTZ DEFAULT NOW(),
+      updated_at       TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
+  // Seed the DEPO campaign on first run if it doesn't exist
+  await pool.query(`
+    INSERT INTO campaigns (
+      slug, name, vertical, description,
+      required_fields, optional_fields, field_labels, active
+    )
+    VALUES (
+      'depo',
+      'Depo-Provera',
+      'mass-tort',
+      'Depo-Provera meningioma mass tort campaign',
+      ARRAY['firstName','lastName','email','phone'],
+      ARRAY['dateOfBirth','state','zip','trustedFormCertUrl','jornayaLeadId','publisherSub','websource'],
+      '{"firstName":"First Name","lastName":"Last Name","email":"Email Address","phone":"Phone Number","dateOfBirth":"Date of Birth","state":"State","zip":"ZIP Code","trustedFormCertUrl":"TrustedForm Certificate URL","jornayaLeadId":"Jornaya Lead ID","publisherSub":"Publisher Sub ID","websource":"Web Source"}',
+      true
+    )
+    ON CONFLICT (slug) DO NOTHING;
+  `);
+
+  console.log('✅ Campaigns table ready');
+}
+
 // ══════════════════════════════════════════════════════
 //  LEAD INTAKE
 // ══════════════════════════════════════════════════════
@@ -379,6 +421,38 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
 }
 
 // ══════════════════════════════════════════════════════
+//  CAMPAIGN CONFIG ENDPOINT (public — no auth required)
+// ══════════════════════════════════════════════════════
+
+// GET /campaigns/:slug/config — return campaign metadata for form rendering
+app.get('/campaigns/:slug/config', async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const r = await pool.query(
+      `SELECT slug, name, vertical, description, required_fields, optional_fields, field_labels
+       FROM campaigns WHERE slug=$1 AND active=true`,
+      [slug]
+    );
+    if (!r.rows.length) {
+      return res.status(404).json({ ok: false, error: 'Campaign not found' });
+    }
+    const row = r.rows[0];
+    res.json({
+      ok:          true,
+      slug:        row.slug,
+      name:        row.name,
+      vertical:    row.vertical,
+      description: row.description,
+      required:    row.required_fields  || [],
+      optional:    row.optional_fields  || [],
+      fieldLabels: row.field_labels     || {},
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════
 //  LEAD READ ENDPOINTS (dashboard)
 // ══════════════════════════════════════════════════════
 
@@ -534,6 +608,7 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
 
 initDB()
   .then(() => initLeadsDB())
+  .then(() => initCampaignsDB())
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ KRW server on 0.0.0.0:${PORT}`);
