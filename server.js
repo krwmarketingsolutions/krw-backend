@@ -117,48 +117,6 @@ async function initLeadsDB() {
   console.log('✅ Leads table ready');
 }
 
-async function initCampaignsDB() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS campaigns (
-      id               SERIAL PRIMARY KEY,
-      slug             TEXT UNIQUE NOT NULL,
-      name             TEXT NOT NULL,
-      vertical         TEXT,
-      apex_endpoint    TEXT,
-      payout           NUMERIC(10,2),
-      buyer_notes      TEXT,
-      required_fields  JSONB DEFAULT '["firstName","lastName","email","phone"]',
-      optional_fields  JSONB DEFAULT '[]',
-      field_labels     JSONB,
-      description      TEXT,
-      active           BOOLEAN DEFAULT true,
-      created_at       TIMESTAMPTZ DEFAULT NOW(),
-      updated_at       TIMESTAMPTZ DEFAULT NOW()
-    );
-  `);
-
-  // Seed the DEPO campaign on first run if it doesn't exist
-  await pool.query(`
-    INSERT INTO campaigns (
-      slug, name, vertical, description,
-      required_fields, optional_fields, field_labels, active
-    )
-    VALUES (
-      'depo',
-      'Depo-Provera',
-      'mass-tort',
-      'Depo-Provera meningioma mass tort campaign',
-      '["firstName","lastName","email","phone"]',
-      '["dateOfBirth","state","zip","trustedFormCertUrl","jornayaLeadId","publisherSub","websource"]',
-      '{"firstName":"First Name","lastName":"Last Name","email":"Email Address","phone":"Phone Number","dateOfBirth":"Date of Birth","state":"State","zip":"ZIP Code","trustedFormCertUrl":"TrustedForm Certificate URL","jornayaLeadId":"Jornaya Lead ID","publisherSub":"Publisher Sub ID","websource":"Web Source"}',
-      true
-    )
-    ON CONFLICT (slug) DO NOTHING;
-  `);
-
-  console.log('✅ Campaigns table ready');
-}
-
 // ══════════════════════════════════════════════════════
 //  LEAD INTAKE
 // ══════════════════════════════════════════════════════
@@ -166,12 +124,8 @@ async function initCampaignsDB() {
 // POST /lead/:campaign — receive lead from publisher
 // Stores it and fires to Zapier webhook if configured
 app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
-  const CAMPAIGN_ALIASES = {
-    'rideshare-sa': 'rideshare',
-  };
-  const rawCampaign = req.params.campaign.toLowerCase();
-  const campaign    = CAMPAIGN_ALIASES[rawCampaign] || rawCampaign;
-  const b           = req.body || {};
+  const campaign = req.params.campaign.toLowerCase();
+  const b        = req.body || {};
 
   // Validate required fields
   const required = ['firstName', 'lastName', 'email', 'phone'];
@@ -423,8 +377,6 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
 // ══════════════════════════════════════════════════════
 //  CAMPAIGN CONFIG ENDPOINT (public — no auth required)
 // ══════════════════════════════════════════════════════
-
-// GET /campaigns/:slug/config — return campaign metadata for form rendering
 app.get('/campaigns/:slug/config', async (req, res) => {
   try {
     const { slug } = req.params;
@@ -434,7 +386,7 @@ app.get('/campaigns/:slug/config', async (req, res) => {
       [slug]
     );
     if (!r.rows.length) {
-      return res.status(404).json({ ok: false, error: 'Campaign not found' });
+      return res.status(404).json({ ok: false, error: 'Campaign not found: ' + slug });
     }
     const row = r.rows[0];
     res.json({
@@ -443,9 +395,9 @@ app.get('/campaigns/:slug/config', async (req, res) => {
       name:        row.name,
       vertical:    row.vertical,
       description: row.description,
-      required:    row.required_fields  || [],
-      optional:    row.optional_fields  || [],
-      fieldLabels: row.field_labels     || {},
+      required:    row.required_fields || [],
+      optional:    row.optional_fields || [],
+      fieldLabels: row.field_labels    || {},
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -608,7 +560,6 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
 
 initDB()
   .then(() => initLeadsDB())
-  .then(() => initCampaignsDB())
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ KRW server on 0.0.0.0:${PORT}`);
