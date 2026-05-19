@@ -305,8 +305,10 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         'custom_field_812732[]':  data.reportedTo          || null, // Reported to
         'custom_field_375335[]':  data.bestTimeToCall      || null, // Best time
       };
-      // Remove null values
+      // Remove null values (preserve custom_field_812732[])
+      const _reportedTo = payload['custom_field_812732[]'];
       Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
+      payload['custom_field_812732[]'] = _reportedTo;
     } else {
       // ── Apex / generic format ───────────────────────────
       payload = {
