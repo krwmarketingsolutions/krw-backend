@@ -127,8 +127,8 @@ async function initCampaignsDB() {
       apex_endpoint    TEXT,
       payout           NUMERIC(10,2),
       buyer_notes      TEXT,
-      required_fields  TEXT[],
-      optional_fields  TEXT[],
+      required_fields  JSONB DEFAULT '["firstName","lastName","email","phone"]',
+      optional_fields  JSONB DEFAULT '[]',
       field_labels     JSONB,
       description      TEXT,
       active           BOOLEAN DEFAULT true,
@@ -148,8 +148,8 @@ async function initCampaignsDB() {
       'Depo-Provera',
       'mass-tort',
       'Depo-Provera meningioma mass tort campaign',
-      ARRAY['firstName','lastName','email','phone'],
-      ARRAY['dateOfBirth','state','zip','trustedFormCertUrl','jornayaLeadId','publisherSub','websource'],
+      '["firstName","lastName","email","phone"]',
+      '["dateOfBirth","state","zip","trustedFormCertUrl","jornayaLeadId","publisherSub","websource"]',
       '{"firstName":"First Name","lastName":"Last Name","email":"Email Address","phone":"Phone Number","dateOfBirth":"Date of Birth","state":"State","zip":"ZIP Code","trustedFormCertUrl":"TrustedForm Certificate URL","jornayaLeadId":"Jornaya Lead ID","publisherSub":"Publisher Sub ID","websource":"Web Source"}',
       true
     )
