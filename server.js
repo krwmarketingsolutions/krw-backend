@@ -271,19 +271,18 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         case_description: data.caseDescription || data.notes || null,
         ip_address:     data.ipAddress     || null,
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
-        // Roundup fields: both required together by LeadProsper
+        have_attorney: toBooleanField(data.haveAttorney),
+        used_roundup: toBooleanField(data.usedRoundup),
       };
-      const haveAttorney = toBooleanField(data.haveAttorney) === true;
-      const usedRoundup  = toBooleanField(data.usedRoundup)  === true;
-      if (haveAttorney || usedRoundup) {
-        payload.have_attorney = haveAttorney;
-        payload.used_roundup  = usedRoundup;
-      }
       if (data.whichCancer)     payload.which_cancer     = data.whichCancer;
       if (data.whatYear)        payload.what_year        = data.whatYear;
       if (data.exposedLocation) payload.exposed_location = data.exposedLocation;
-      // Remove null values
+      // Remove null values (preserve have_attorney and used_roundup — sent as-is including null)
+      const _haveAttorney = payload.have_attorney;
+      const _usedRoundup  = payload.used_roundup;
       Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
+      payload.have_attorney = _haveAttorney;
+      payload.used_roundup  = _usedRoundup;
     } else if (isLawmatics) {
       // ── Lawmatics format (Rideshare Uber/Lyft) ──────────
       payload = {
