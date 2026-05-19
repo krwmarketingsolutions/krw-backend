@@ -271,8 +271,8 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         case_description: data.caseDescription || data.notes || null,
         ip_address:     data.ipAddress     || null,
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
-        have_attorney: true,
-        used_roundup: true,
+        have_attorney: "true",
+        used_roundup: "true",
       };
       if (data.whichCancer)     payload.which_cancer     = data.whichCancer;
       if (data.whatYear)        payload.what_year        = data.whatYear;
