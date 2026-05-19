@@ -124,8 +124,12 @@ async function initLeadsDB() {
 // POST /lead/:campaign — receive lead from publisher
 // Stores it and fires to Zapier webhook if configured
 app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
-  const campaign = req.params.campaign.toLowerCase();
-  const b        = req.body || {};
+  const CAMPAIGN_ALIASES = {
+    'rideshare-sa': 'rideshare',
+  };
+  const rawCampaign = req.params.campaign.toLowerCase();
+  const campaign    = CAMPAIGN_ALIASES[rawCampaign] || rawCampaign;
+  const b           = req.body || {};
 
   // Validate required fields
   const required = ['firstName', 'lastName', 'email', 'phone'];
