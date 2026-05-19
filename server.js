@@ -275,9 +275,12 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
       };
       const haveAttorney = toBooleanField(data.haveAttorney) === true;
       const usedRoundup  = toBooleanField(data.usedRoundup)  === true;
-      if (haveAttorney || usedRoundup) {
-        payload.have_attorney = haveAttorney;
-        payload.used_roundup  = usedRoundup;
+      // Only send have_attorney if true; always send used_roundup if true
+      if (haveAttorney) {
+        payload.have_attorney = true;
+      }
+      if (usedRoundup) {
+        payload.used_roundup = true;
       }
       if (data.whichCancer)     payload.which_cancer     = data.whichCancer;
       if (data.whatYear)        payload.what_year        = data.whatYear;
