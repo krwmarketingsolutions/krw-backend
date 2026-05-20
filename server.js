@@ -922,7 +922,7 @@ app.post('/calls/postback', async (req, res) => {
       `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
                           publisher_sub, payout_amount, campaign_name, disposition,
                           source_system, call_status_label, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
       [callDate, callerId, callerName, duration,
        statusLabel === 'pending' ? null : billable,
        pubSub, statusLabel === 'cpa' ? finalPayout : null,
