@@ -40,6 +40,37 @@ function requireLeadKey(req, res, next) {
   next();
 }
 
+// ── Email notifications ───────────────────────────────
+function getMailer() {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) return null;
+  return nodemailer.createTransport({
+    host:   process.env.SMTP_HOST || 'smtp.office365.com',
+    port:   parseInt(process.env.SMTP_PORT || '587'),
+    secure: false,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+    tls: { ciphers: 'SSLv3' },
+  });
+}
+
+async function sendEmailNotification(subject, html) {
+  try {
+    const mailer = getMailer();
+    if (!mailer) { console.log('Email not configured — skipping notification'); return; }
+    await mailer.sendMail({
+      from:    `"KRW Dashboard" <${process.env.SMTP_USER}>`,
+      to:      process.env.NOTIFY_EMAIL || 'kyler@krwmarketingsolutions.com',
+      subject,
+      html,
+    });
+    console.log('Email notification sent:', subject);
+  } catch(err) {
+    console.error('Email send failed:', err.message);
+  }
+}
+
 // ── DB init ───────────────────────────────────────────
 async function initDB() {
   await pool.query(`
@@ -689,34 +720,20 @@ app.patch('/campaigns/:slug', requireKey, async (req, res) => {
 async function initPublishersDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS publishers (
-      pub_id        TEXT UNIQUE PRIMARY KEY,
-      name          TEXT,
-      did           TEXT,
-      payout_rate   NUMERIC,
+      id            SERIAL PRIMARY KEY,
+      pub_id        TEXT UNIQUE NOT NULL,
+      name          TEXT NOT NULL,
+      email         TEXT,
       campaign      TEXT,
+      did           TEXT,
+      payout_rate   NUMERIC(10,2) DEFAULT 0,
       active        BOOLEAN DEFAULT true,
       created_at    TIMESTAMPTZ DEFAULT NOW()
     );
+    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS did TEXT;
+    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS payout_rate NUMERIC(10,2) DEFAULT 0;
   `);
-  // Seed known publishers (upsert so re-deploys are safe)
-  const publishers = [
-    { pub_id: 'KRW-UTKARSH-2026-D9R', name: 'Utkarsh Sharma',  did: '18338772366', payout_rate: 150, campaign: 'SSDI' },
-    { pub_id: 'KRW-RAY-2026-D7Q',     name: 'Ray Marketing',   did: '8338928548',  payout_rate: 200, campaign: 'SSDI' },
-    { pub_id: 'KRW-JACCOB-2026-BPR',  name: 'Jacobs Carpio',   did: '833840897',   payout_rate: 160, campaign: 'SSDI' },
-    { pub_id: 'KRW-JOSHUA-2026-76M',  name: 'Joshua Duran',    did: '8338417301',  payout_rate: 200, campaign: 'SSDI' },
-  ];
-  for (const p of publishers) {
-    await pool.query(`
-      INSERT INTO publishers (pub_id, name, did, payout_rate, campaign)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (pub_id) DO UPDATE SET
-        name        = EXCLUDED.name,
-        did         = EXCLUDED.did,
-        payout_rate = EXCLUDED.payout_rate,
-        campaign    = EXCLUDED.campaign
-    `, [p.pub_id, p.name, p.did, p.payout_rate, p.campaign]);
-  }
-  console.log('✅ Publishers table ready');
+  console.log('Publishers table ready');
 }
 
 // ── PUBLISHER ENDPOINTS ───────────────────────────────
@@ -1018,6 +1035,19 @@ app.patch('/calls/update', async (req, res) => {
       results.errors++;
     }
   }
+
+  // Send email notification summary
+  // Calculate stats for email
+  const totalCalls   = results.updated + results.not_found;
+  const converted    = results.updated;
+  const convRate     = totalCalls > 0 ? Math.round((converted / totalCalls) * 100) : 0;
+  const yesterday    = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const dateStr      = yesterday.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
+
+  const html = `<p>You had <strong>${totalCalls}</strong> unique SSDI transfers yesterday, ${dateStr}. Out of those <strong>${totalCalls}</strong> calls, <strong>${converted}</strong> converted at <strong>${convRate}%</strong>.</p><p style="color:#999;font-size:12px;margin-top:16px">KRW Marketing Solutions</p>`;
+
+  await sendEmailNotification(`SSDI Daily Report — ${dateStr}`, html);
 
   res.json({ ok: true, message: 'End-of-day sweep complete', ...results });
 });
