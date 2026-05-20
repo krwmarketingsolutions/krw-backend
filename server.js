@@ -5,11 +5,12 @@
 // ══════════════════════════════════════════════════════
 
 require('dotenv').config();
-const express = require('express');
-const { Pool } = require('pg');
-const path    = require('path');
-const fs      = require('fs');
-const app     = express();
+const express    = require('express');
+const { Pool }   = require('pg');
+const path       = require('path');
+const fs         = require('fs');
+const nodemailer = require('nodemailer');
+const app        = express();
 
 app.use(express.json());
 app.use((req, res, next) => {
@@ -724,33 +725,90 @@ async function initPublishersDB() {
       pub_id        TEXT UNIQUE NOT NULL,
       name          TEXT NOT NULL,
       email         TEXT,
-      campaign      TEXT,
-      did           TEXT,
-      payout_rate   NUMERIC(10,2) DEFAULT 0,
+      phone         TEXT,
+      company       TEXT,
+      portal_id     TEXT UNIQUE,
       active        BOOLEAN DEFAULT true,
       created_at    TIMESTAMPTZ DEFAULT NOW()
     );
-    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS did TEXT;
-    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS payout_rate NUMERIC(10,2) DEFAULT 0;
+    -- Migrate legacy columns if upgrading from old schema
+    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS phone     TEXT;
+    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS company   TEXT;
+    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS portal_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_publishers_portal_id ON publishers (portal_id) WHERE portal_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS publisher_campaigns (
+      id            SERIAL PRIMARY KEY,
+      pub_id        TEXT NOT NULL REFERENCES publishers(pub_id) ON DELETE CASCADE,
+      campaign      TEXT NOT NULL,
+      sub_id        TEXT,
+      did           TEXT,
+      payout_rate   NUMERIC(10,2) DEFAULT 0,
+      vertical      TEXT,
+      active        BOOLEAN DEFAULT true,
+      created_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_pub_campaigns_pub_id ON publisher_campaigns (pub_id);
+    CREATE INDEX IF NOT EXISTS idx_pub_campaigns_did    ON publisher_campaigns (did) WHERE did IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_pub_campaigns_sub_id ON publisher_campaigns (sub_id) WHERE sub_id IS NOT NULL;
   `);
-  console.log('Publishers table ready');
+  console.log('✅ Publishers tables ready');
 }
 
 // ── PUBLISHER ENDPOINTS ───────────────────────────────
 
-// Verify publisher login (pub_id lookup)
+// Verify publisher login — looks up by portal_id first, then pub_id
 app.post('/publishers/login', async (req, res) => {
-  const { pub_id } = req.body || {};
-  if (!pub_id) return res.status(400).json({ ok: false, error: 'pub_id required' });
+  const { pub_id, portal_id } = req.body || {};
+  const lookup = portal_id || pub_id;
+  if (!lookup) return res.status(400).json({ ok: false, error: 'pub_id or portal_id required' });
   try {
-    const r = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
+    // Try portal_id first (preferred), then fall back to pub_id
+    let r = await pool.query(
+      'SELECT * FROM publishers WHERE portal_id=$1 AND active=true LIMIT 1',
+      [lookup]
+    );
+    if (!r.rows.length) {
+      r = await pool.query(
+        'SELECT * FROM publishers WHERE pub_id=$1 AND active=true LIMIT 1',
+        [lookup]
+      );
+    }
     if (!r.rows.length) return res.status(401).json({ ok: false, error: 'Publisher not found' });
     const pub = r.rows[0];
-    res.json({ ok: true, name: pub.name, pub_id: pub.pub_id, campaign: pub.campaign, did: pub.did||null });
+
+    // Fetch all active campaign assignments for this publisher
+    const camps = await pool.query(
+      'SELECT campaign, sub_id, did, payout_rate, vertical FROM publisher_campaigns WHERE pub_id=$1 AND active=true ORDER BY created_at ASC',
+      [pub.pub_id]
+    );
+
+    res.json({
+      ok:        true,
+      name:      pub.name,
+      pub_id:    pub.pub_id,
+      portal_id: pub.portal_id || null,
+      company:   pub.company   || null,
+      campaigns: camps.rows,
+    });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-// Get calls for a publisher
+// Get all campaign assignments for a publisher
+app.get('/publishers/:pub_id/campaigns', async (req, res) => {
+  const { pub_id } = req.params;
+  try {
+    const pubCheck = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
+    if (!pubCheck.rows.length) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    const r = await pool.query(
+      'SELECT * FROM publisher_campaigns WHERE pub_id=$1 ORDER BY created_at ASC',
+      [pub_id]
+    );
+    res.json({ ok: true, campaigns: r.rows });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Get calls for a publisher — queries all sub_ids assigned to that publisher
 app.get('/publishers/:pub_id/calls', async (req, res) => {
   const { pub_id } = req.params;
   const { days = 30, billable_only } = req.query;
@@ -759,18 +817,35 @@ app.get('/publishers/:pub_id/calls', async (req, res) => {
     const pubCheck = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
     if (!pubCheck.rows.length) return res.status(401).json({ ok: false, error: 'Unauthorized' });
 
+    // Collect all sub_ids assigned to this publisher across all campaigns
+    const subIdQ = await pool.query(
+      'SELECT sub_id FROM publisher_campaigns WHERE pub_id=$1 AND active=true AND sub_id IS NOT NULL',
+      [pub_id]
+    );
+    // Always include the pub_id itself as a fallback sub_id
+    const subIds = [pub_id, ...subIdQ.rows.map(r => r.sub_id)];
+    const uniqueSubIds = [...new Set(subIds)];
+
     const daysInt = parseInt(days) >= 9999 ? 36500 : parseInt(days);
+
+    // Build parameterized ANY($n) clause for all sub_ids
+    const params = [uniqueSubIds];
     let query = `SELECT id, call_date, caller_id, caller_name,
                         call_duration, billable, call_status_label, disposition,
-                        payout_amount, campaign_name, received_at
+                        payout_amount, campaign_name, publisher_sub, received_at
                  FROM calls
-                 WHERE publisher_sub=$1
+                 WHERE publisher_sub = ANY($1)
                    AND source_system='partner'`;
-    if (daysInt < 9999) query += ` AND received_at >= NOW() - INTERVAL '${daysInt} days'`;
-    if (billable_only === 'true') query += ' AND billable=true';
+    let i = 2;
+    if (daysInt < 9999) {
+      query += ` AND received_at >= NOW() - INTERVAL '${daysInt} days'`;
+    }
+    if (billable_only === 'true') {
+      query += ` AND billable=true`;
+    }
     query += ' ORDER BY received_at DESC LIMIT 500';
 
-    const r = await pool.query(query, [pub_id]);
+    const r = await pool.query(query, params);
     const total = r.rows.length;
     const billable_count = r.rows.filter(c => c.billable).length;
     const total_payout = r.rows.filter(c => c.billable).reduce((sum, c) => sum + parseFloat(c.payout_amount||0), 0);
@@ -788,23 +863,110 @@ app.get('/publishers', requireKey, async (req, res) => {
 });
 
 app.post('/publishers', requireKey, async (req, res) => {
-  const { pub_id, name, email, campaign, did, payout_rate } = req.body || {};
+  const { pub_id, name, email, phone, company, portal_id } = req.body || {};
   if (!pub_id || !name) return res.status(400).json({ ok: false, error: 'pub_id and name required' });
   try {
     const r = await pool.query(
-      `INSERT INTO publishers (pub_id, name, email, campaign, did, payout_rate)
+      `INSERT INTO publishers (pub_id, name, email, phone, company, portal_id)
        VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (pub_id) DO UPDATE SET name=$2, email=$3, campaign=$4, did=$5, payout_rate=$6, active=true
+       ON CONFLICT (pub_id) DO UPDATE SET
+         name=$2, email=$3, phone=$4, company=$5,
+         portal_id=COALESCE($6, publishers.portal_id),
+         active=true
        RETURNING *`,
-      [pub_id, name, email||null, campaign||null, did||null, parseFloat(payout_rate||0)]
+      [pub_id, name, email||null, phone||null, company||null, portal_id||null]
     );
     res.json({ ok: true, publisher: r.rows[0] });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.patch('/publishers/:pub_id', requireKey, async (req, res) => {
+  try {
+    const allowed = ['name','email','phone','company','portal_id','active'];
+    const sets = [], params = [];
+    let i = 1;
+    allowed.forEach(col => {
+      if (req.body[col] !== undefined) {
+        sets.push(`${col}=$${i++}`);
+        params.push(req.body[col]);
+      }
+    });
+    if (!sets.length) return res.status(400).json({ ok: false, error: 'Nothing to update' });
+    params.push(req.params.pub_id);
+    await pool.query(`UPDATE publishers SET ${sets.join(',')} WHERE pub_id=$${i}`, params);
+    res.json({ ok: true });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 app.delete('/publishers/:pub_id', requireKey, async (req, res) => {
   try {
     await pool.query('UPDATE publishers SET active=false WHERE pub_id=$1', [req.params.pub_id]);
+    res.json({ ok: true });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── PUBLISHER CAMPAIGN ASSIGNMENT ENDPOINTS ───────────
+
+// List all campaign assignments for a publisher (dashboard)
+app.get('/publishers/:pub_id/campaigns/all', requireKey, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT * FROM publisher_campaigns WHERE pub_id=$1 ORDER BY created_at ASC',
+      [req.params.pub_id]
+    );
+    res.json({ ok: true, campaigns: r.rows });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Add a campaign assignment to a publisher
+app.post('/publishers/:pub_id/campaigns', requireKey, async (req, res) => {
+  const { pub_id } = req.params;
+  const { campaign, sub_id, did, payout_rate, vertical } = req.body || {};
+  if (!campaign) return res.status(400).json({ ok: false, error: 'campaign required' });
+  try {
+    const r = await pool.query(
+      `INSERT INTO publisher_campaigns (pub_id, campaign, sub_id, did, payout_rate, vertical)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       RETURNING *`,
+      [pub_id, campaign, sub_id||null, did ? String(did).replace(/\D/g,'') : null,
+       parseFloat(payout_rate||0), vertical||null]
+    );
+    res.json({ ok: true, assignment: r.rows[0] });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Update a campaign assignment
+app.patch('/publishers/:pub_id/campaigns/:id', requireKey, async (req, res) => {
+  try {
+    const allowed = ['campaign','sub_id','did','payout_rate','vertical','active'];
+    const sets = [], params = [];
+    let i = 1;
+    allowed.forEach(col => {
+      if (req.body[col] !== undefined) {
+        sets.push(`${col}=$${i++}`);
+        const val = col === 'did' ? String(req.body[col]).replace(/\D/g,'') : req.body[col];
+        params.push(val);
+      }
+    });
+    if (!sets.length) return res.status(400).json({ ok: false, error: 'Nothing to update' });
+    params.push(req.params.id, req.params.pub_id);
+    await pool.query(
+      `UPDATE publisher_campaigns SET ${sets.join(',')} WHERE id=$${i} AND pub_id=$${i+1}`,
+      params
+    );
+    res.json({ ok: true });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+
+
+// Delete a campaign assignment
+app.delete('/publishers/:pub_id/campaigns/:id', requireKey, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM publisher_campaigns WHERE id=$1 AND pub_id=$2',
+      [req.params.id, req.params.pub_id]
+    );
     res.json({ ok: true });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
@@ -881,29 +1043,40 @@ app.post('/calls/postback', async (req, res) => {
   const sourceSystem = b.source_system || b.source || 'partner';
 
   // Auto-resolve publisher from DID if pub_sub not provided
+  // Looks up publisher_campaigns table first (supports multiple campaigns per publisher)
   if (!pubSub && incomingDid) {
     const didClean = String(incomingDid).replace(/\D/g, '');
     const didLookup = await pool.query(
-      'SELECT pub_id FROM publishers WHERE did=$1 AND active=true LIMIT 1',
+      `SELECT pc.pub_id, pc.sub_id, pc.payout_rate
+       FROM publisher_campaigns pc
+       JOIN publishers p ON p.pub_id = pc.pub_id
+       WHERE pc.did=$1 AND pc.active=true AND p.active=true
+       LIMIT 1`,
       [didClean]
     );
     if (didLookup.rows.length) {
-      pubSub = didLookup.rows[0].pub_id;
-      console.log(`DID ${didClean} resolved to publisher: ${pubSub}`);
+      const row = didLookup.rows[0];
+      // Use sub_id as the publisher_sub if available, otherwise fall back to pub_id
+      pubSub = row.sub_id || row.pub_id;
+      console.log(`DID ${didClean} resolved to publisher: ${row.pub_id} sub_id: ${pubSub}`);
     } else {
-      console.log(`DID ${didClean} not found in publishers table`);
+      console.log(`DID ${didClean} not found in publisher_campaigns table`);
     }
   }
 
   try {
-    // If no payout sent, look up publisher's agreed rate
+    // If no payout sent, look up publisher's agreed rate from publisher_campaigns
     let finalPayout = payout;
-    if(!finalPayout && billable && pubSub){
+    if (!finalPayout && billable && pubSub) {
       const pubRate = await pool.query(
-        'SELECT payout_rate FROM publishers WHERE pub_id=$1 AND active=true LIMIT 1',
+        `SELECT pc.payout_rate
+         FROM publisher_campaigns pc
+         JOIN publishers p ON p.pub_id = pc.pub_id
+         WHERE (pc.sub_id=$1 OR pc.pub_id=$1) AND pc.active=true AND p.active=true
+         ORDER BY pc.payout_rate DESC LIMIT 1`,
         [pubSub]
       );
-      if(pubRate.rows.length && pubRate.rows[0].payout_rate){
+      if (pubRate.rows.length && pubRate.rows[0].payout_rate) {
         finalPayout = parseFloat(pubRate.rows[0].payout_rate);
       }
     }
@@ -964,23 +1137,36 @@ app.patch('/calls/update', async (req, res) => {
 
       if (!did) { results.errors++; continue; }
 
-      // Find publisher from DID
+      // Find publisher from DID via publisher_campaigns table
       let pubSub = item.publisher_sub || null;
-      if (!pubSub) {
+      let resolvedPubId = null;
+      if (!pubSub && did) {
         const didLookup = await pool.query(
-          'SELECT pub_id, payout_rate FROM publishers WHERE did=$1 AND active=true LIMIT 1',
+          `SELECT pc.pub_id, pc.sub_id, pc.payout_rate
+           FROM publisher_campaigns pc
+           JOIN publishers p ON p.pub_id = pc.pub_id
+           WHERE pc.did=$1 AND pc.active=true AND p.active=true
+           LIMIT 1`,
           [did]
         );
         if (didLookup.rows.length) {
-          pubSub = didLookup.rows[0].pub_id;
+          const row = didLookup.rows[0];
+          resolvedPubId = row.pub_id;
+          // Use sub_id as publisher_sub if available, otherwise pub_id
+          pubSub = row.sub_id || row.pub_id;
         }
       }
 
-      // Get payout rate
+      // Get payout rate — prefer publisher_campaigns rate
       let payout = parseFloat(item.payout_amount || item.payout || 0);
       if (!payout && billable && pubSub) {
         const rateQ = await pool.query(
-          'SELECT payout_rate FROM publishers WHERE pub_id=$1 LIMIT 1', [pubSub]
+          `SELECT pc.payout_rate
+           FROM publisher_campaigns pc
+           JOIN publishers p ON p.pub_id = pc.pub_id
+           WHERE (pc.sub_id=$1 OR pc.pub_id=$1) AND pc.active=true AND p.active=true
+           ORDER BY pc.payout_rate DESC LIMIT 1`,
+          [pubSub]
         );
         if (rateQ.rows.length) payout = parseFloat(rateQ.rows[0].payout_rate || 0);
       }
