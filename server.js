@@ -490,7 +490,15 @@ app.post('/postback', requireKey, async (req, res) => {
 });
 
 // POST /calls/postback — partner endpoint for direct call submission
-app.post('/calls/postback', requireKey, async (req, res) => {
+app.post('/calls/postback', async (req, res) => {
+  const key = (req.headers['x-api-key'] || req.query.api_key || '').trim();
+  const validKeys = [
+    process.env.API_KEY || '',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ].filter(Boolean);
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
   try {
     const b = req.body || {};
     const { caller_id, call_date, publisher_sub } = b;
