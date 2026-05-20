@@ -489,6 +489,29 @@ app.post('/postback', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
+// POST /calls/postback — partner endpoint for direct call submission
+app.post('/calls/postback', requireKey, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const { caller_id, call_date, publisher_sub } = b;
+
+    if (!caller_id || !call_date || !publisher_sub) {
+      return res.status(422).json({ error: 'Missing required fields: caller_id, call_date, publisher_sub' });
+    }
+
+    await pool.query(
+      `INSERT INTO calls (caller_id, call_date, publisher_sub, received_at, call_status_label, source_system, payout_amount, raw)
+       VALUES ($1, $2, $3, NOW(), 'pending', 'partner', 0, $4::jsonb)`,
+      [caller_id, call_date, publisher_sub, JSON.stringify(b)]
+    );
+
+    console.log(`[calls/postback] Inserted call — caller: ${caller_id}, pub: ${publisher_sub}, date: ${call_date}, status: pending, payout: 0`);
+    res.json({ ok: true, message: 'Call recorded' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/summary', requireKey, async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
@@ -849,81 +872,7 @@ app.post('/trackdrive/postback', async (req, res) => {
   }
 });
 
-// ── CALLS POSTBACK ENDPOINT (SSDI only) ─────────────────
-// Called by partner system or buyer at end of day
-// Accepts flexible field names to support multiple sources
-app.post('/calls/postback', requireLeadKey, async (req, res) => {
-  const b = req.body || {};
-
-  // Normalize fields — accept multiple naming conventions
-  const callDate     = b.call_date   || b.callDate   || b.date        || new Date().toISOString().split('T')[0];
-  const callerId     = b.caller_id   || b.callerId   || b.phone       || b.ani        || null;
-  const callerName   = b.caller_name || b.callerName || b.name        || b.contact    || null;
-  const duration     = parseInt(b.call_duration || b.duration || b.talk_time || 0);
-  const billable     = b.billable === true || b.billable === 'true' || b.billable === 1 || b.status === 'billable';
-  const incomingDid  = b.did || b.DID || b.tracking_number || b.to_number || null;
-  let   pubSub       = b.publisher_sub || b.pub_id || b.sub_id || b.publisher || null;
-  const payout       = parseFloat(b.payout_amount || b.payout || b.revenue || b.amount || 0);
-  const campaign     = b.campaign_name || b.campaign || b.vertical || null;
-  const disposition  = b.disposition || b.call_status || b.status || null;
-  const sourceSystem = b.source_system || b.source || 'partner';
-
-  // Auto-resolve publisher from DID if pub_sub not provided
-  if (!pubSub && incomingDid) {
-    const didClean = String(incomingDid).replace(/\D/g, '');
-    const didLookup = await pool.query(
-      'SELECT pub_id FROM publishers WHERE did=$1 AND active=true LIMIT 1',
-      [didClean]
-    );
-    if (didLookup.rows.length) {
-      pubSub = didLookup.rows[0].pub_id;
-      console.log(`DID ${didClean} resolved to publisher: ${pubSub}`);
-    } else {
-      console.log(`DID ${didClean} not found in publishers table`);
-    }
-  }
-
-  try {
-    // If no payout sent, look up publisher's agreed rate
-    let finalPayout = payout;
-    if(!finalPayout && billable && pubSub){
-      const pubRate = await pool.query(
-        'SELECT payout_rate FROM publishers WHERE pub_id=$1 AND active=true LIMIT 1',
-        [pubSub]
-      );
-      if(pubRate.rows.length && pubRate.rows[0].payout_rate){
-        finalPayout = parseFloat(pubRate.rows[0].payout_rate);
-      }
-    }
-
-    // Determine status label
-    let statusLabel = 'pending';
-    if (b.billable === true  || b.billable === 'true'  || b.billable === 1)  statusLabel = 'cpa';
-    if (b.billable === false || b.billable === 'false' || b.billable === 0)  statusLabel = 'not_converted';
-    // If billable field not sent at all, keep as pending
-    if (b.billable === undefined || b.billable === null) { statusLabel = 'pending'; }
-
-    // Force campaign to SSDI and source to partner for all postbacks
-    const forcedCampaign = 'SSDI';
-    const forcedSource   = 'partner';
-
-    await pool.query(
-      `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
-                          publisher_sub, payout_amount, campaign_name, disposition,
-                          source_system, call_status_label, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
-      [callDate, callerId, callerName, duration,
-       statusLabel === 'pending' ? null : billable,
-       pubSub, statusLabel === 'cpa' ? finalPayout : null,
-       forcedCampaign, disposition, forcedSource, statusLabel, JSON.stringify(b)]
-    );
-    console.log(`[calls/postback] Inserted call — caller: ${callerId}, pub: ${pubSub}, date: ${callDate}, status: ${statusLabel}, payout: ${statusLabel === 'cpa' ? finalPayout : 0}`);
-    res.json({ ok: true });
-  } catch(err) {
-    console.error('[calls/postback] Insert error:', err.message);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
+// NOTE: /calls/postback is defined in the CALL / REVENUE ENDPOINTS section above.
 
 // ── END OF DAY SWEEP ENDPOINT ────────────────────────
 // Partner posts all calls with final billable status
