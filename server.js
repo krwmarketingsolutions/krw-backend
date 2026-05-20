@@ -689,20 +689,34 @@ app.patch('/campaigns/:slug', requireKey, async (req, res) => {
 async function initPublishersDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS publishers (
-      id            SERIAL PRIMARY KEY,
-      pub_id        TEXT UNIQUE NOT NULL,
-      name          TEXT NOT NULL,
-      email         TEXT,
-      campaign      TEXT,
+      pub_id        TEXT UNIQUE PRIMARY KEY,
+      name          TEXT,
       did           TEXT,
-      payout_rate   NUMERIC(10,2) DEFAULT 0,
+      payout_rate   NUMERIC,
+      campaign      TEXT,
       active        BOOLEAN DEFAULT true,
       created_at    TIMESTAMPTZ DEFAULT NOW()
     );
-    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS did TEXT;
-    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS payout_rate NUMERIC(10,2) DEFAULT 0;
   `);
-  console.log('Publishers table ready');
+  // Seed known publishers (upsert so re-deploys are safe)
+  const publishers = [
+    { pub_id: 'KRW-UTKARSH-2026-D9R', name: 'Utkarsh Sharma',  did: '18338772366', payout_rate: 150, campaign: 'SSDI' },
+    { pub_id: 'KRW-RAY-2026-D7Q',     name: 'Ray Marketing',   did: '8338928548',  payout_rate: 200, campaign: 'SSDI' },
+    { pub_id: 'KRW-JACCOB-2026-BPR',  name: 'Jacobs Carpio',   did: '833840897',   payout_rate: 160, campaign: 'SSDI' },
+    { pub_id: 'KRW-JOSHUA-2026-76M',  name: 'Joshua Duran',    did: '8338417301',  payout_rate: 200, campaign: 'SSDI' },
+  ];
+  for (const p of publishers) {
+    await pool.query(`
+      INSERT INTO publishers (pub_id, name, did, payout_rate, campaign)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (pub_id) DO UPDATE SET
+        name        = EXCLUDED.name,
+        did         = EXCLUDED.did,
+        payout_rate = EXCLUDED.payout_rate,
+        campaign    = EXCLUDED.campaign
+    `, [p.pub_id, p.name, p.did, p.payout_rate, p.campaign]);
+  }
+  console.log('✅ Publishers table ready');
 }
 
 // ── PUBLISHER ENDPOINTS ───────────────────────────────
