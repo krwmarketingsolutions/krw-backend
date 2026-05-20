@@ -734,6 +734,22 @@ async function initPublishersDB() {
     ALTER TABLE publishers ADD COLUMN IF NOT EXISTS payout_rate NUMERIC(10,2) DEFAULT 0;
   `);
   console.log('Publishers table ready');
+
+  // publisher_campaigns: one publisher can have multiple DIDs / campaigns
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS publisher_campaigns (
+      id            SERIAL PRIMARY KEY,
+      pub_id        TEXT NOT NULL,
+      campaign      TEXT,
+      did           TEXT,
+      payout_rate   NUMERIC(10,2) DEFAULT 0,
+      active        BOOLEAN DEFAULT true,
+      created_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_pub_campaigns_did    ON publisher_campaigns (did);
+    CREATE INDEX IF NOT EXISTS idx_pub_campaigns_pub_id ON publisher_campaigns (pub_id);
+  `);
+  console.log('Publisher campaigns table ready');
 }
 
 // ── PUBLISHER ENDPOINTS ───────────────────────────────
@@ -881,21 +897,43 @@ app.post('/calls/postback', async (req, res) => {
   const sourceSystem = b.source_system || b.source || 'partner';
 
   // Auto-resolve publisher from DID if pub_sub not provided
+  // Check publisher_campaigns first (multi-campaign support), then fall back to publishers
   if (!pubSub && incomingDid) {
     const didClean = String(incomingDid).replace(/\D/g, '');
-    const didLookup = await pool.query(
-      'SELECT pub_id FROM publishers WHERE did=$1 AND active=true LIMIT 1',
+    const pcLookup = await pool.query(
+      'SELECT pub_id FROM publisher_campaigns WHERE did=$1 AND active=true LIMIT 1',
       [didClean]
     );
-    if (didLookup.rows.length) {
-      pubSub = didLookup.rows[0].pub_id;
-      console.log(`DID ${didClean} resolved to publisher: ${pubSub}`);
+    if (pcLookup.rows.length) {
+      pubSub = pcLookup.rows[0].pub_id;
+      console.log(`DID ${didClean} resolved to publisher via publisher_campaigns: ${pubSub}`);
     } else {
-      console.log(`DID ${didClean} not found in publishers table`);
+      const didLookup = await pool.query(
+        'SELECT pub_id FROM publishers WHERE did=$1 AND active=true LIMIT 1',
+        [didClean]
+      );
+      if (didLookup.rows.length) {
+        pubSub = didLookup.rows[0].pub_id;
+        console.log(`DID ${didClean} resolved to publisher via publishers: ${pubSub}`);
+      } else {
+        console.log(`DID ${didClean} not found in publisher_campaigns or publishers table`);
+      }
     }
   }
 
   try {
+    // Deduplication: skip if a call with the same caller_id + call_date + publisher_sub already exists
+    if (callerId && callDate && pubSub) {
+      const dupCheck = await pool.query(
+        `SELECT id FROM calls WHERE caller_id=$1 AND call_date=$2 AND publisher_sub=$3 LIMIT 1`,
+        [callerId, callDate, pubSub]
+      );
+      if (dupCheck.rows.length) {
+        console.log(`Duplicate call skipped: caller=${callerId} date=${callDate} pub=${pubSub}`);
+        return res.json({ ok: true, message: 'duplicate skipped' });
+      }
+    }
+
     // If no payout sent, look up publisher's agreed rate
     let finalPayout = payout;
     if(!finalPayout && billable && pubSub){
@@ -965,14 +1003,27 @@ app.patch('/calls/update', async (req, res) => {
       if (!did) { results.errors++; continue; }
 
       // Find publisher from DID
+      // Check publisher_campaigns first (multi-campaign support), then fall back to publishers
       let pubSub = item.publisher_sub || null;
       if (!pubSub) {
-        const didLookup = await pool.query(
-          'SELECT pub_id, payout_rate FROM publishers WHERE did=$1 AND active=true LIMIT 1',
+        const pcLookup = await pool.query(
+          'SELECT pub_id, payout_rate FROM publisher_campaigns WHERE did=$1 AND active=true LIMIT 1',
           [did]
         );
-        if (didLookup.rows.length) {
-          pubSub = didLookup.rows[0].pub_id;
+        if (pcLookup.rows.length) {
+          pubSub = pcLookup.rows[0].pub_id;
+          console.log(`DID ${did} resolved to publisher via publisher_campaigns: ${pubSub}`);
+        } else {
+          const didLookup = await pool.query(
+            'SELECT pub_id, payout_rate FROM publishers WHERE did=$1 AND active=true LIMIT 1',
+            [did]
+          );
+          if (didLookup.rows.length) {
+            pubSub = didLookup.rows[0].pub_id;
+            console.log(`DID ${did} resolved to publisher via publishers: ${pubSub}`);
+          } else {
+            console.log(`DID ${did} not found in publisher_campaigns or publishers table`);
+          }
         }
       }
 
