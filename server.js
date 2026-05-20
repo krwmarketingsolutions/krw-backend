@@ -242,7 +242,7 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
 
     // Extract Apex URL parts: /intake/<vertical>/<apexCampaign>/zapier/<seller>/submit
     const apexMatch   = buyerUrl.match(/\/intake\/([^/]+)\/([^/]+)\/zapier\/([^/]+)\/submit/);
-    const apexCampaign = apexMatch ? apexMatch[2] : campaign;
+    const apexCampaign = apexMatch ? apexMatch[2] : campaign;  // e.g. 'talc-leads', 'depo'
     const apexSeller   = apexMatch ? apexMatch[3] : (process.env['BUYER_SELLER_'+campaign.toUpperCase()] || 'tuell');
 
     let payload;
@@ -271,12 +271,13 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         case_description: data.caseDescription || data.notes || null,
         ip_address:     data.ipAddress     || null,
         landing_page_url: data.websource   || 'https://krwmarketingsolutions.github.io/forms',
-        have_attorney: "Yes",
-        used_roundup: "Yes",
+        // Roundup-specific fields (passed through if present)
+        have_attorney:    'Yes',
+        used_roundup:     'Yes',
+        which_cancer:     data.whichCancer     || null,
+        what_year:        data.whatYear        || null,
+        exposed_location: data.exposedLocation || null,
       };
-      if (data.whichCancer)     payload.which_cancer     = data.whichCancer;
-      if (data.whatYear)        payload.what_year        = data.whatYear;
-      if (data.exposedLocation) payload.exposed_location = data.exposedLocation;
       // Remove null values
       Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
     } else if (isLawmatics) {
@@ -302,12 +303,11 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
         custom_field_766980:      data.incidentStateText   || null, // Incident state
         custom_field_631075:      data.hasReceipt          || null, // Receipt?
         custom_field_766976:      data.fraudConviction     || null, // Fraud?
-        'custom_field_812732[]':  Array.isArray(data.reportedTo) ? data.reportedTo : (data.reportedTo ? [data.reportedTo] : []),
-        'custom_field_375335[]':  Array.isArray(data.bestTimeToCall) ? data.bestTimeToCall : (data.bestTimeToCall ? [data.bestTimeToCall] : []),
+        'custom_field_812732[]':  data.reportedTo          || null, // Reported to
+        'custom_field_375335[]':  data.bestTimeToCall      || null, // Best time
       };
-      // Remove null values — array fields are excluded so [] is always sent
-      const arrayFields = ['custom_field_812732[]', 'custom_field_375335[]'];
-      Object.keys(payload).forEach(k => { if (!arrayFields.includes(k) && payload[k] === null) delete payload[k]; });
+      // Remove null values
+      Object.keys(payload).forEach(k => { if(payload[k]===null) delete payload[k]; });
     } else {
       // ── Apex / generic format ───────────────────────────
       payload = {
@@ -373,36 +373,6 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
     console.error(`❌ Lead ${leadRef} → forward error: ${err.message}`);
   }
 }
-
-// ══════════════════════════════════════════════════════
-//  CAMPAIGN CONFIG ENDPOINT (public — no auth required)
-// ══════════════════════════════════════════════════════
-app.get('/campaigns/:slug/config', async (req, res) => {
-  try {
-    const { slug } = req.params;
-    const r = await pool.query(
-      `SELECT slug, name, vertical, description, required_fields, optional_fields, field_labels
-       FROM campaigns WHERE slug=$1 AND active=true`,
-      [slug]
-    );
-    if (!r.rows.length) {
-      return res.status(404).json({ ok: false, error: 'Campaign not found: ' + slug });
-    }
-    const row = r.rows[0];
-    res.json({
-      ok:          true,
-      slug:        row.slug,
-      name:        row.name,
-      vertical:    row.vertical,
-      description: row.description,
-      required:    row.required_fields || [],
-      optional:    row.optional_fields || [],
-      fieldLabels: row.field_labels    || {},
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
 
 // ══════════════════════════════════════════════════════
 //  LEAD READ ENDPOINTS (dashboard)
@@ -479,7 +449,7 @@ app.post('/postback', requireKey, async (req, res) => {
     const caller_id = field('Caller ID','caller_id','phone');
     const call_date = field('Call Date Time','call_date');
     const campaign_id = field('Campaign ID','campaign_id');
-    const billable  = true;
+    const billable  = true; // default all calls to billable
     await pool.query(`
       INSERT INTO calls (call_date,vertical,buyer_name,caller_id,payout_amount,campaign_id,billable,raw)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -518,10 +488,10 @@ app.get('/calls', requireKey, async (req, res) => {
 app.get('/invoice-summary', requireKey, async (req, res) => {
   try {
     const { from, to } = req.query;
-    const where=["source_system='trackdrive'",'billable=true',"invoice_status='pending'",'payout_amount>0'], params=[];
+    const where=['billable=true',"invoice_status='pending'","payout_amount>0","source_system='trackdrive'"], params=[];
     let i=1;
-    if (from) { where.push('received_at::date>=$'+i++); params.push(from); }
-    if (to)   { where.push('received_at::date<=$'+i++); params.push(to); }
+    if (from) { where.push(`received_at::date>=$${i++}`); params.push(from); }
+    if (to)   { where.push(`received_at::date<=$${i++}`); params.push(to); }
     const calls = await pool.query(`SELECT * FROM calls WHERE ${where.join(' AND ')} ORDER BY received_at DESC`, params);
     const byBuyer = {};
     calls.rows.forEach(c => {
@@ -541,33 +511,551 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
   try {
     const { id } = req.params;
     const { invoice_status, invoice_id, invoice_date, paid_date } = req.body;
-    const sets=[], params=[]; let i=1;
+    const sets=[], params=[];
+    let i=1;
     if (invoice_status) { sets.push(`invoice_status=$${i++}`); params.push(invoice_status); }
     if (invoice_id)     { sets.push(`invoice_id=$${i++}`);     params.push(invoice_id); }
     if (invoice_date)   { sets.push(`invoice_date=$${i++}`);   params.push(invoice_date); }
     if (paid_date)      { sets.push(`paid_date=$${i++}`);      params.push(paid_date); }
     if (!sets.length) return res.status(400).json({ error:'Nothing to update' });
     params.push(id);
-    const r = await pool.query(`UPDATE calls SET ${sets.join(',')} WHERE id=$${i} RETURNING *`, params);
-    if (!r.rows.length) return res.status(404).json({ error:'Not found' });
-    res.json(r.rows[0]);
+    await pool.query('UPDATE calls SET '+sets.join(',')+'WHERE id=$'+i, params);
+    res.json({ ok:true });
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
+app.patch('/calls/:id/billable', requireKey, async (req, res) => {
+  try {
+    const { billable } = req.body;
+    await pool.query('UPDATE calls SET billable=$1 WHERE id=$2',[billable===true||billable==='true', req.params.id]);
+    res.json({ ok:true });
+  } catch(err) { res.status(500).json({ error:err.message }); }
+});
+
+app.post('/send-invoice', requireKey, async (req, res) => {
+  try {
+    const { zapier_webhook, ...payload } = req.body;
+    if (!zapier_webhook) return res.status(400).json({ error:'zapier_webhook required' });
+    const r = await fetch(zapier_webhook, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+    res.json({ ok:true, zapier_status:r.status });
+  } catch(err) { res.status(500).json({ error:err.message }); }
+});
+
+// ── Dashboard HTML ────────────────────────────────────
+app.get('/dashboard', (req, res) => {
+  const file = path.join(__dirname, 'dashboard.html');
+  if (!fs.existsSync(file)) return res.status(404).send('<h2>Upload dashboard.html to your GitHub repo</h2>');
+  res.setHeader('Content-Type','text/html');
+  res.setHeader('Cache-Control','no-cache');
+  res.sendFile(file);
+});
+
+// ── Health / Debug ────────────────────────────────────
+app.get('/health', (req, res) => res.json({ ok:true, status:'healthy' }));
+app.get('/debug',  (req, res) => res.json({ api_key_set:!!process.env.API_KEY, lead_key_set:!!process.env.LEAD_API_KEY, db_url_set:!!process.env.DATABASE_URL }));
+
+
 // ══════════════════════════════════════════════════════
-// START
+//  CAMPAIGNS — create/edit from dashboard, no env vars needed
 // ══════════════════════════════════════════════════════
 
+async function initCampaignsDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id               SERIAL PRIMARY KEY,
+      slug             TEXT UNIQUE NOT NULL,
+      name             TEXT NOT NULL,
+      vertical         TEXT,
+      apex_endpoint    TEXT,
+      payout           NUMERIC(10,2) DEFAULT 0,
+      buyer_notes      TEXT,
+      required_fields  JSONB DEFAULT '["firstName","lastName","email","phone"]',
+      optional_fields  JSONB DEFAULT '["state","zip","notes","trustedFormCertUrl","jornayaLeadId","publisherSub"]',
+      field_labels     JSONB DEFAULT '{}',
+      description      TEXT,
+      active           BOOLEAN DEFAULT true,
+      created_at       TIMESTAMPTZ DEFAULT NOW(),
+      updated_at       TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  // Seed DEPO if not exists
+  const existing = await pool.query('SELECT slug FROM campaigns WHERE slug=$1', ['depo']);
+  if (!existing.rows.length) {
+    await pool.query(`
+      INSERT INTO campaigns (slug, name, vertical, apex_endpoint, required_fields, optional_fields)
+      VALUES ($1,$2,$3,$4,$5,$6)
+    `, [
+      'depo',
+      'DEPO — Lead Tree (WTC)',
+      'Mass Tort - Depo',
+      process.env.BUYER_ENDPOINT_DEPO || '',
+      JSON.stringify(['firstName','lastName','email','phone']),
+      JSON.stringify(['street','city','state','zip','notes','trustedFormCertUrl','jornayaLeadId','facebookLeadId','publisherSub']),
+    ]);
+    console.log('✅ DEPO campaign seeded');
+  }
+  console.log('✅ Campaigns table ready');
+}
+
+// GET /campaigns — list all (dashboard)
+app.get('/campaigns', requireKey, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT * FROM campaigns WHERE active=true ORDER BY created_at ASC'
+    );
+    res.json({ ok: true, campaigns: r.rows });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /campaigns/:slug/config — public, used by publisher form
+app.get('/campaigns/:slug/config', async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT * FROM campaigns WHERE slug=$1 AND active=true',
+      [req.params.slug.toLowerCase()]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Campaign not found: '+req.params.slug });
+    const row = r.rows[0];
+    res.json({
+      ok:          true,
+      slug:        row.slug,
+      name:        row.name,
+      vertical:    row.vertical || '',
+      description: row.description || '',
+      required:    row.required_fields,
+      optional:    row.optional_fields,
+      fieldLabels: row.field_labels || {},
+    });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /campaigns — create or update (upsert)
+app.post('/campaigns', requireKey, async (req, res) => {
+  try {
+    const {
+      slug, name, vertical, apex_endpoint, payout,
+      buyer_notes, required_fields, optional_fields,
+      field_labels, description
+    } = req.body;
+    if (!slug || !name) return res.status(400).json({ error: 'slug and name required' });
+    const r = await pool.query(`
+      INSERT INTO campaigns
+        (slug, name, vertical, apex_endpoint, payout, buyer_notes,
+         required_fields, optional_fields, field_labels, description)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      ON CONFLICT (slug) DO UPDATE SET
+        name=$2, vertical=$3, apex_endpoint=$4, payout=$5,
+        buyer_notes=$6, required_fields=$7, optional_fields=$8,
+        field_labels=$9, description=$10, updated_at=NOW()
+      RETURNING *
+    `, [
+      slug.toLowerCase(), name, vertical||'', apex_endpoint||'',
+      parseFloat(payout)||0, buyer_notes||null,
+      JSON.stringify(required_fields||['firstName','lastName','email','phone']),
+      JSON.stringify(optional_fields||[]),
+      JSON.stringify(field_labels||{}),
+      description||null,
+    ]);
+    res.json({ ok: true, campaign: r.rows[0] });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// PATCH /campaigns/:slug — partial update
+app.patch('/campaigns/:slug', requireKey, async (req, res) => {
+  try {
+    const slug = req.params.slug.toLowerCase();
+    const allowed = ['name','vertical','apex_endpoint','payout','buyer_notes',
+                     'required_fields','optional_fields','field_labels','description','active'];
+    const sets = [], params = [];
+    let i = 1;
+    allowed.forEach(function(col) {
+      if (req.body[col] !== undefined) {
+        sets.push(col+'=$'+i++);
+        const val = req.body[col];
+        params.push(['required_fields','optional_fields','field_labels'].includes(col)
+          ? JSON.stringify(val) : val);
+      }
+    });
+    if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
+    sets.push('updated_at=NOW()');
+    params.push(slug);
+    await pool.query('UPDATE campaigns SET '+sets.join(',')+" WHERE slug=$"+i, params);
+    res.json({ ok: true });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+
+// ── Publishers table ──────────────────────────────────
+async function initPublishersDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS publishers (
+      id            SERIAL PRIMARY KEY,
+      pub_id        TEXT UNIQUE NOT NULL,
+      name          TEXT NOT NULL,
+      email         TEXT,
+      campaign      TEXT,
+      did           TEXT,
+      payout_rate   NUMERIC(10,2) DEFAULT 0,
+      active        BOOLEAN DEFAULT true,
+      created_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS did TEXT;
+    ALTER TABLE publishers ADD COLUMN IF NOT EXISTS payout_rate NUMERIC(10,2) DEFAULT 0;
+  `);
+  console.log('Publishers table ready');
+}
+
+// ── PUBLISHER ENDPOINTS ───────────────────────────────
+
+// Verify publisher login (pub_id lookup)
+app.post('/publishers/login', async (req, res) => {
+  const { pub_id } = req.body || {};
+  if (!pub_id) return res.status(400).json({ ok: false, error: 'pub_id required' });
+  try {
+    const r = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
+    if (!r.rows.length) return res.status(401).json({ ok: false, error: 'Publisher not found' });
+    const pub = r.rows[0];
+    res.json({ ok: true, name: pub.name, pub_id: pub.pub_id, campaign: pub.campaign, did: pub.did||null });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Get calls for a publisher
+app.get('/publishers/:pub_id/calls', async (req, res) => {
+  const { pub_id } = req.params;
+  const { days = 30, billable_only } = req.query;
+  try {
+    // Verify publisher exists
+    const pubCheck = await pool.query('SELECT * FROM publishers WHERE pub_id=$1 AND active=true', [pub_id]);
+    if (!pubCheck.rows.length) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+
+    const daysInt = parseInt(days) >= 9999 ? 36500 : parseInt(days);
+    let query = `SELECT id, call_date, caller_id, caller_name,
+                        call_duration, billable, call_status_label, disposition,
+                        payout_amount, campaign_name, received_at
+                 FROM calls
+                 WHERE publisher_sub=$1
+                   AND source_system='partner'`;
+    if (daysInt < 9999) query += ` AND received_at >= NOW() - INTERVAL '${daysInt} days'`;
+    if (billable_only === 'true') query += ' AND billable=true';
+    query += ' ORDER BY received_at DESC LIMIT 500';
+
+    const r = await pool.query(query, [pub_id]);
+    const total = r.rows.length;
+    const billable_count = r.rows.filter(c => c.billable).length;
+    const total_payout = r.rows.filter(c => c.billable).reduce((sum, c) => sum + parseFloat(c.payout_amount||0), 0);
+
+    res.json({ ok: true, calls: r.rows, total, billable_count, total_payout: total_payout.toFixed(2) });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// CRUD publishers (dashboard only)
+app.get('/publishers', requireKey, async (req, res) => {
+  try {
+    const r = await pool.query('SELECT * FROM publishers ORDER BY created_at DESC');
+    res.json({ ok: true, publishers: r.rows });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.post('/publishers', requireKey, async (req, res) => {
+  const { pub_id, name, email, campaign, did, payout_rate } = req.body || {};
+  if (!pub_id || !name) return res.status(400).json({ ok: false, error: 'pub_id and name required' });
+  try {
+    const r = await pool.query(
+      `INSERT INTO publishers (pub_id, name, email, campaign, did, payout_rate)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (pub_id) DO UPDATE SET name=$2, email=$3, campaign=$4, did=$5, payout_rate=$6, active=true
+       RETURNING *`,
+      [pub_id, name, email||null, campaign||null, did||null, parseFloat(payout_rate||0)]
+    );
+    res.json({ ok: true, publisher: r.rows[0] });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.delete('/publishers/:pub_id', requireKey, async (req, res) => {
+  try {
+    await pool.query('UPDATE publishers SET active=false WHERE pub_id=$1', [req.params.pub_id]);
+    res.json({ ok: true });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── TRACKDRIVE POSTBACK ENDPOINT (FE calls → Invoicing) ─
+app.post('/trackdrive/postback', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+    process.env.TRACKDRIVE_API_KEY || '',
+  ].filter(Boolean);
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+  const b = req.body || {};
+  const callDate    = b.call_date   || b.date     || new Date().toISOString().split('T')[0];
+  const callerId    = b.caller_id   || b.ani      || b.phone    || null;
+  const callerName  = b.caller_name || b.name     || null;
+  const duration    = parseInt(b.call_duration || b.duration || 0);
+  const billable    = b.billable === true || b.billable === 'true' || b.billable === 1;
+  const pubSub      = b.publisher_sub || b.pub_id || null;
+  const payout      = parseFloat(b.payout_amount || b.payout || 0);
+  const buyerName   = b.buyer_name  || b.buyer    || null;
+  const vertical    = b.vertical    || b.campaign || 'FE';
+  const campaign    = b.campaign_name || vertical;
+
+  try {
+    await pool.query(
+      `INSERT INTO calls
+        (call_date, caller_id, caller_name, call_duration, billable,
+         publisher_sub, payout_amount, buyer_name, vertical, campaign_name,
+         source_system, raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [callDate, callerId, callerName, duration, billable,
+       pubSub, payout, buyerName, vertical, campaign,
+       'trackdrive', JSON.stringify(b)]
+    );
+    res.json({ ok: true, message: 'TrackDrive call recorded' });
+  } catch(err) {
+    console.error('TrackDrive postback error:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── CALLS POSTBACK ENDPOINT (SSDI only) ─────────────────
+// Called by partner system or buyer at end of day
+// Accepts flexible field names to support multiple sources
+app.post('/calls/postback', async (req, res) => {
+  // Accept any API key from configured sources
+  const key = req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.LEAD_API_KEY || 'krwleads2026secure',  // your key
+    process.env.PARTNER_API_KEY || '',                   // partner key (set in Railway env vars)
+    process.env.BUYER_API_KEY || '',                     // future buyer key
+  ].filter(Boolean);
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Normalize fields — accept multiple naming conventions
+  const callDate     = b.call_date   || b.callDate   || b.date        || new Date().toISOString().split('T')[0];
+  const callerId     = b.caller_id   || b.callerId   || b.phone       || b.ani        || null;
+  const callerName   = b.caller_name || b.callerName || b.name        || b.contact    || null;
+  const duration     = parseInt(b.call_duration || b.duration || b.talk_time || 0);
+  const billable     = b.billable === true || b.billable === 'true' || b.billable === 1 || b.status === 'billable';
+  const incomingDid  = b.did || b.DID || b.tracking_number || b.to_number || null;
+  let   pubSub       = b.publisher_sub || b.pub_id || b.sub_id || b.publisher || null;
+  const payout       = parseFloat(b.payout_amount || b.payout || b.revenue || b.amount || 0);
+  const campaign     = b.campaign_name || b.campaign || b.vertical || null;
+  const disposition  = b.disposition || b.call_status || b.status || null;
+  const sourceSystem = b.source_system || b.source || 'partner';
+
+  // Auto-resolve publisher from DID if pub_sub not provided
+  if (!pubSub && incomingDid) {
+    const didClean = String(incomingDid).replace(/\D/g, '');
+    const didLookup = await pool.query(
+      'SELECT pub_id FROM publishers WHERE did=$1 AND active=true LIMIT 1',
+      [didClean]
+    );
+    if (didLookup.rows.length) {
+      pubSub = didLookup.rows[0].pub_id;
+      console.log(`DID ${didClean} resolved to publisher: ${pubSub}`);
+    } else {
+      console.log(`DID ${didClean} not found in publishers table`);
+    }
+  }
+
+  try {
+    // If no payout sent, look up publisher's agreed rate
+    let finalPayout = payout;
+    if(!finalPayout && billable && pubSub){
+      const pubRate = await pool.query(
+        'SELECT payout_rate FROM publishers WHERE pub_id=$1 AND active=true LIMIT 1',
+        [pubSub]
+      );
+      if(pubRate.rows.length && pubRate.rows[0].payout_rate){
+        finalPayout = parseFloat(pubRate.rows[0].payout_rate);
+      }
+    }
+
+    // Determine status label
+    let statusLabel = 'pending';
+    if (b.billable === true  || b.billable === 'true'  || b.billable === 1)  statusLabel = 'cpa';
+    if (b.billable === false || b.billable === 'false' || b.billable === 0)  statusLabel = 'not_converted';
+    // If billable field not sent at all, keep as pending
+    if (b.billable === undefined || b.billable === null) { statusLabel = 'pending'; }
+
+    // Force campaign to SSDI and source to partner for all postbacks
+    const forcedCampaign = 'SSDI';
+    const forcedSource   = 'partner';
+
+    await pool.query(
+      `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
+                          publisher_sub, payout_amount, campaign_name, disposition,
+                          source_system, call_status_label, raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [callDate, callerId, callerName, duration,
+       statusLabel === 'pending' ? null : billable,
+       pubSub, statusLabel === 'cpa' ? finalPayout : null,
+       forcedCampaign, disposition, forcedSource, statusLabel, JSON.stringify(b)]
+    );
+    res.json({ ok: true, message: 'Call recorded' });
+  } catch(err) {
+    console.error('Postback error:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── END OF DAY SWEEP ENDPOINT ────────────────────────
+// Partner posts all calls with final billable status
+// Matched by did + call_date, updates existing records
+app.patch('/calls/update', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+    process.env.PARTNER_API_KEY || '',
+    process.env.BUYER_API_KEY || '',
+  ].filter(Boolean);
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const updates = req.body.calls || [req.body];
+  const results = { updated: 0, not_found: 0, errors: 0 };
+
+  for (const item of updates) {
+    try {
+      // Normalize DID
+      const did       = String(item.did || item.DID || '').replace(/\D/g, '');
+      const callDate  = item.call_date || item.callDate || new Date().toISOString().split('T')[0];
+      const billable  = item.billable === true || item.billable === 'true' || item.billable === 1;
+      const statusLabel = billable ? 'cpa' : 'not_converted';
+
+      if (!did) { results.errors++; continue; }
+
+      // Find publisher from DID
+      let pubSub = item.publisher_sub || null;
+      if (!pubSub) {
+        const didLookup = await pool.query(
+          'SELECT pub_id, payout_rate FROM publishers WHERE did=$1 AND active=true LIMIT 1',
+          [did]
+        );
+        if (didLookup.rows.length) {
+          pubSub = didLookup.rows[0].pub_id;
+        }
+      }
+
+      // Get payout rate
+      let payout = parseFloat(item.payout_amount || item.payout || 0);
+      if (!payout && billable && pubSub) {
+        const rateQ = await pool.query(
+          'SELECT payout_rate FROM publishers WHERE pub_id=$1 LIMIT 1', [pubSub]
+        );
+        if (rateQ.rows.length) payout = parseFloat(rateQ.rows[0].payout_rate || 0);
+      }
+
+      // Normalize all fields from partner spec
+      const callerName  = item.caller_name || item.name        || null;
+      const callerId    = String(item.caller_id || item.phone  || '').replace(/\D/g,'');
+      const duration    = parseInt(item.call_duration || item.duration || 0);
+      const state       = item.state        || null;
+      const disposition = item.disposition  || item.status     || null;
+      const notes       = item.notes        || null;
+      const recording   = item.recording    || null;
+      const campaign    = item.campaign     || item.campaign_name || 'SSDI';
+
+      // Update existing record matched by DID + call_date
+      const updateQ = await pool.query(
+        `UPDATE calls SET
+          billable          = $1,
+          call_status_label = $2,
+          payout_amount     = $3,
+          caller_name       = COALESCE($7, caller_name),
+          caller_id         = COALESCE(NULLIF($8,''), caller_id),
+          call_duration     = COALESCE(NULLIF($9,0), call_duration),
+          disposition       = COALESCE($10, disposition),
+          campaign_name     = COALESCE($11, campaign_name)
+        WHERE publisher_sub = $4
+          AND call_date     = $5
+          AND (call_status_label = 'pending' OR caller_id = $6)
+        RETURNING id`,
+        [billable, statusLabel, billable ? payout : null,
+         pubSub, callDate, callerId,
+         callerName, callerId, duration || null, disposition, campaign]
+      );
+
+      if (updateQ.rowCount > 0) {
+        results.updated++;
+        console.log(`Updated call: pub=${pubSub} did=${did} date=${callDate} billable=${billable} payout=${payout}`);
+      } else {
+        // Record not found — insert it with all fields
+        await pool.query(
+          `INSERT INTO calls (call_date, caller_id, caller_name, call_duration,
+                              billable, publisher_sub, payout_amount, campaign_name,
+                              disposition, call_status_label, source_system, raw)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'partner',$11)`,
+          [callDate, callerId, callerName, duration || null,
+           billable, pubSub, billable ? payout : null, campaign,
+           disposition, statusLabel, JSON.stringify(item)]
+        );
+        console.log(`Inserted new call: pub=${pubSub} did=${did} date=${callDate}`);
+        results.not_found++;
+      }
+    } catch (err) {
+      console.error('Update error:', err.message);
+      results.errors++;
+    }
+  }
+
+  res.json({ ok: true, message: 'End-of-day sweep complete', ...results });
+});
+
+// Get calls feed (dashboard)
+app.get('/calls/feed', requireKey, async (req, res) => {
+  const { days = 30, pub } = req.query;
+  try {
+    const daysInt = parseInt(days) >= 9999 ? 36500 : parseInt(days);
+    const params = [];
+    let query = `SELECT * FROM calls WHERE source_system='partner'`;
+    if (daysInt < 9999) {
+      query += ` AND received_at >= NOW() - INTERVAL '${daysInt} days'`;
+    }
+    if (pub) {
+      params.push(pub);
+      query += ` AND publisher_sub=$${params.length}`;
+    }
+    query += ' ORDER BY received_at DESC LIMIT 1000';
+    const r = await pool.query(query, params);
+    res.json({ ok: true, calls: r.rows });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Calls summary (dashboard KPIs)
+app.get('/calls/summary', requireKey, async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT
+        COUNT(*)                                          AS total,
+        COUNT(*) FILTER(WHERE billable=true)              AS billable,
+        COUNT(*) FILTER(WHERE DATE(received_at)=CURRENT_DATE) AS today,
+        COALESCE(SUM(payout_amount) FILTER(WHERE billable=true),0) AS total_payout
+      FROM calls
+      WHERE source_system='partner'
+        AND received_at >= NOW() - INTERVAL '30 days'
+    `);
+    res.json({ ok: true, ...r.rows[0] });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// ── Start ─────────────────────────────────────────────
 initDB()
   .then(() => initLeadsDB())
+  .then(() => initCampaignsDB())
+  .then(() => initPublishersDB())
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
-      console.log(`✅ KRW server on 0.0.0.0:${PORT}`);
+      console.log(`KRW server on 0.0.0.0:${PORT}`);
       console.log(`API_KEY set: ${!!process.env.API_KEY}`);
+      console.log(`LEAD_KEY set: ${!!process.env.LEAD_API_KEY}`);
       console.log(`DB set: ${!!process.env.DATABASE_URL}`);
     });
   })
-  .catch(err => {
-    console.error('Failed to start:', err.message);
-    process.exit(1);
-  });
+  .catch(err => { console.error('Failed to start:', err.message); process.exit(1); });
