@@ -852,18 +852,7 @@ app.post('/trackdrive/postback', async (req, res) => {
 // ── CALLS POSTBACK ENDPOINT (SSDI only) ─────────────────
 // Called by partner system or buyer at end of day
 // Accepts flexible field names to support multiple sources
-app.post('/calls/postback', async (req, res) => {
-  // Accept any API key from configured sources
-  const key = req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '';
-  const validKeys = [
-    process.env.LEAD_API_KEY || 'krwleads2026secure',  // your key
-    process.env.PARTNER_API_KEY || '',                   // partner key (set in Railway env vars)
-    process.env.BUYER_API_KEY || '',                     // future buyer key
-  ].filter(Boolean);
-  if (!validKeys.includes(key)) {
-    return res.status(401).json({ ok: false, error: 'Invalid API key' });
-  }
-
+app.post('/calls/postback', requireLeadKey, async (req, res) => {
   const b = req.body || {};
 
   // Normalize fields — accept multiple naming conventions
@@ -928,9 +917,10 @@ app.post('/calls/postback', async (req, res) => {
        pubSub, statusLabel === 'cpa' ? finalPayout : null,
        forcedCampaign, disposition, forcedSource, statusLabel, JSON.stringify(b)]
     );
-    res.json({ ok: true, message: 'Call recorded' });
+    console.log(`[calls/postback] Inserted call — caller: ${callerId}, pub: ${pubSub}, date: ${callDate}, status: ${statusLabel}, payout: ${statusLabel === 'cpa' ? finalPayout : 0}`);
+    res.json({ ok: true });
   } catch(err) {
-    console.error('Postback error:', err.message);
+    console.error('[calls/postback] Insert error:', err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
