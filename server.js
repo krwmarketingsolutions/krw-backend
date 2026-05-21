@@ -81,9 +81,9 @@ async function initDB() {
       call_datetime   TEXT,
       call_duration   INTEGER,
       vertical        TEXT,
-      campaign_name   TEXT,
+      campaign        TEXT,
       campaign_id     TEXT,
-      buyer_name      TEXT,
+      buyer           TEXT,
       buyer_id        TEXT,
       supplier_name   TEXT,
       caller_id       TEXT,
@@ -482,7 +482,7 @@ app.post('/postback', requireKey, async (req, res) => {
     const campaign_id = field('Campaign ID','campaign_id');
     const billable  = true; // default all calls to billable
     await pool.query(`
-      INSERT INTO calls (call_date,vertical,buyer_name,caller_id,payout_amount,campaign_id,billable,raw)
+      INSERT INTO calls (call_date,vertical,buyer,caller_id,payout_amount,campaign_id,billable,raw)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
     `, [call_date, vertical, buyer, caller_id, revenue, campaign_id, billable, JSON.stringify(b)]);
     res.json({ ok: true });
@@ -526,8 +526,8 @@ app.get('/invoice-summary', requireKey, async (req, res) => {
     const calls = await pool.query(`SELECT * FROM calls WHERE ${where.join(' AND ')} ORDER BY received_at DESC`, params);
     const byBuyer = {};
     calls.rows.forEach(c => {
-      const k = (c.buyer_name||'Unknown')+'|'+(c.vertical||'');
-      if (!byBuyer[k]) byBuyer[k] = { buyer_name:c.buyer_name||'Unknown', vertical:c.vertical||'', calls:[], total_owed:0, call_count:0 };
+      const k = (c.buyer||'Unknown')+'|'+(c.vertical||'');
+      if (!byBuyer[k]) byBuyer[k] = { buyer_name:c.buyer||'Unknown', vertical:c.vertical||'', calls:[], total_owed:0, call_count:0 };
       byBuyer[k].calls.push(c);
       byBuyer[k].total_owed += parseFloat(c.payout_amount||0);
       byBuyer[k].call_count++;
@@ -778,7 +778,7 @@ app.get('/publishers/:pub_id/calls', async (req, res) => {
     const daysInt = parseInt(days) >= 9999 ? 36500 : parseInt(days);
     let query = `SELECT id, call_date, caller_id, caller_name,
                         call_duration, billable, call_status_label, disposition,
-                        payout_amount, campaign_name, received_at
+                        payout_amount, campaign, received_at
                  FROM calls
                  WHERE publisher_sub=$1
                    AND source_system='partner'`;
@@ -851,7 +851,7 @@ app.post('/trackdrive/postback', async (req, res) => {
     await pool.query(
       `INSERT INTO calls
         (call_date, caller_id, caller_name, call_duration, billable,
-         publisher_sub, payout_amount, buyer_name, vertical, campaign_name,
+         publisher_sub, payout_amount, buyer, vertical, campaign,
          source_system, raw)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [callDate, callerId, callerName, duration, billable,
@@ -959,7 +959,7 @@ app.post('/calls/postback', async (req, res) => {
 
     await pool.query(
       `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
-                          publisher_sub, payout_amount, campaign_name, disposition,
+                          publisher_sub, payout_amount, campaign, disposition,
                           source_system, call_status_label, raw)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
       [callDate, callerId, callerName, duration,
@@ -1056,7 +1056,7 @@ app.patch('/calls/update', async (req, res) => {
           caller_id         = COALESCE(NULLIF($8,''), caller_id),
           call_duration     = COALESCE(NULLIF($9,0), call_duration),
           disposition       = COALESCE($10, disposition),
-          campaign_name     = COALESCE($11, campaign_name)
+          campaign          = COALESCE($11, campaign)
         WHERE publisher_sub = $4
           AND call_date     = $5
           AND (call_status_label = 'pending' OR caller_id = $6)
@@ -1073,7 +1073,7 @@ app.patch('/calls/update', async (req, res) => {
         // Record not found — insert it with all fields
         await pool.query(
           `INSERT INTO calls (call_date, caller_id, caller_name, call_duration,
-                              billable, publisher_sub, payout_amount, campaign_name,
+                              billable, publisher_sub, payout_amount, campaign,
                               disposition, call_status_label, source_system, raw)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'partner',$11)`,
           [callDate, callerId, callerName, duration || null,
