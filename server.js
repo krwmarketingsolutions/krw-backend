@@ -789,6 +789,8 @@ app.post('/publishers/login', async (req, res) => {
       portal_id: pub.portal_id || pub.pub_id,
       email:     pub.email,
       company:   pub.company,
+      did:       pub.did || null,
+      payout_rate: pub.payout_rate || null,
       campaigns: camps.rows,
     });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
