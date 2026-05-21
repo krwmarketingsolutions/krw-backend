@@ -1047,16 +1047,23 @@ app.post('/calls/postback', async (req, res) => {
       }
     }
 
-    await pool.query(
-      `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
-                          publisher_sub, payout_amount, campaign, disposition,
-                          source_system, call_status_label, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
-      [callDate, callerId, callerName, duration,
-       statusLabel === 'pending' ? null : billable,
-       pubSub, statusLabel === 'cpa' ? finalPayout : null,
-       forcedCampaign, disposition, forcedSource, statusLabel, JSON.stringify(b)]
-    );
+    console.log(`[INSERT] caller=${callerId} date=${callDate} pub=${pubSub} status=${statusLabel}`);
+    try {
+      await pool.query(
+        `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
+                            publisher_sub, payout_amount, campaign, disposition,
+                            source_system, call_status_label, raw)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
+        [callDate, callerId, callerName, duration,
+         statusLabel === 'pending' ? null : billable,
+         pubSub, statusLabel === 'cpa' ? finalPayout : null,
+         forcedCampaign, disposition, forcedSource, statusLabel, JSON.stringify(b)]
+      );
+      console.log(`[INSERT] ✅ Success: ${callerId}`);
+    } catch(insertErr) {
+      console.error(`[INSERT] ❌ Failed:`, insertErr.message);
+      return res.status(500).json({ ok: false, error: insertErr.message });
+    }
     res.json({ ok: true, message: 'Call recorded' });
   } catch(err) {
     console.error('Postback error:', err.message);
