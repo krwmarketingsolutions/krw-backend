@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Loading…</title>
+<title>KRW Leads Portal</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -32,40 +32,174 @@
     font-family: 'Helvetica Neue', Arial, sans-serif;
     background: var(--bg);
     min-height: 100vh;
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    padding: 2rem 1rem 3rem;
     color: #1e293b;
   }
 
-  /* ── Card ── */
-  .card {
-    background: var(--surface);
-    border-radius: var(--radius);
-    box-shadow: 0 4px 24px rgba(0,0,0,.10);
-    width: 100%;
-    max-width: 560px;
-    overflow: hidden;
-  }
-
-  .card-hdr {
+  /* ── Header ── */
+  .portal-header {
     background: var(--brand);
     color: white;
-    padding: 1.4rem 1.75rem;
+    padding: 1rem 1.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
   }
-  .card-hdr h1 {
-    font-size: 18px;
+  .portal-header h1 {
+    font-size: 17px;
     font-weight: 700;
     letter-spacing: -.01em;
-    margin-bottom: 3px;
   }
-  .card-hdr p {
-    font-size: 12px;
+  .portal-header p {
+    font-size: 11px;
     opacity: .65;
+    margin-top: 2px;
+  }
+  .header-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
   }
 
-  .card-body { padding: 1.75rem; }
+  /* ── Filter bar ── */
+  .filter-bar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: .85rem 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .filter-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .filter-select {
+    font-family: inherit;
+    font-size: 13px;
+    padding: 7px 11px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #f8fafc;
+    color: #1e293b;
+    outline: none;
+    cursor: pointer;
+    transition: border .15s, box-shadow .15s;
+  }
+  .filter-select:focus {
+    border-color: var(--accent);
+    background: white;
+    box-shadow: 0 0 0 3px rgba(45,106,79,.09);
+  }
+  .refresh-btn {
+    font-family: inherit;
+    font-size: 12px;
+    padding: 7px 14px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background .15s;
+    white-space: nowrap;
+  }
+  .refresh-btn:hover { background: var(--accent-dk); }
+  .refresh-btn:disabled { background: #94a3b8; cursor: not-allowed; }
+
+  /* ── Summary KPIs ── */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    padding: 1.25rem 1.75rem;
+  }
+  .kpi-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: .9rem 1rem;
+  }
+  .kpi-card.accent { border-left: 3px solid var(--accent); }
+  .kpi-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--muted);
+    margin-bottom: 5px;
+  }
+  .kpi-value {
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: -.02em;
+    color: var(--accent);
+  }
+  .kpi-sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+  }
+
+  /* ── Leads table ── */
+  .table-wrap {
+    padding: 0 1.75rem 2rem;
+    overflow-x: auto;
+  }
+  .leads-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .leads-table thead th {
+    text-align: left;
+    padding: 9px 12px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    background: #f8fafc;
+    white-space: nowrap;
+  }
+  .leads-table tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background .12s;
+  }
+  .leads-table tbody tr:last-child { border-bottom: none; }
+  .leads-table tbody tr:hover { background: #f8fafc; }
+  .leads-table td {
+    padding: 9px 12px;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+  .leads-table td.wrap { white-space: normal; }
+
+  /* ── Status pills ── */
+  .status-pill {
+    display: inline-block;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .status-pill.received    { background: #dbeafe; color: #1e40af; }
+  .status-pill.forwarded   { background: var(--green-bg); color: var(--green-text); }
+  .status-pill.forwarding  { background: #fef9c3; color: #854d0e; }
+  .status-pill.buyer_rejected { background: var(--err-bg); color: var(--err-text); }
+  .status-pill.forward_failed { background: var(--err-bg); color: var(--err-text); }
 
   /* ── Spinner ── */
   .spinner-wrap {
@@ -79,8 +213,8 @@
     font-size: 13px;
   }
   .spinner {
-    width: 36px;
-    height: 36px;
+    width: 32px;
+    height: 32px;
     border: 3px solid var(--border);
     border-top-color: var(--brand);
     border-radius: 50%;
@@ -88,164 +222,112 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* ── Error / Success states ── */
-  .state-msg {
-    padding: 2rem 1.75rem;
+  /* ── Empty / error states ── */
+  .empty-state {
     text-align: center;
-  }
-  .state-msg .icon { font-size: 40px; margin-bottom: 12px; }
-  .state-msg h2 { font-size: 17px; margin-bottom: 6px; }
-  .state-msg p  { font-size: 13px; color: var(--muted); line-height: 1.6; }
-  .state-msg.success h2 { color: var(--green-text); }
-  .state-msg.error   h2 { color: var(--err-text); }
-
-  /* ── Form sections ── */
-  .section-label {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: .08em;
+    padding: 3rem 1rem;
     color: var(--muted);
-    margin: 22px 0 10px;
-    padding-bottom: 6px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 7px;
-  }
-  .section-label:first-child { margin-top: 0; }
-  .optional-badge {
-    font-size: 9px;
-    background: #f1f5f9;
-    color: #94a3b8;
-    padding: 1px 6px;
-    border-radius: 10px;
-    font-weight: normal;
-    text-transform: none;
-    letter-spacing: 0;
-  }
-
-  /* ── Form groups ── */
-  .form-group { margin-bottom: 14px; }
-  .form-group label {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .05em;
-    color: #475569;
-    margin-bottom: 5px;
-  }
-  .req { color: var(--red); font-size: 14px; line-height: 1; font-weight: 700; }
-
-  .form-group input,
-  .form-group select,
-  .form-group textarea {
-    width: 100%;
-    padding: 9px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
     font-size: 13px;
-    font-family: inherit;
-    outline: none;
-    transition: border .15s, box-shadow .15s;
-    background: #f8fafc;
-    color: #1e293b;
   }
-  .form-group input:focus,
-  .form-group select:focus,
-  .form-group textarea:focus {
-    border-color: var(--accent);
-    background: white;
-    box-shadow: 0 0 0 3px rgba(45,106,79,.09);
-  }
-  .form-group input.invalid,
-  .form-group select.invalid {
-    border-color: var(--red) !important;
-    background: var(--red-bg) !important;
-  }
-  .field-error {
-    font-size: 11px;
-    color: var(--red);
-    margin-top: 3px;
-    display: none;
-  }
-  .field-error.show { display: block; }
-  .field-note {
-    font-size: 11px;
-    color: var(--muted);
-    margin-top: 3px;
-  }
-
-  /* ── Grid layouts ── */
-  .form-row   { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .form-row-3 { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; }
-
-  /* ── Submit button ── */
-  .submit-btn {
-    width: 100%;
-    padding: 13px;
-    background: var(--accent);
-    color: white;
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    margin-top: 10px;
-    transition: background .15s;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-  }
-  .submit-btn:hover:not(:disabled) { background: var(--accent-dk); }
-  .submit-btn:disabled { background: #94a3b8; cursor: not-allowed; }
-
-  .btn-spinner {
-    width: 16px;
-    height: 16px;
-    border: 2px solid rgba(255,255,255,.4);
-    border-top-color: white;
-    border-radius: 50%;
-    animation: spin .65s linear infinite;
-    display: none;
-  }
-  .submit-btn.loading .btn-spinner { display: block; }
-
-  /* ── Inline result banner ── */
-  .result {
-    margin-top: 14px;
+  .error-banner {
+    margin: 1rem 1.75rem;
     padding: 12px 14px;
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    display: none;
-    line-height: 1.5;
-  }
-  .result.success {
-    background: var(--green-bg);
-    color: var(--green-text);
-    border: 1px solid var(--green-bdr);
-  }
-  .result.error {
     background: var(--err-bg);
     color: var(--err-text);
     border: 1px solid var(--err-bdr);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    display: none;
   }
+  .error-banner.show { display: block; }
+
+  /* ── Muted text ── */
+  .text-muted { color: var(--muted); }
+  .text-mono  { font-family: 'Courier New', monospace; font-size: 11px; }
 </style>
 </head>
 <body>
 
-<div class="card" id="app">
-  <!-- Content injected by JS -->
-  <div class="card-body">
-    <div class="spinner-wrap">
-      <div class="spinner"></div>
-      <span>Loading form…</span>
-    </div>
+<div class="portal-header">
+  <div>
+    <h1>KRW Leads Portal</h1>
+    <p>Live lead feed · Auto-refreshes on filter change</p>
   </div>
+  <div class="header-controls">
+    <span id="last-updated" style="font-size:11px;opacity:.6"></span>
+  </div>
+</div>
+
+<div class="filter-bar">
+  <span class="filter-label">Period:</span>
+  <select id="filter-period" class="filter-select" onchange="loadCalls()">
+    <option value="yesterday">Yesterday</option>
+    <option value="week" selected>This Week</option>
+    <option value="month">This Month</option>
+  </select>
+
+  <span class="filter-label" style="margin-left:8px">Campaign:</span>
+  <select id="filter-campaign" class="filter-select" onchange="loadCalls()">
+    <option value="">All Campaigns</option>
+  </select>
+
+  <span class="filter-label" style="margin-left:8px">Status:</span>
+  <select id="filter-status" class="filter-select" onchange="loadCalls()">
+    <option value="">All Statuses</option>
+    <option value="received">Received</option>
+    <option value="forwarded">Forwarded</option>
+    <option value="buyer_rejected">Buyer Rejected</option>
+    <option value="forward_failed">Forward Failed</option>
+  </select>
+
+  <button class="refresh-btn" id="refresh-btn" onclick="loadCalls()">↻ Refresh</button>
+</div>
+
+<div id="error-banner" class="error-banner"></div>
+
+<div class="kpi-row">
+  <div class="kpi-card accent">
+    <div class="kpi-label">Total Leads</div>
+    <div class="kpi-value" id="kpi-total">—</div>
+    <div class="kpi-sub" id="kpi-period-label">This Week</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Forwarded</div>
+    <div class="kpi-value" id="kpi-forwarded" style="color:#065f46">—</div>
+    <div class="kpi-sub">Accepted by buyer</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Pending</div>
+    <div class="kpi-value" id="kpi-pending" style="color:#854d0e">—</div>
+    <div class="kpi-sub">Awaiting forward</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Rejected</div>
+    <div class="kpi-value" id="kpi-rejected" style="color:var(--red)">—</div>
+    <div class="kpi-sub">Buyer / forward error</div>
+  </div>
+</div>
+
+<div class="table-wrap">
+  <table class="leads-table" id="leads-table">
+    <thead>
+      <tr>
+        <th>Ref ID</th>
+        <th>Received</th>
+        <th>Campaign</th>
+        <th>Name</th>
+        <th>Email</th>
+        <th>Phone</th>
+        <th>State</th>
+        <th>Publisher</th>
+        <th>Status</th>
+        <th>Buyer ID</th>
+      </tr>
+    </thead>
+    <tbody id="leads-body">
+      <tr><td colspan="10"><div class="spinner-wrap"><div class="spinner"></div><span>Loading leads…</span></div></td></tr>
+    </tbody>
+  </table>
 </div>
 
 <script>
@@ -255,317 +337,169 @@
   var API_BASE = 'https://krw-backend-production.up.railway.app';
   var API_KEY  = 'krwleads2026secure';
 
-  var params   = new URLSearchParams(window.location.search);
-  var campaign = (params.get('campaign') || '').trim().toLowerCase();
-  var pubSub   = (params.get('sub') || '').trim();
+  /* ── Period → days mapping ─────────────────────── */
+  var PERIOD_DAYS = {
+    yesterday: 1,
+    week:      7,
+    month:     30
+  };
 
-  var app = document.getElementById('app');
+  var PERIOD_LABELS = {
+    yesterday: 'Yesterday',
+    week:      'This Week',
+    month:     'This Month'
+  };
 
-  /* ── Render helpers ─────────────────────────────── */
-
-  function renderError(title, body) {
-    app.innerHTML =
-      '<div class="card-hdr"><h1>KRW Marketing Solutions</h1></div>' +
-      '<div class="state-msg error">' +
-        '<div class="icon">⚠️</div>' +
-        '<h2>' + escHtml(title) + '</h2>' +
-        '<p>' + escHtml(body) + '</p>' +
-      '</div>';
-  }
-
-  function renderSuccess(campaignName, leadId) {
-    app.innerHTML =
-      '<div class="card-hdr"><h1>' + escHtml(campaignName) + '</h1></div>' +
-      '<div class="state-msg success">' +
-        '<div class="icon">✅</div>' +
-        '<h2>Thank you! Your information has been submitted.</h2>' +
-        '<p>A representative will be in touch with you shortly.<br>' +
-        (leadId ? 'Reference ID: <strong>' + escHtml(leadId) + '</strong>' : '') + '</p>' +
-      '</div>';
-  }
-
+  /* ── Helpers ────────────────────────────────────── */
   function escHtml(str) {
-    return String(str)
+    return String(str || '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
   }
 
-  /* ── State options ──────────────────────────────── */
-  var US_STATES = [
-    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA',
-    'HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
-    'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
-    'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
-    'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'
-  ];
-
-  function stateOptions() {
-    return '<option value="">— Select —</option>' +
-      US_STATES.map(function(s){ return '<option>' + s + '</option>'; }).join('');
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) +
+           ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
-  /* ── Build form HTML ────────────────────────────── */
-
-  function buildForm(campaignName) {
-    document.title = campaignName;
-
-    app.innerHTML =
-      '<div class="card-hdr">' +
-        '<h1>' + escHtml(campaignName) + '</h1>' +
-        '<p>Please fill out all required fields below</p>' +
-      '</div>' +
-      '<div class="card-body">' +
-        '<form id="lead-form" autocomplete="off" novalidate>' +
-
-          '<div class="section-label">Contact Information</div>' +
-
-          '<div class="form-row">' +
-            '<div class="form-group">' +
-              '<label>First Name <span class="req">*</span></label>' +
-              '<input type="text" name="firstName" placeholder="Jane" autocomplete="given-name"/>' +
-              '<div class="field-error" id="err-firstName">First name is required</div>' +
-            '</div>' +
-            '<div class="form-group">' +
-              '<label>Last Name <span class="req">*</span></label>' +
-              '<input type="text" name="lastName" placeholder="Smith" autocomplete="family-name"/>' +
-              '<div class="field-error" id="err-lastName">Last name is required</div>' +
-            '</div>' +
-          '</div>' +
-
-          '<div class="form-row">' +
-            '<div class="form-group">' +
-              '<label>Email <span class="req">*</span></label>' +
-              '<input type="email" name="email" placeholder="jane@gmail.com" autocomplete="email"/>' +
-              '<div class="field-error" id="err-email">A valid email is required</div>' +
-            '</div>' +
-            '<div class="form-group">' +
-              '<label>Cell Phone <span class="req">*</span></label>' +
-              '<input type="tel" name="phone" placeholder="3105550123" maxlength="10" autocomplete="tel"/>' +
-              '<div class="field-note">10 digits, no dashes or spaces</div>' +
-              '<div class="field-error" id="err-phone">A 10-digit phone number is required</div>' +
-            '</div>' +
-          '</div>' +
-
-          '<div class="section-label">Address <span class="optional-badge">Optional</span></div>' +
-
-          '<div class="form-group">' +
-            '<label>Street Address</label>' +
-            '<input type="text" name="street" placeholder="123 Main St" autocomplete="street-address"/>' +
-          '</div>' +
-          '<div class="form-row-3">' +
-            '<div class="form-group">' +
-              '<label>City</label>' +
-              '<input type="text" name="city" placeholder="Los Angeles" autocomplete="address-level2"/>' +
-            '</div>' +
-            '<div class="form-group">' +
-              '<label>State</label>' +
-              '<select name="state" autocomplete="address-level1">' + stateOptions() + '</select>' +
-            '</div>' +
-            '<div class="form-group">' +
-              '<label>Zip</label>' +
-              '<input type="text" name="zip" placeholder="90001" maxlength="5" autocomplete="postal-code"/>' +
-            '</div>' +
-          '</div>' +
-
-          '<div class="section-label">Additional Information <span class="optional-badge">Optional</span></div>' +
-
-          '<div class="form-group">' +
-            '<label>Notes</label>' +
-            '<textarea name="notes" rows="2" placeholder="Any additional information…"></textarea>' +
-          '</div>' +
-
-          '<div class="section-label">Compliance <span class="optional-badge">Optional</span></div>' +
-
-          '<div class="form-group">' +
-            '<label>TrustedForm Certificate URL</label>' +
-            '<input type="text" name="trustedFormCertUrl" placeholder="https://cert.trustedform.com/…"/>' +
-          '</div>' +
-          '<div class="form-row">' +
-            '<div class="form-group">' +
-              '<label>Jornaya Lead ID</label>' +
-              '<input type="text" name="jornayaLeadId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"/>' +
-            '</div>' +
-            '<div class="form-group">' +
-              '<label>Facebook Lead ID</label>' +
-              '<input type="text" name="facebookLeadId" placeholder="123456789"/>' +
-            '</div>' +
-          '</div>' +
-
-          '<input type="hidden" name="publisherSub" id="field-publisherSub" value="' + escHtml(pubSub) + '"/>' +
-
-          '<button type="submit" class="submit-btn" id="submit-btn">' +
-            '<div class="btn-spinner"></div>' +
-            '<span id="btn-label">Submit</span>' +
-          '</button>' +
-          '<div class="result" id="result"></div>' +
-
-        '</form>' +
-      '</div>';
-
-    attachFormHandlers(campaignName);
+  function fmtPhone(p) {
+    if (!p) return '—';
+    var s = String(p).replace(/\D/g, '');
+    if (s.length === 10) return '(' + s.slice(0,3) + ') ' + s.slice(3,6) + '-' + s.slice(6);
+    return p;
   }
 
-  /* ── Form event handlers ────────────────────────── */
+  function statusPill(status) {
+    var label = (status || 'received').replace(/_/g, ' ');
+    return '<span class="status-pill ' + escHtml(status || 'received') + '">' + escHtml(label) + '</span>';
+  }
 
-  function attachFormHandlers(campaignName) {
-    var form   = document.getElementById('lead-form');
-    var btn    = document.getElementById('submit-btn');
-    var result = document.getElementById('result');
+  function showError(msg) {
+    var el = document.getElementById('error-banner');
+    el.textContent = '⚠ ' + msg;
+    el.classList.add('show');
+  }
 
-    /* Phone: digits only, max 10 */
-    form.phone.addEventListener('input', function () {
-      this.value = this.value.replace(/\D/g, '').slice(0, 10);
-      clearErr('phone');
-    });
+  function hideError() {
+    document.getElementById('error-banner').classList.remove('show');
+  }
 
-    /* Zip: digits only, max 5 */
-    form.zip.addEventListener('input', function () {
-      this.value = this.value.replace(/\D/g, '').slice(0, 5);
-    });
-
-    /* Clear errors on input */
-    ['firstName', 'lastName', 'email'].forEach(function (n) {
-      var el = form.elements[n];
-      if (el) el.addEventListener('input', function () { clearErr(n); });
-    });
-
-    function clearErr(name) {
-      var el  = form.elements[name];
-      var err = document.getElementById('err-' + name);
-      if (el)  el.classList.remove('invalid');
-      if (err) err.classList.remove('show');
-    }
-
-    function showErr(name, msg) {
-      var el  = form.elements[name];
-      var err = document.getElementById('err-' + name);
-      if (el)  el.classList.add('invalid');
-      if (err) { if (msg) err.textContent = msg; err.classList.add('show'); }
-    }
-
-    function validate() {
-      var ok = true;
-      form.querySelectorAll('.invalid').forEach(function (e) { e.classList.remove('invalid'); });
-      form.querySelectorAll('.field-error.show').forEach(function (e) { e.classList.remove('show'); });
-
-      if (!form.firstName.value.trim()) { showErr('firstName'); ok = false; }
-      if (!form.lastName.value.trim())  { showErr('lastName');  ok = false; }
-
-      var email = form.email.value.trim();
-      if (!email) {
-        showErr('email', 'Email is required');
-        ok = false;
-      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        showErr('email', 'Enter a valid email address');
-        ok = false;
-      }
-
-      var phone = form.phone.value.replace(/\D/g, '');
-      if (phone.length < 10) { showErr('phone', 'Phone must be exactly 10 digits'); ok = false; }
-
-      return ok;
-    }
-
-    form.addEventListener('submit', function (e) {
-      e.preventDefault();
-
-      if (!validate()) {
-        var first = form.querySelector('.invalid');
-        if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        return;
-      }
-
-      /* Loading state */
-      btn.disabled = true;
-      btn.classList.add('loading');
-      document.getElementById('btn-label').textContent = 'Submitting…';
-      result.style.display = 'none';
-
-      var data = {
-        firstName:          form.firstName.value.trim(),
-        lastName:           form.lastName.value.trim(),
-        email:              form.email.value.trim().toLowerCase(),
-        phone:              form.phone.value.replace(/\D/g, ''),
-        street:             form.street.value.trim()             || undefined,
-        city:               form.city.value.trim()               || undefined,
-        state:              form.state.value                      || undefined,
-        zip:                form.zip.value.trim()                 || undefined,
-        notes:              form.notes.value.trim()               || undefined,
-        trustedFormCertUrl: form.trustedFormCertUrl.value.trim()  || undefined,
-        jornayaLeadId:      form.jornayaLeadId.value.trim()       || undefined,
-        facebookLeadId:     form.facebookLeadId.value.trim()      || undefined,
-        publisherSub:       pubSub || form.publisherSub.value.trim() || undefined,
-        websource:          window.location.href,
-      };
-
-      fetch(API_BASE + '/lead/' + encodeURIComponent(campaign), {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
-        body:    JSON.stringify(data),
-      })
-      .then(function (res) { return res.json().then(function (j) { return { ok: res.ok, body: j }; }); })
-      .then(function (r) {
-        if (r.body.status === 'received') {
-          renderSuccess(campaignName, r.body.leadId);
-        } else {
-          result.className   = 'result error';
-          result.textContent = '✕ ' + (r.body.reason || r.body.error || 'Submission failed. Please check all fields and try again.');
-          result.style.display = 'block';
-          btn.disabled = false;
-          btn.classList.remove('loading');
-          document.getElementById('btn-label').textContent = 'Submit';
-        }
-      })
-      .catch(function (err) {
-        result.className   = 'result error';
-        result.textContent = '✕ Connection error: ' + err.message;
-        result.style.display = 'block';
-        btn.disabled = false;
-        btn.classList.remove('loading');
-        document.getElementById('btn-label').textContent = 'Submit';
+  /* ── Load campaigns for filter dropdown ─────────── */
+  function loadCampaigns() {
+    fetch(API_BASE + '/campaigns', {
+      headers: { 'x-api-key': API_KEY }
+    })
+    .then(function (res) { return res.json(); })
+    .then(function (data) {
+      if (!data.ok || !data.campaigns) return;
+      var sel = document.getElementById('filter-campaign');
+      data.campaigns.forEach(function (c) {
+        var opt = document.createElement('option');
+        opt.value = c.slug;
+        opt.textContent = c.name || c.slug;
+        sel.appendChild(opt);
       });
-    });
+    })
+    .catch(function () { /* silently ignore — campaign filter still works with "All" */ });
   }
 
-  /* ── Boot: fetch config then render ────────────── */
+  /* ── Main: load leads ───────────────────────────── */
+  function loadCalls() {
+    var period   = document.getElementById('filter-period').value;
+    var campaign = document.getElementById('filter-campaign').value;
+    var status   = document.getElementById('filter-status').value;
 
-  if (!campaign) {
-    renderError(
-      'No campaign specified',
-      'Please add a campaign parameter to the URL, e.g. ?campaign=depo'
-    );
-    return;
-  }
+    /* Map period label to day count */
+    var days = PERIOD_DAYS[period] || 7;
 
-  fetch(API_BASE + '/campaigns/' + encodeURIComponent(campaign) + '/config')
+    /* Update KPI period label */
+    var periodLabel = PERIOD_LABELS[period] || 'This Week';
+    document.getElementById('kpi-period-label').textContent = periodLabel;
+
+    /* Disable refresh button while loading */
+    var btn = document.getElementById('refresh-btn');
+    btn.disabled = true;
+    btn.textContent = 'Loading…';
+
+    /* Show loading state in table */
+    document.getElementById('leads-body').innerHTML =
+      '<tr><td colspan="10"><div class="spinner-wrap"><div class="spinner"></div><span>Loading leads…</span></div></td></tr>';
+
+    hideError();
+
+    /* Build query string */
+    var qs = '?days=' + days + '&limit=500';
+    if (campaign) qs += '&campaign=' + encodeURIComponent(campaign);
+    if (status)   qs += '&status='   + encodeURIComponent(status);
+
+    fetch(API_BASE + '/leads/feed' + qs, {
+      headers: { 'x-api-key': API_KEY }
+    })
     .then(function (res) {
-      if (res.status === 404) {
-        throw { notFound: true };
-      }
-      if (!res.ok) {
-        throw new Error('Server error (' + res.status + ')');
-      }
+      if (!res.ok) throw new Error('Server error (' + res.status + ')');
       return res.json();
     })
     .then(function (data) {
-      buildForm(data.name || campaign);
+      if (!data.ok) throw new Error(data.error || 'Unknown error');
+      renderLeads(data.leads || []);
+      updateKPIs(data.leads || []);
+      document.getElementById('last-updated').textContent =
+        'Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     })
     .catch(function (err) {
-      if (err && err.notFound) {
-        renderError(
-          'Campaign not found',
-          'The campaign "' + campaign + '" does not exist or is no longer active. ' +
-          'Please check the URL and try again.'
-        );
-      } else {
-        renderError(
-          'Unable to load form',
-          'There was a problem connecting to the server. Please try again in a moment.'
-        );
-      }
+      showError('Could not load leads: ' + err.message);
+      document.getElementById('leads-body').innerHTML =
+        '<tr><td colspan="10"><div class="empty-state">Failed to load leads. Check your connection and try again.</div></td></tr>';
+    })
+    .finally(function () {
+      btn.disabled = false;
+      btn.textContent = '↻ Refresh';
     });
+  }
+
+  /* ── Render leads table ─────────────────────────── */
+  function renderLeads(leads) {
+    var tbody = document.getElementById('leads-body');
+    if (!leads.length) {
+      tbody.innerHTML = '<tr><td colspan="10"><div class="empty-state">No leads found for this period.</div></td></tr>';
+      return;
+    }
+    tbody.innerHTML = leads.map(function (lead) {
+      var ref = 'KRW-' + (lead.campaign || '').toUpperCase() + '-' + lead.id;
+      return '<tr>' +
+        '<td class="text-mono">' + escHtml(ref) + '</td>' +
+        '<td class="text-muted">' + escHtml(fmtDate(lead.received_at)) + '</td>' +
+        '<td>' + escHtml(lead.campaign || '—') + '</td>' +
+        '<td>' + escHtml((lead.first_name || '') + ' ' + (lead.last_name || '')) + '</td>' +
+        '<td class="text-muted">' + escHtml(lead.email || '—') + '</td>' +
+        '<td class="text-mono">' + escHtml(fmtPhone(lead.phone)) + '</td>' +
+        '<td>' + escHtml(lead.state || '—') + '</td>' +
+        '<td class="text-muted">' + escHtml(lead.publisher_sub || '—') + '</td>' +
+        '<td>' + statusPill(lead.status) + '</td>' +
+        '<td class="text-mono text-muted">' + escHtml(lead.buyer_intake_id || '—') + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  /* ── Update KPI cards ───────────────────────────── */
+  function updateKPIs(leads) {
+    var forwarded = leads.filter(function (l) { return l.status === 'forwarded'; }).length;
+    var pending   = leads.filter(function (l) { return l.status === 'received' || l.status === 'forwarding'; }).length;
+    var rejected  = leads.filter(function (l) { return l.status === 'buyer_rejected' || l.status === 'forward_failed'; }).length;
+
+    document.getElementById('kpi-total').textContent     = leads.length;
+    document.getElementById('kpi-forwarded').textContent = forwarded;
+    document.getElementById('kpi-pending').textContent   = pending;
+    document.getElementById('kpi-rejected').textContent  = rejected;
+  }
+
+  /* ── Boot ───────────────────────────────────────── */
+  loadCampaigns();
+  loadCalls();
 
 }());
 </script>
