@@ -807,13 +807,8 @@ app.get('/publishers/:pub_id/calls', async (req, res) => {
 
     const daysInt = parseInt(days) >= 9999 ? 36500 : parseInt(days);
 
-    // Get ALL sub_ids for this publisher across all campaign assignments
-    const subIds = await pool.query(
-      'SELECT sub_id FROM publisher_campaigns WHERE pub_id=$1 AND active=true AND sub_id IS NOT NULL',
-      [pub_id]
-    );
-    const allSubs = subIds.rows.map(r => r.sub_id);
-    if (!allSubs.includes(pub_id)) allSubs.push(pub_id); // always include their main pub_id
+    // Use pub_id directly to find calls
+    const allSubs = [pub_id]; // always include their main pub_id
 
     let query = `SELECT id, call_date, caller_id, caller_name,
                         call_duration, billable, call_status_label, disposition,
@@ -850,11 +845,11 @@ app.post('/publishers/:pub_id/campaigns', requireKey, async (req, res) => {
   if (!campaign) return res.status(400).json({ ok: false, error: 'campaign required' });
   try {
     await pool.query(
-      `INSERT INTO publisher_campaigns (pub_id, campaign, sub_id, did, payout_rate, vertical)
-       VALUES ($1,$2,$3,$4,$5,$6)
+      `INSERT INTO publisher_campaigns (pub_id, campaign, did, payout_rate)
+       VALUES ($1,$2,$3,$4)
        ON CONFLICT (pub_id, campaign) DO UPDATE SET
-         sub_id=$3, did=$4, payout_rate=$5, vertical=$6, active=true`,
-      [req.params.pub_id, campaign, sub_id||null, did||null,
+         did=$3, payout_rate=$4, active=true`,
+      [req.params.pub_id, campaign, did||null,
        parseFloat(payout_rate||0), vertical||null]
     );
     res.json({ ok: true });
@@ -896,11 +891,11 @@ app.post('/publishers', requireKey, async (req, res) => {
     if (campaigns && Array.isArray(campaigns)) {
       for (const camp of campaigns) {
         await pool.query(
-          `INSERT INTO publisher_campaigns (pub_id, campaign, sub_id, did, payout_rate, vertical)
-           VALUES ($1,$2,$3,$4,$5,$6)
+          `INSERT INTO publisher_campaigns (pub_id, campaign, did, payout_rate)
+           VALUES ($1,$2,$3,$4)
            ON CONFLICT (pub_id, campaign) DO UPDATE SET
-             sub_id=$3, did=$4, payout_rate=$5, vertical=$6, active=true`,
-          [pub_id, camp.campaign, camp.sub_id||null, camp.did||null,
+             did=$3, payout_rate=$4, active=true`,
+          [pub_id, camp.campaign, camp.did||null,
            parseFloat(camp.payout_rate||0), camp.vertical||null]
         ).catch(() => {}); // ignore if no unique constraint yet
       }
