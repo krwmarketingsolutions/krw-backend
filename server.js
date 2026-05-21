@@ -779,7 +779,7 @@ app.post('/publishers/login', async (req, res) => {
     const pub = r.rows[0];
     // Get all campaign assignments
     const camps = await pool.query(
-      'SELECT campaign, sub_id, did, payout_rate, vertical FROM publisher_campaigns WHERE pub_id=$1 AND active=true',
+      'SELECT campaign, did, payout_rate FROM publisher_campaigns WHERE pub_id=$1 AND active=true',
       [pub.pub_id]
     );
     res.json({
