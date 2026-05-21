@@ -102,6 +102,7 @@ async function initDB() {
       invoice_date    TEXT,
       paid_date       TEXT,
       source_system   TEXT DEFAULT 'partner',
+      did             TEXT,
       raw             JSONB
     );
     -- Add columns if upgrading existing table
@@ -109,6 +110,7 @@ async function initDB() {
     ALTER TABLE calls ADD COLUMN IF NOT EXISTS publisher_sub TEXT;
     ALTER TABLE calls ADD COLUMN IF NOT EXISTS source_system TEXT DEFAULT 'partner';
     ALTER TABLE calls ADD COLUMN IF NOT EXISTS call_status_label TEXT DEFAULT 'pending';
+    ALTER TABLE calls ADD COLUMN IF NOT EXISTS did TEXT;
     -- Set existing calls that have billable value to correct label
     UPDATE calls SET call_status_label = CASE WHEN billable=true THEN 'cpa' WHEN billable=false THEN 'not_converted' ELSE 'pending' END WHERE call_status_label IS NULL OR call_status_label='pending';
   `);
@@ -957,15 +959,16 @@ app.post('/calls/postback', async (req, res) => {
     const forcedCampaign = 'SSDI';
     const forcedSource   = 'partner';
 
+    const didCleanPostback = incomingDid ? String(incomingDid).replace(/\D/g, '') : null;
     await pool.query(
       `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
                           publisher_sub, payout_amount, campaign_name, disposition,
-                          source_system, call_status_label, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
+                          source_system, call_status_label, did, raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)`,
       [callDate, callerId, callerName, duration,
        statusLabel === 'pending' ? null : billable,
        pubSub, statusLabel === 'cpa' ? finalPayout : null,
-       forcedCampaign, disposition, forcedSource, statusLabel, JSON.stringify(b)]
+       forcedCampaign, disposition, forcedSource, statusLabel, didCleanPostback, JSON.stringify(b)]
     );
     res.json({ ok: true, message: 'Call recorded' });
   } catch(err) {
@@ -1047,23 +1050,26 @@ app.patch('/calls/update', async (req, res) => {
       const campaign    = item.campaign     || item.campaign_name || 'SSDI';
 
       // Update existing record matched by DID + call_date
+      // Using did instead of publisher_sub so we find the record regardless of how
+      // the DID was resolved (or failed to resolve) during the initial POST /calls/postback
       const updateQ = await pool.query(
         `UPDATE calls SET
           billable          = $1,
           call_status_label = $2,
           payout_amount     = $3,
+          publisher_sub     = COALESCE(publisher_sub, $12),
           caller_name       = COALESCE($7, caller_name),
           caller_id         = COALESCE(NULLIF($8,''), caller_id),
           call_duration     = COALESCE(NULLIF($9,0), call_duration),
           disposition       = COALESCE($10, disposition),
           campaign_name     = COALESCE($11, campaign_name)
-        WHERE publisher_sub = $4
-          AND call_date     = $5
+        WHERE did         = $4
+          AND call_date   = $5
           AND (call_status_label = 'pending' OR caller_id = $6)
         RETURNING id`,
         [billable, statusLabel, billable ? payout : null,
-         pubSub, callDate, callerId,
-         callerName, callerId, duration || null, disposition, campaign]
+         did, callDate, callerId,
+         callerName, callerId, duration || null, disposition, campaign, pubSub]
       );
 
       if (updateQ.rowCount > 0) {
@@ -1074,11 +1080,11 @@ app.patch('/calls/update', async (req, res) => {
         await pool.query(
           `INSERT INTO calls (call_date, caller_id, caller_name, call_duration,
                               billable, publisher_sub, payout_amount, campaign_name,
-                              disposition, call_status_label, source_system, raw)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'partner',$11)`,
+                              disposition, call_status_label, source_system, did, raw)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'partner',$11,$12)`,
           [callDate, callerId, callerName, duration || null,
            billable, pubSub, billable ? payout : null, campaign,
-           disposition, statusLabel, JSON.stringify(item)]
+           disposition, statusLabel, did, JSON.stringify(item)]
         );
         console.log(`Inserted new call: pub=${pubSub} did=${did} date=${callDate}`);
         results.not_found++;
