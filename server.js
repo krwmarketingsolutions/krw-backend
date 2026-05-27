@@ -924,6 +924,17 @@ app.post('/trackdrive/postback', async (req, res) => {
   }
   const b = req.body || {};
   const callDate    = b.call_date   || b.date     || new Date().toISOString().split('T')[0];
+  // Accurate timestamp from TrackDrive fields
+  const tdDatetime  = b.call_datetime || b.created_at || b.timestamp || b.start_time || null;
+  const tdTime      = b.call_time || b.time || null;
+  let   tdReceivedAt = null;
+  if (tdDatetime) {
+    tdReceivedAt = new Date(tdDatetime).toISOString();
+  } else if (callDate && tdTime) {
+    tdReceivedAt = new Date(callDate + 'T' + tdTime).toISOString();
+  } else if (callDate) {
+    tdReceivedAt = new Date(callDate + 'T12:00:00').toISOString();
+  }
   const callerId    = b.caller_id   || b.ani      || b.phone    || null;
   const callerName  = b.caller_name || b.name     || null;
   const duration    = parseInt(b.call_duration || b.duration || 0);
@@ -939,11 +950,12 @@ app.post('/trackdrive/postback', async (req, res) => {
       `INSERT INTO calls
         (call_date, caller_id, caller_name, call_duration, billable,
          publisher_sub, payout_amount, buyer_name, vertical, campaign,
-         source_system, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+         source_system, raw, received_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [callDate, callerId, callerName, duration, billable,
        pubSub, payout, buyerName, vertical, campaign,
-       'trackdrive', JSON.stringify(b)]
+       'trackdrive', JSON.stringify(b),
+       tdReceivedAt || new Date().toISOString()]
     );
     res.json({ ok: true, message: 'TrackDrive call recorded' });
   } catch(err) {
@@ -1394,6 +1406,18 @@ app.post('/calls/postback', async (req, res) => {
 
   // Normalize fields - accept multiple naming conventions
   const callDate     = b.call_date   || b.callDate   || b.date        || new Date().toISOString().split('T')[0];
+  // Build accurate received_at from call_date + call_time if provided, else use actual call time
+  const callTime     = b.call_time   || b.callTime   || b.time        || null;
+  const callDatetime = b.call_datetime || b.callDatetime || b.created_at || b.timestamp || null;
+  let   receivedAt   = null;
+  if (callDatetime) {
+    receivedAt = new Date(callDatetime).toISOString();
+  } else if (callDate && callTime) {
+    receivedAt = new Date(callDate + 'T' + callTime).toISOString();
+  } else if (callDate) {
+    // Use call_date with current time as best approximation
+    receivedAt = new Date(callDate + 'T' + new Date().toTimeString().slice(0,8)).toISOString();
+  }
   const callerId     = b.caller_id   || b.callerId   || b.phone       || b.ani        || null;
   const callerName   = b.caller_name || b.callerName || b.name        || b.contact    || null;
   const duration     = parseInt(b.call_duration || b.duration || b.talk_time || 0);
@@ -1472,12 +1496,13 @@ app.post('/calls/postback', async (req, res) => {
       await pool.query(
         `INSERT INTO calls (call_date, caller_id, caller_name, call_duration, billable,
                             publisher_sub, payout_amount, campaign, disposition,
-                            source_system, call_status_label, raw)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
+                            source_system, call_status_label, raw, received_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)`,
         [callDate, callerId, callerName, duration,
          statusLabel === 'pending' ? null : billable,
          pubSub, statusLabel === 'cpa' ? finalPayout : null,
-         forcedCampaign, disposition, forcedSource, statusLabel, JSON.stringify(b)]
+         forcedCampaign, disposition, forcedSource, statusLabel, JSON.stringify(b),
+         receivedAt || new Date().toISOString()]
       );
       console.log(`[INSERT] ✅ Success: ${callerId}`);
     } catch(insertErr) {
