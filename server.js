@@ -1246,6 +1246,131 @@ setTimeout(() => {
 }, 10000);
 // ─── END GOOGLE SHEET POLLER ────────────────────────────────────────────────
 
+// ─── STALE CALL SWEEPER (28-hour rule) ──────────────────────────────────────
+// Runs every 30 minutes.
+// Any SSDI call from source_system='partner' that:
+//   - has call_status_label = 'pending'
+//   - was received more than 28 hours ago
+//   - has a publisher_sub (i.e. came through one of KRW's DIDs)
+//   - CID is NOT on the current Google Sheet
+// → gets marked not_converted, billable = false
+// Covers all calls back to May 14, 2026.
+
+const SWEEPER_INTERVAL_MS  = 30 * 60 * 1000; // 30 minutes
+const STALE_HOURS          = 28;
+const SWEEP_START_DATE     = '2026-05-14';
+
+// In-memory cache of sheet CIDs — refreshed every poll cycle
+let sheetCIDCache = new Set();
+
+// Update the sheet CID cache (called from pollSheet too)
+async function refreshSheetCIDs() {
+  try {
+    const csv  = await fetchSheetCSV();
+    const rows = parseCSV(csv);
+    const cids = new Set();
+    for (const row of rows) {
+      let rawPhone = String(
+        row['Converted Account: Phone'] || row['Phone'] || ''
+      ).replace(/\D/g, '');
+      if (rawPhone.startsWith('1') && rawPhone.length === 11) rawPhone = rawPhone.slice(1);
+      if (rawPhone && rawPhone.length >= 7) cids.add(rawPhone);
+    }
+    sheetCIDCache = cids;
+    console.log('[Sheet Cache] Refreshed - ' + cids.size + ' CIDs on sheet');
+    return cids;
+  } catch (err) {
+    console.error('[Sheet Cache] Error refreshing:', err.message);
+    return sheetCIDCache; // return last known cache on error
+  }
+}
+
+async function sweepStaleCalls() {
+  try {
+    // Refresh sheet CIDs first
+    const sheetCIDs = await refreshSheetCIDs();
+
+    const client = await pool.connect();
+    try {
+      // Get all pending SSDI calls older than 28 hours, back to May 14
+      const result = await client.query(
+        `SELECT id, caller_id, publisher_sub, received_at
+         FROM calls
+         WHERE call_status_label = 'pending'
+           AND source_system = 'partner'
+           AND (campaign = 'SSDI' OR raw->>'campaign' = 'SSDI')
+           AND publisher_sub IS NOT NULL
+           AND publisher_sub != ''
+           AND received_at < NOW() - INTERVAL '${STALE_HOURS} hours'
+           AND call_date >= $1
+         ORDER BY received_at ASC`,
+        [SWEEP_START_DATE]
+      );
+
+      if (result.rows.length === 0) {
+        console.log('[Sweeper] No stale pending calls found');
+        return;
+      }
+
+      let markedNotConverted = 0;
+      let markedBillable     = 0;
+
+      for (const call of result.rows) {
+        const cid = String(call.caller_id || '').replace(/\D/g, '');
+
+        if (sheetCIDs.has(cid)) {
+          // CID IS on the sheet — mark billable (safety net)
+          const pubLookup = await client.query(
+            'SELECT payout_rate FROM publishers WHERE pub_id = $1',
+            [call.publisher_sub]
+          );
+          const payout = parseFloat(
+            (pubLookup.rows[0] || {}).payout_rate || 160
+          );
+
+          await client.query(
+            `UPDATE calls SET
+               billable          = true,
+               payout_amount     = $1,
+               call_status_label = 'cpa',
+               disposition       = COALESCE(NULLIF(disposition,''), 'Billable')
+             WHERE id = $2`,
+            [payout, call.id]
+          );
+          markedBillable++;
+        } else {
+          // CID NOT on sheet after 28 hours — not billable
+          await client.query(
+            `UPDATE calls SET
+               billable          = false,
+               call_status_label = 'not_converted',
+               disposition       = COALESCE(NULLIF(disposition,''), 'Not Converted')
+             WHERE id = $1`,
+            [call.id]
+          );
+          markedNotConverted++;
+        }
+      }
+
+      console.log('[Sweeper] Done — Not converted: ' + markedNotConverted + ', Billable (caught): ' + markedBillable + ', Total processed: ' + (markedNotConverted + markedBillable));
+
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('[Sweeper] Error:', err.message);
+  }
+}
+
+// Start sweeper — first run after 15 seconds, then every 30 minutes
+setTimeout(() => {
+  sweepStaleCalls();
+  setInterval(sweepStaleCalls, SWEEPER_INTERVAL_MS);
+}, 15000);
+// ─── END STALE CALL SWEEPER ──────────────────────────────────────────────────
+
+
+
 
 
 
