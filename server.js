@@ -1172,66 +1172,58 @@ async function pollSheet() {
         // (already checked above but double-confirming after parsing)
         if (!rawPhone || rawPhone.length < 7) continue;
 
-        // Look up existing SSDI call by CID
+        // Step 1: Look up CID in TrackDrive calls — MUST match one of KRW's DIDs
+        // If CID came in on Laird's own DIDs (not ours) → skip entirely
+        const KRW_DIDS = ['8338403897', '8338417301', '8338928548'];
+
         const lookup = await client.query(
-          `SELECT id, publisher_sub FROM calls
-           WHERE caller_id = $1
-             AND source_system = 'partner'
-             AND campaign = 'SSDI'
-           ORDER BY received_at DESC LIMIT 1`,
-          [rawPhone]
+          `SELECT c.id, c.publisher_sub, c.did, p.payout_rate
+           FROM calls c
+           LEFT JOIN publishers p ON p.pub_id = c.publisher_sub
+           WHERE c.caller_id = $1
+             AND c.source_system = 'partner'
+             AND c.campaign = 'SSDI'
+             AND (c.raw->>'did') = ANY($2)
+           ORDER BY c.received_at DESC LIMIT 1`,
+          [rawPhone, KRW_DIDS]
         );
 
-        const isMatched    = lookup.rows.length > 0;
-        const existingCall = isMatched ? lookup.rows[0] : null;
-        const publisherSub = isMatched ? existingCall.publisher_sub : null;
+        // CID not on any of our DIDs — belongs to Laird's own publishers, skip it
+        if (lookup.rows.length === 0) {
+          unmatched++;
+          processedRows.add(rowKey);
+          continue;
+        }
+
+        const existingCall = lookup.rows[0];
+        const publisherSub = existingCall.publisher_sub;
+        // Use publisher's payout rate from publishers table, fallback to 160
+        const publisherPayout = parseFloat(existingCall.payout_rate) || 160;
 
         const rawData = JSON.stringify({
           phone: rawPhone, full_name: callerName, state,
           case_status: caseStatus, case_sub_status: caseSubStatus,
           converted_date: convertedDate, lead_owner: leadOwner,
-          payout_amount: payout, matched_publisher: publisherSub,
+          publisher_payout: publisherPayout,
+          matched_publisher: publisherSub,
           source: 'google_sheet_poll'
         });
 
-        // Update existing call if matched
-        if (isMatched) {
-          await client.query(
-            `UPDATE calls SET
-               caller_name       = COALESCE($1, caller_name),
-               disposition       = COALESCE($2, disposition),
-               payout_amount     = COALESCE($3, payout_amount),
-               billable          = CASE WHEN $3 IS NOT NULL THEN true ELSE billable END,
-               call_status_label = CASE WHEN $3 IS NOT NULL THEN 'cpa' ELSE call_status_label END,
-               raw               = raw || $4::jsonb
-             WHERE id = $5`,
-            [callerName, caseStatus, payout, rawData, existingCall.id]
-          );
-          matched++;
-        } else {
-          unmatched++;
-        }
-
-        // Always insert a google_sheet record for audit trail
+        // Step 2: Mark the call as billable using the publisher's payout rate
+        // Presence on the sheet = billable, no AMNT needed
         await client.query(
-          `INSERT INTO calls
-             (call_date, caller_id, caller_name, billable, payout_amount,
-              disposition, campaign, vertical, publisher_sub,
-              source_system, call_status_label, raw)
-           VALUES ($1,$2,$3,$4,$5,$6,'SSDI','SSDI',$7,'google_sheet',
-             CASE WHEN $5 IS NOT NULL THEN 'cpa'
-                  WHEN $8 THEN 'matched'
-                  ELSE 'unmatched_publisher' END,
-             $9::jsonb)
-           ON CONFLICT DO NOTHING`,
-          [
-            convertedDate || new Date().toISOString().split('T')[0],
-            rawPhone, callerName,
-            payout != null, payout, caseStatus,
-            publisherSub, isMatched, rawData
-          ]
+          `UPDATE calls SET
+             caller_name       = COALESCE($1, caller_name),
+             disposition       = COALESCE($2, disposition),
+             billable          = true,
+             payout_amount     = $3,
+             call_status_label = 'cpa',
+             raw               = raw || $4::jsonb
+           WHERE id = $5`,
+          [callerName, caseStatus || 'Billable', publisherPayout, rawData, existingCall.id]
         );
 
+        matched++;
         processedRows.add(rowKey);
       }
 
