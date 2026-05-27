@@ -58,7 +58,7 @@ function getMailer() {
 async function sendEmailNotification(subject, html) {
   try {
     const mailer = getMailer();
-    if (!mailer) { console.log('Email not configured — skipping notification'); return; }
+    if (!mailer) { console.log('Email not configured - skipping notification'); return; }
     await mailer.sendMail({
       from:    `"KRW Dashboard" <${process.env.SMTP_USER}>`,
       to:      process.env.NOTIFY_EMAIL || 'kyler@krwmarketingsolutions.com',
@@ -156,7 +156,7 @@ async function initLeadsDB() {
 //  LEAD INTAKE
 // ══════════════════════════════════════════════════════
 
-// POST /lead/:campaign — receive lead from publisher
+// POST /lead/:campaign - receive lead from publisher
 // Stores it and fires to Zapier webhook if configured
 app.post('/lead/:campaign', requireLeadKey, async (req, res) => {
   const campaign = req.params.campaign.toLowerCase();
@@ -591,7 +591,7 @@ app.get('/debug',  (req, res) => res.json({ api_key_set:!!process.env.API_KEY, l
 
 
 // ══════════════════════════════════════════════════════
-//  CAMPAIGNS — create/edit from dashboard, no env vars needed
+//  CAMPAIGNS - create/edit from dashboard, no env vars needed
 // ══════════════════════════════════════════════════════
 
 async function initCampaignsDB() {
@@ -621,7 +621,7 @@ async function initCampaignsDB() {
       VALUES ($1,$2,$3,$4,$5,$6)
     `, [
       'depo',
-      'DEPO — Lead Tree (WTC)',
+      'DEPO - Lead Tree (WTC)',
       'Mass Tort - Depo',
       process.env.BUYER_ENDPOINT_DEPO || '',
       JSON.stringify(['firstName','lastName','email','phone']),
@@ -632,7 +632,7 @@ async function initCampaignsDB() {
   console.log('✅ Campaigns table ready');
 }
 
-// GET /campaigns — list all (dashboard)
+// GET /campaigns - list all (dashboard)
 app.get('/campaigns', requireKey, async (req, res) => {
   try {
     const r = await pool.query(
@@ -642,7 +642,7 @@ app.get('/campaigns', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /campaigns/:slug/config — public, used by publisher form
+// GET /campaigns/:slug/config - public, used by publisher form
 app.get('/campaigns/:slug/config', async (req, res) => {
   try {
     const r = await pool.query(
@@ -664,7 +664,7 @@ app.get('/campaigns/:slug/config', async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /campaigns — create or update (upsert)
+// POST /campaigns - create or update (upsert)
 app.post('/campaigns', requireKey, async (req, res) => {
   try {
     const {
@@ -695,7 +695,7 @@ app.post('/campaigns', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
-// PATCH /campaigns/:slug — partial update
+// PATCH /campaigns/:slug - partial update
 app.patch('/campaigns/:slug', requireKey, async (req, res) => {
   try {
     const slug = req.params.slug.toLowerCase();
@@ -952,6 +952,131 @@ app.post('/trackdrive/postback', async (req, res) => {
   }
 });
 
+
+// ─── SSDI DISPO UPDATE (Google Sheet webhook) ───────────────────────────────
+// Receives row data from the Google Sheet whenever a new row is added or edited.
+// Looks up the CID in existing SSDI calls to match publisher via DID.
+// FE calls are NEVER touched by this endpoint.
+app.post('/ssdi/dispo-update', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Parse CID - strip country code, formatting
+  let rawPhone = String(b.phone || b.caller_id || b.cid || '').replace(/\D/g, '');
+  if (rawPhone.startsWith('1') && rawPhone.length === 11) rawPhone = rawPhone.slice(1);
+  if (!rawPhone) return res.status(400).json({ ok: false, error: 'Missing phone/CID' });
+
+  const callerName   = b.full_name   || b.name        || null;
+  const state        = b.state       || null;
+  const caseStatus   = b.case_status || b.disposition  || null;
+  const caseSubStatus = b.case_sub_status || null;
+  const convertedDate = b.converted_date || b.call_date || null;
+  const leadOwner    = b.lead_owner  || null;
+  const centerCode   = b.center_code || null;
+  const age          = b.age         || null;
+  const payout       = parseFloat(b.payout_amount || b.amnt || 0) || null;
+
+  const client = await pool.connect();
+  try {
+    // Step 1: Look up existing SSDI call by CID to get publisher/DID
+    const lookup = await client.query(
+      `SELECT id, publisher_sub, campaign, raw
+       FROM calls
+       WHERE caller_id = $1
+         AND source_system = 'partner'
+         AND campaign = 'SSDI'
+       ORDER BY received_at DESC
+       LIMIT 1`,
+      [rawPhone]
+    );
+
+    const matched = lookup.rows.length > 0;
+    const existingCall = matched ? lookup.rows[0] : null;
+    const publisherSub = matched ? existingCall.publisher_sub : null;
+
+    // Step 2: Build raw payload for storage
+    const rawData = {
+      phone: rawPhone,
+      full_name: callerName,
+      state,
+      case_status: caseStatus,
+      case_sub_status: caseSubStatus,
+      converted_date: convertedDate,
+      lead_owner: leadOwner,
+      center_code: centerCode,
+      age,
+      payout_amount: payout,
+      matched_publisher: publisherSub,
+      source: 'google_sheet'
+    };
+
+    // Step 3: If matched, UPDATE the existing call record with dispo info
+    if (matched) {
+      await client.query(
+        `UPDATE calls SET
+           caller_name      = COALESCE($1, caller_name),
+           disposition      = COALESCE($2, disposition),
+           call_status_label = CASE WHEN $3 IS NOT NULL THEN 'cpa' ELSE call_status_label END,
+           payout_amount    = COALESCE($3, payout_amount),
+           billable         = CASE WHEN $3 IS NOT NULL THEN true ELSE billable END,
+           raw              = raw || $4::jsonb
+         WHERE id = $5`,
+        [callerName, caseStatus, payout, JSON.stringify(rawData), existingCall.id]
+      );
+    }
+
+    // Step 4: Always INSERT a dispo record for audit trail
+    await client.query(
+      `INSERT INTO calls
+         (call_date, caller_id, caller_name, billable, payout_amount, disposition,
+          campaign, vertical, publisher_sub, source_system, call_status_label, raw)
+       VALUES
+         ($1, $2, $3, $4, $5, $6, 'SSDI', 'SSDI', $7, 'google_sheet',
+          CASE WHEN $5 IS NOT NULL THEN 'cpa' ELSE
+            CASE WHEN $8 THEN 'matched' ELSE 'unmatched_publisher' END
+          END,
+          $9::jsonb)
+       ON CONFLICT DO NOTHING`,
+      [
+        convertedDate || new Date().toISOString().split('T')[0],
+        rawPhone,
+        callerName,
+        payout != null,
+        payout,
+        caseStatus,
+        publisherSub,
+        matched,
+        JSON.stringify(rawData)
+      ]
+    );
+
+    res.json({
+      ok: true,
+      matched,
+      publisher_sub: publisherSub,
+      message: matched
+        ? 'Matched to publisher ' + publisherSub
+        : 'CID not matched to any KRW publisher DID - flagged as unmatched_publisher'
+    });
+
+  } catch (err) {
+    console.error('SSDI dispo-update error:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+// ─── END SSDI DISPO UPDATE ──────────────────────────────────────────────────
+
+
 // ── CALLS POSTBACK ENDPOINT (SSDI only) ─────────────────
 // Called by partner system or buyer at end of day
 // Accepts flexible field names to support multiple sources
@@ -970,7 +1095,7 @@ app.post('/calls/postback', async (req, res) => {
 
   const b = req.body || {};
 
-  // Normalize fields — accept multiple naming conventions
+  // Normalize fields - accept multiple naming conventions
   const callDate     = b.call_date   || b.callDate   || b.date        || new Date().toISOString().split('T')[0];
   const callerId     = b.caller_id   || b.callerId   || b.phone       || b.ani        || null;
   const callerName   = b.caller_name || b.callerName || b.name        || b.contact    || null;
@@ -1005,7 +1130,7 @@ app.post('/calls/postback', async (req, res) => {
       pubSub = didLookup.rows[0].pub_id;
       console.log(`DID ${didClean} resolved to publisher: ${pubSub}`);
     } else {
-      console.log(`DID ${didClean} not found — storing call without publisher assignment`);
+      console.log(`DID ${didClean} not found - storing call without publisher assignment`);
     }
   }
 
@@ -1033,7 +1158,7 @@ app.post('/calls/postback', async (req, res) => {
     const forcedCampaign = 'SSDI';
     const forcedSource   = 'partner';
 
-    // Dedupe check — skip if call already exists with same caller_id + call_date + publisher_sub
+    // Dedupe check - skip if call already exists with same caller_id + call_date + publisher_sub
     if (callerId && callDate && pubSub) {
       const dupe = await pool.query(
         `SELECT id FROM calls WHERE caller_id=$1 AND call_date=$2 AND publisher_sub=$3 LIMIT 1`,
@@ -1097,7 +1222,7 @@ app.patch('/calls/update', async (req, res) => {
 
       if (!did) { results.errors++; continue; }
 
-      // Find publisher from DID — check both tables
+      // Find publisher from DID - check both tables
       let pubSub = item.publisher_sub || null;
       if (!pubSub) {
         let didLookup = await pool.query(
@@ -1161,7 +1286,7 @@ app.patch('/calls/update', async (req, res) => {
         results.updated++;
         console.log(`Updated call: pub=${pubSub} did=${did} date=${callDate} billable=${billable} payout=${payout}`);
       } else {
-        // Record not found — check for any dupe before inserting
+        // Record not found - check for any dupe before inserting
         const dupeCheck = await pool.query(
           `SELECT id FROM calls WHERE caller_id=$1 AND call_date=$2 LIMIT 1`,
           [callerId, callDate]
@@ -1208,7 +1333,7 @@ app.patch('/calls/update', async (req, res) => {
 
   const html = `<p>You had <strong>${totalCalls}</strong> unique SSDI transfers yesterday, ${dateStr}. Out of those <strong>${totalCalls}</strong> calls, <strong>${converted}</strong> converted at <strong>${convRate}%</strong>.</p><p style="color:#999;font-size:12px;margin-top:16px">KRW Marketing Solutions</p>`;
 
-  await sendEmailNotification(`SSDI Daily Report — ${dateStr}`, html);
+  await sendEmailNotification(`SSDI Daily Report - ${dateStr}`, html);
 
   res.json({ ok: true, message: 'End-of-day sweep complete', ...results });
 });
