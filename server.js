@@ -1000,12 +1000,14 @@ app.post('/ssdi/dispo-update', async (req, res) => {
   try {
     // Step 1: Look up existing SSDI call by CID to get publisher/DID
     const lookup = await client.query(
-      `SELECT id, publisher_sub, campaign, raw
-       FROM calls
-       WHERE caller_id = $1
-         AND source_system = 'partner'
-         AND campaign = 'SSDI'
-       ORDER BY received_at DESC
+      `SELECT c.id, c.publisher_sub, c.campaign, c.raw, p.payout_rate
+       FROM calls c
+       LEFT JOIN publishers p ON p.pub_id = c.publisher_sub
+       WHERE c.caller_id = $1
+         AND c.source_system = 'partner'
+         AND c.publisher_sub IS NOT NULL
+         AND c.publisher_sub != ''
+       ORDER BY c.received_at DESC
        LIMIT 1`,
       [rawPhone]
     );
@@ -1031,17 +1033,20 @@ app.post('/ssdi/dispo-update', async (req, res) => {
     };
 
     // Step 3: If matched, UPDATE the existing call record with dispo info
+    // Presence on the sheet = billable regardless of payout value
     if (matched) {
+      // Get publisher payout rate if payout not explicitly provided
+      const pubRate = payout || parseFloat(existingCall.payout_rate) || 160;
       await client.query(
         `UPDATE calls SET
-           caller_name      = COALESCE($1, caller_name),
-           disposition      = COALESCE($2, disposition),
-           call_status_label = CASE WHEN $3 IS NOT NULL THEN 'cpa' ELSE call_status_label END,
-           payout_amount    = COALESCE($3, payout_amount),
-           billable         = CASE WHEN $3 IS NOT NULL THEN true ELSE billable END,
-           raw              = raw || $4::jsonb
-         WHERE id = $5`,
-        [callerName, caseStatus, payout, JSON.stringify(rawData), existingCall.id]
+           caller_name       = COALESCE($1, caller_name),
+           disposition       = 'Billable',
+           call_status_label = 'cpa',
+           billable          = true,
+           payout_amount     = $2,
+           raw               = raw || $3::jsonb
+         WHERE id = $4`,
+        [callerName, pubRate, JSON.stringify(rawData), existingCall.id]
       );
     }
 
