@@ -1157,7 +1157,20 @@ async function pollSheet() {
         const convertedDate = (row['Converted Date'] || '').trim() || null;
         const leadOwner     = (row['Lead Owner: Full Name'] || '').trim() || null;
         const amntRaw       = String(row['AMNT'] || row['Amnt'] || '').replace(/[$,]/g,'').trim();
-        const payout        = parseFloat(amntRaw) || null;
+        const payout        = parseFloat(amntRaw) > 0 ? parseFloat(amntRaw) : null;
+
+        // Skip rows that are payment notes, balance owed, or settlement entries
+        // These are financial updates to existing cases, not new call records
+        const skipStatuses = ['paid', 'balance', 'balance owed', 'settlement', 'owed', 'payment', 'partial payment', 'write off', 'write-off'];
+        const statusLower  = (caseStatus || '').toLowerCase().trim();
+        const subStatLower = (caseSubStatus || '').toLowerCase().trim();
+        if (skipStatuses.some(s => statusLower.includes(s) || subStatLower.includes(s))) {
+          continue;
+        }
+
+        // Skip rows with no valid phone — these are header/note rows
+        // (already checked above but double-confirming after parsing)
+        if (!rawPhone || rawPhone.length < 7) continue;
 
         // Look up existing SSDI call by CID
         const lookup = await client.query(
