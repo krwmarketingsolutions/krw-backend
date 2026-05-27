@@ -1076,6 +1076,172 @@ app.post('/ssdi/dispo-update', async (req, res) => {
 });
 // ─── END SSDI DISPO UPDATE ──────────────────────────────────────────────────
 
+// ─── GOOGLE SHEET POLLER (SSDI dispo sync) ──────────────────────────────────
+// Polls the public Google Sheet every 5 minutes.
+// Cross-references CID against existing SSDI calls to match publisher via DID.
+// Only touches source_system='partner' AND campaign='SSDI' records.
+// FE calls are NEVER touched.
+
+const SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/10o3o1IkSp4pigdOtX_Ls48NHsA9hLEWb-vajb5Ejhww/export?format=csv&gid=380172903';
+const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Track rows we have already processed to avoid duplicate updates
+const processedRows = new Set();
+
+async function fetchSheetCSV() {
+  const https = require('https');
+  const http  = require('http');
+  return new Promise((resolve, reject) => {
+    const get = (url, redirectCount = 0) => {
+      if (redirectCount > 5) return reject(new Error('Too many redirects'));
+      const lib = url.startsWith('https') ? https : http;
+      lib.get(url, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          return get(res.headers.location, redirectCount + 1);
+        }
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => resolve(data));
+      }).on('error', reject);
+    };
+    get(SHEET_CSV_URL);
+  });
+}
+
+function parseCSV(text) {
+  const lines = text.trim().split('\n');
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(',').map(h => h.replace(/"/g,'').trim());
+  return lines.slice(1).map(line => {
+    // Handle quoted fields with commas
+    const cols = [];
+    let cur = '', inQuote = false;
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === '"') { inQuote = !inQuote; continue; }
+      if (line[i] === ',' && !inQuote) { cols.push(cur.trim()); cur = ''; continue; }
+      cur += line[i];
+    }
+    cols.push(cur.trim());
+    const row = {};
+    headers.forEach((h, i) => row[h] = cols[i] || '');
+    return row;
+  });
+}
+
+async function pollSheet() {
+  try {
+    const csv  = await fetchSheetCSV();
+    const rows = parseCSV(csv);
+    if (!rows.length) return;
+
+    const client = await pool.connect();
+    try {
+      let matched = 0, unmatched = 0, skipped = 0;
+
+      for (const row of rows) {
+        // Get phone from "Converted Account: Phone" column
+        let rawPhone = String(
+          row['Converted Account: Phone'] || row['Phone'] || ''
+        ).replace(/\D/g, '');
+        if (rawPhone.startsWith('1') && rawPhone.length === 11) rawPhone = rawPhone.slice(1);
+        if (!rawPhone || rawPhone.length < 7) continue;
+
+        // Build a unique key for this row to avoid reprocessing
+        const rowKey = rawPhone + '|' + (row['Converted Date'] || '') + '|' + (row['Converted Account: Case Status'] || '');
+        if (processedRows.has(rowKey)) { skipped++; continue; }
+
+        const callerName    = (row['Full Name'] || '').trim() || null;
+        const state         = (row['State/Province'] || '').trim() || null;
+        const caseStatus    = (row['Converted Account: Case Status'] || '').trim() || null;
+        const caseSubStatus = (row['Converted Account: Case Sub-Status'] || '').trim() || null;
+        const convertedDate = (row['Converted Date'] || '').trim() || null;
+        const leadOwner     = (row['Lead Owner: Full Name'] || '').trim() || null;
+        const amntRaw       = String(row['AMNT'] || row['Amnt'] || '').replace(/[$,]/g,'').trim();
+        const payout        = parseFloat(amntRaw) || null;
+
+        // Look up existing SSDI call by CID
+        const lookup = await client.query(
+          `SELECT id, publisher_sub FROM calls
+           WHERE caller_id = $1
+             AND source_system = 'partner'
+             AND campaign = 'SSDI'
+           ORDER BY received_at DESC LIMIT 1`,
+          [rawPhone]
+        );
+
+        const isMatched    = lookup.rows.length > 0;
+        const existingCall = isMatched ? lookup.rows[0] : null;
+        const publisherSub = isMatched ? existingCall.publisher_sub : null;
+
+        const rawData = JSON.stringify({
+          phone: rawPhone, full_name: callerName, state,
+          case_status: caseStatus, case_sub_status: caseSubStatus,
+          converted_date: convertedDate, lead_owner: leadOwner,
+          payout_amount: payout, matched_publisher: publisherSub,
+          source: 'google_sheet_poll'
+        });
+
+        // Update existing call if matched
+        if (isMatched) {
+          await client.query(
+            `UPDATE calls SET
+               caller_name       = COALESCE($1, caller_name),
+               disposition       = COALESCE($2, disposition),
+               payout_amount     = COALESCE($3, payout_amount),
+               billable          = CASE WHEN $3 IS NOT NULL THEN true ELSE billable END,
+               call_status_label = CASE WHEN $3 IS NOT NULL THEN 'cpa' ELSE call_status_label END,
+               raw               = raw || $4::jsonb
+             WHERE id = $5`,
+            [callerName, caseStatus, payout, rawData, existingCall.id]
+          );
+          matched++;
+        } else {
+          unmatched++;
+        }
+
+        // Always insert a google_sheet record for audit trail
+        await client.query(
+          `INSERT INTO calls
+             (call_date, caller_id, caller_name, billable, payout_amount,
+              disposition, campaign, vertical, publisher_sub,
+              source_system, call_status_label, raw)
+           VALUES ($1,$2,$3,$4,$5,$6,'SSDI','SSDI',$7,'google_sheet',
+             CASE WHEN $5 IS NOT NULL THEN 'cpa'
+                  WHEN $8 THEN 'matched'
+                  ELSE 'unmatched_publisher' END,
+             $9::jsonb)
+           ON CONFLICT DO NOTHING`,
+          [
+            convertedDate || new Date().toISOString().split('T')[0],
+            rawPhone, callerName,
+            payout != null, payout, caseStatus,
+            publisherSub, isMatched, rawData
+          ]
+        );
+
+        processedRows.add(rowKey);
+      }
+
+      if (matched + unmatched > 0) {
+        console.log('[Sheet Poll] Processed ' + (matched+unmatched) + ' rows — Matched: ' + matched + ', Unmatched: ' + unmatched + ', Skipped: ' + skipped);
+      }
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('[Sheet Poll] Error:', err.message);
+  }
+}
+
+// Start polling after 10 second delay on boot, then every 5 minutes
+setTimeout(() => {
+  pollSheet();
+  setInterval(pollSheet, POLL_INTERVAL_MS);
+}, 10000);
+// ─── END GOOGLE SHEET POLLER ────────────────────────────────────────────────
+
+
+
 
 // ── CALLS POSTBACK ENDPOINT (SSDI only) ─────────────────
 // Called by partner system or buyer at end of day
