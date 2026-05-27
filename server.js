@@ -1160,7 +1160,7 @@ async function pollSheet() {
 
         // Build a unique key for this row to avoid reprocessing
         const rowKey = rawPhone + '|' + (row['Converted Date'] || '') + '|' + (row['Converted Account: Case Status'] || '');
-        if (processedRows.has(rowKey)) { skipped++; continue; }
+        if (processedRows.has(rawPhone)) { skipped++; continue; }
 
         const callerName    = (row['Full Name'] || '').trim() || null;
         const state         = (row['State/Province'] || '').trim() || null;
@@ -1189,7 +1189,7 @@ async function pollSheet() {
         const KRW_DIDS = ['8338403897', '8338417301', '8338928548'];
 
         const lookup = await client.query(
-          `SELECT c.id, c.publisher_sub, p.payout_rate
+          `SELECT c.id, c.publisher_sub, c.call_status_label, p.payout_rate
            FROM calls c
            LEFT JOIN publishers p ON p.pub_id = c.publisher_sub
            WHERE c.caller_id = $1
@@ -1210,8 +1210,8 @@ async function pollSheet() {
 
         const existingCall = lookup.rows[0];
         const publisherSub = existingCall.publisher_sub;
-        // Use publisher's payout rate from publishers table, fallback to 160
         const publisherPayout = parseFloat(existingCall.payout_rate) || 160;
+        const currentStatus = existingCall.call_status_label;
 
         const rawData = JSON.stringify({
           phone: rawPhone, full_name: callerName, state,
@@ -1222,12 +1222,13 @@ async function pollSheet() {
           source: 'google_sheet_poll'
         });
 
-        // Step 2: Mark the call as billable using the publisher's payout rate
-        // Presence on the sheet = billable, no AMNT needed
+        // Step 2: Mark billable regardless of current status
+        // This handles cases where a call was previously marked not_converted
+        // but then shows up on the sheet — sheet is always the source of truth
         await client.query(
           `UPDATE calls SET
              caller_name       = COALESCE($1, caller_name),
-             disposition       = COALESCE($2, disposition),
+             disposition       = 'Billable',
              billable          = true,
              payout_amount     = $3,
              call_status_label = 'cpa',
@@ -1236,8 +1237,14 @@ async function pollSheet() {
           [callerName, caseStatus || 'Billable', publisherPayout, rawData, existingCall.id]
         );
 
+        if (currentStatus === 'not_converted') {
+          console.log('[Sheet Poll] Flipped not_converted → cpa for CID ' + rawPhone + ' (' + publisherSub + ')');
+        }
+
         matched++;
-        processedRows.add(rowKey);
+        // Only cache as processed once confirmed billable
+        // This allows re-processing if status changes
+        processedRows.add(rawPhone);
       }
 
       if (matched + unmatched > 0) {
