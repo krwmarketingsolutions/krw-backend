@@ -1177,15 +1177,16 @@ async function pollSheet() {
         const KRW_DIDS = ['8338403897', '8338417301', '8338928548'];
 
         const lookup = await client.query(
-          `SELECT c.id, c.publisher_sub, c.did, p.payout_rate
+          `SELECT c.id, c.publisher_sub, p.payout_rate
            FROM calls c
            LEFT JOIN publishers p ON p.pub_id = c.publisher_sub
            WHERE c.caller_id = $1
              AND c.source_system = 'partner'
-             AND c.campaign = 'SSDI'
-             AND (c.raw->>'did') = ANY($2)
+             AND (c.campaign = 'SSDI' OR c.raw->>'campaign' = 'SSDI')
+             AND c.publisher_sub IS NOT NULL
+             AND c.publisher_sub != ''
            ORDER BY c.received_at DESC LIMIT 1`,
-          [rawPhone, KRW_DIDS]
+          [rawPhone]
         );
 
         // CID not on any of our DIDs — belongs to Laird's own publishers, skip it
