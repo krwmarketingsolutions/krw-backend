@@ -1891,6 +1891,185 @@ app.post('/leads/roblox', async (req, res) => {
 });
 // ─── END ROBLOX MASS TORT ────────────────────────────────────────────────────
 
+
+// ─── MVA NLD2 — LEAD PROSPER FORWARDING ─────────────────────────────────────
+// Receives MVA CPA leads from publishers, validates required fields,
+// and forwards to Lead Prosper / Nex Level Direct endpoint.
+// Campaign: mva-nld2 | Buyer: Nex Level Direct
+// Completely separate from SSDI and FE verticals.
+
+const LP_MVA_URL         = 'https://api.leadprosper.io/direct_post';
+const LP_MVA_CAMPAIGN_ID = '31080';
+const LP_MVA_SUPPLIER_ID = '110928';
+const LP_MVA_KEY         = 'ke21sx0koi7dld';
+
+app.post('/leads/mva-nld2', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Validate required fields
+  const missing = [];
+  if (!b.first_name)     missing.push('first_name');
+  if (!b.last_name)      missing.push('last_name');
+  if (!b.email)          missing.push('email');
+  if (!b.phone)          missing.push('phone');
+  if (!b.incident_state) missing.push('incident_state');
+  if (!b.incident_date)  missing.push('incident_date');
+  if (!b.have_attorney)  missing.push('have_attorney');
+  if (!b.at_fault)       missing.push('at_fault');
+  if (!b.settlement)     missing.push('settlement');
+  if (!b.cited)          missing.push('cited');
+  if (!b.doctor_treatment) missing.push('doctor_treatment');
+  if (!b.physical_injury)  missing.push('physical_injury');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  // Publisher sub tracking
+  const publisherSub = b.publisher_sub || b.lp_subid1 || null;
+
+  // Build Lead Prosper payload
+  const payload = {
+    lp_campaign_id: LP_MVA_CAMPAIGN_ID,
+    lp_supplier_id: LP_MVA_SUPPLIER_ID,
+    lp_key:         LP_MVA_KEY,
+    lp_action:      b.lp_action || '',
+    lp_subid1:      publisherSub || '',
+    lp_subid2:      b.lp_subid2 || '',
+    first_name:     b.first_name,
+    last_name:      b.last_name,
+    email:          b.email,
+    phone:          b.phone,
+    incident_state: b.incident_state,
+    incident_date:  b.incident_date,
+    have_attorney:  b.have_attorney,
+    at_fault:       b.at_fault,
+    settlement:     b.settlement,
+    cited:          b.cited,
+    doctor_treatment: b.doctor_treatment,
+    physical_injury:  b.physical_injury,
+  };
+
+  // Optional fields
+  const optFields = ['date_of_birth','gender','address','city','state','zip_code',
+    'ip_address','user_agent','landing_page_url','jornaya_leadid',
+    'trustedform_cert_url','tcpa_text'];
+  optFields.forEach(f => { if (b[f]) payload[f] = b[f]; });
+
+  // Log the lead attempt
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, ip_address, status, raw, received_at)
+       VALUES ('mva-nld2','MVA',$1,$2,$3,$4,$5,$6,'pending',$7::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email,
+       publisherSub, b.ip_address || null,
+       JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[MVA NLD2] DB insert error:', dbErr.message);
+  } finally {
+    client.release();
+  }
+
+  // Forward to Lead Prosper
+  try {
+    const https = require('https');
+    const postData = JSON.stringify(payload);
+
+    const lpRes = await new Promise((resolve, reject) => {
+      const url = new URL(LP_MVA_URL);
+      const options = {
+        hostname: url.hostname,
+        path:     url.pathname,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/json',
+          'Content-Length': Buffer.byteLength(postData),
+        }
+      };
+      const req2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: data }));
+      });
+      req2.on('error', reject);
+      req2.write(postData);
+      req2.end();
+    });
+
+    let lpResult = {};
+    try { lpResult = JSON.parse(lpRes.body); } catch(e) {
+      lpResult = { status: 'ERROR', message: lpRes.body };
+    }
+
+    const accepted = lpResult.status === 'ACCEPTED';
+    const duplicate = lpResult.status === 'DUPLICATED';
+
+    // Update lead status in DB
+    if (leadId) {
+      const c2 = await pool.connect();
+      try {
+        await c2.query(
+          `UPDATE leads SET
+             status          = $1,
+             buyer_intake_id = $2,
+             buyer_response  = $3::jsonb,
+             revenue         = 0
+           WHERE id = $4`,
+          [
+            accepted ? 'forwarded' : duplicate ? 'duplicate' : 'buyer_rejected',
+            lpResult.lead_id || null,
+            JSON.stringify(lpResult),
+            leadId
+          ]
+        );
+      } finally { c2.release(); }
+    }
+
+    console.log(`[MVA NLD2] ${accepted ? '✅' : duplicate ? '🔁' : '❌'} ${b.first_name} ${b.last_name} → ${lpResult.status} | ${lpResult.lead_id || 'no id'}`);
+
+    return res.json({
+      ok:      accepted,
+      status:  lpResult.status,
+      lead_id: lpResult.lead_id || null,
+      message: accepted ? 'Lead accepted' : duplicate ? 'Duplicate lead' : 'Lead rejected',
+      code:    lpResult.code || null,
+      krw_id:  leadId
+    });
+
+  } catch (fwdErr) {
+    console.error('[MVA NLD2] Forward error:', fwdErr.message);
+
+    if (leadId) {
+      const c3 = await pool.connect();
+      try {
+        await c3.query(
+          "UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
+          [fwdErr.message, leadId]
+        );
+      } finally { c3.release(); }
+    }
+
+    return res.status(502).json({ ok: false, error: 'Failed to forward to buyer', detail: fwdErr.message });
+  }
+});
+// ─── END MVA NLD2 ────────────────────────────────────────────────────────────
+
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
       console.log(`API_KEY set: ${!!process.env.API_KEY}`);
