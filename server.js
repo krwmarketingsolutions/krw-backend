@@ -261,8 +261,8 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
       'rideshare':  { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
       'lyft':       { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
       'uber':       { id: '31036',  sup: '99237',  key: 'jz2gawz23t17g5' },
-      'roundup':    { id: '30976',  sup: '96279',  key: '6l5rtdz61ay1n2' },
-      'roundup-lt': { id: '30976',  sup: '96279',  key: '6l5rtdz61ay1n2' },
+      'roundup':    { id: '30976',  sup: '113017', key: 'rlv6tzwn1tzw5r' },
+      'roundup-lt': { id: '30976',  sup: '113017', key: 'rlv6tzwn1tzw5r' },
     };
 
     // Use hardcoded first, then fall back to buyer_notes
