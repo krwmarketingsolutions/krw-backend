@@ -1715,7 +1715,183 @@ initDB()
   .then(() => initCampaignsDB())
   .then(() => initPublishersDB())
   .then(() => {
-    app.listen(PORT, '0.0.0.0', () => {
+    
+
+// ─── ROBLOX MASS TORT — TRUE BLUE FORWARDING ────────────────────────────────
+// Receives a lead from a publisher, validates required fields,
+// and forwards to True Blue Marketing's LeadsPedia endpoint.
+// Campaign: roblox-mt | Buyer: True Blue Marketing
+// This is completely separate from SSDI and FE verticals.
+
+const TRUEBLUE_URL         = 'https://trueblue.leadspediatrack.com/post.do';
+const TRUEBLUE_CAMPAIGN_ID = '6a2062006f3f4';
+const TRUEBLUE_CAMPAIGN_KEY = 'qWGfxLDQMzP6mhbHkp24';
+
+app.post('/leads/roblox', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Validate required fields
+  const missing = [];
+  if (!b.first_name)     missing.push('first_name');
+  if (!b.last_name)      missing.push('last_name');
+  if (!b.phone_home)     missing.push('phone_home');
+  if (!b.email_address)  missing.push('email_address');
+  if (!b.jornaya_lead_id && !b.trusted_form_cert_id) missing.push('jornaya_lead_id or trusted_form_cert_id');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  // Build True Blue payload
+  const payload = new URLSearchParams();
+  payload.append('lp_campaign_id',  TRUEBLUE_CAMPAIGN_ID);
+  payload.append('lp_campaign_key', TRUEBLUE_CAMPAIGN_KEY);
+  payload.append('lp_response',     'json');
+
+  // Required fields
+  payload.append('first_name',    b.first_name);
+  payload.append('last_name',     b.last_name);
+  payload.append('phone_home',    b.phone_home);
+  payload.append('email_address', b.email_address);
+
+  // Optional fields — only append if provided
+  const optionalFields = [
+    'phone_cell','phone_work','phone_ext','address','address2',
+    'city','state','zip_code','county','country','dob',
+    'ip_address','exposed','child_claim','injury','attorney',
+    'incident_date','lp_s1','lp_s2','lp_s3','lp_s4','lp_s5',
+    'lp_caller_id','landing_page_url','description','lp_test'
+  ];
+  optionalFields.forEach(f => { if (b[f]) payload.append(f, b[f]); });
+
+  // TCPA compliance
+  if (b.jornaya_lead_id)       payload.append('jornaya_lead_id',       b.jornaya_lead_id);
+  if (b.trusted_form_cert_id)  payload.append('trusted_form_cert_id',  b.trusted_form_cert_id);
+
+  // Publisher sub tracking
+  const publisherSub = b.publisher_sub || b.lp_s1 || null;
+
+  // Log the lead attempt
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, ip_address, status, raw, received_at)
+       VALUES ('roblox-mt','Mass Tort - Roblox',$1,$2,$3,$4,$5,$6,'pending',$7::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone_home, b.email_address,
+       publisherSub, b.ip_address || null,
+       JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[Roblox Lead] DB insert error:', dbErr.message);
+  } finally {
+    client.release();
+  }
+
+  // Forward to True Blue
+  try {
+    const https = require('https');
+    const postData = payload.toString();
+
+    const tbRes = await new Promise((resolve, reject) => {
+      const url = new URL(TRUEBLUE_URL);
+      const options = {
+        hostname: url.hostname,
+        path:     url.pathname,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(postData),
+        }
+      };
+      const req2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: data }));
+      });
+      req2.on('error', reject);
+      req2.write(postData);
+      req2.end();
+    });
+
+    // Parse JSON response from True Blue
+    let tbResult = {};
+    try { tbResult = JSON.parse(tbRes.body); } catch(e) {
+      // Try XML fallback
+      const xmlResult = tbRes.body.match(/<result>(.*?)<\/result>/)?.[1] || 'unknown';
+      const tbLeadId  = tbRes.body.match(/<lead_id>(.*?)<\/lead_id>/)?.[1] || null;
+      const price     = tbRes.body.match(/<price>(.*?)<\/price>/)?.[1] || '0.00';
+      tbResult = { result: xmlResult, lead_id: tbLeadId, price };
+    }
+
+    const accepted = tbResult.result === 'success';
+
+    // Update lead status in DB
+    if (leadId) {
+      const c2 = await pool.connect();
+      try {
+        await c2.query(
+          `UPDATE leads SET
+             status           = $1,
+             buyer_intake_id  = $2,
+             buyer_response   = $3::jsonb,
+             revenue          = $4
+           WHERE id = $5`,
+          [
+            accepted ? 'forwarded' : 'buyer_rejected',
+            tbResult.lead_id || null,
+            JSON.stringify(tbResult),
+            parseFloat(tbResult.price) || 0,
+            leadId
+          ]
+        );
+      } finally { c2.release(); }
+    }
+
+    console.log(`[Roblox Lead] \${accepted ? '✅' : '❌'} \${b.first_name} \${b.last_name} → \${tbResult.result} | \${tbResult.lead_id || 'no id'} | $\${tbResult.price || '0.00'}`);
+
+    return res.json({
+      ok:       accepted,
+      result:   tbResult.result,
+      lead_id:  tbResult.lead_id || null,
+      price:    tbResult.price   || '0.00',
+      message:  accepted ? 'Lead accepted by True Blue' : 'Lead rejected by True Blue',
+      errors:   tbResult.errors  || null,
+      krw_id:   leadId
+    });
+
+  } catch (fwdErr) {
+    console.error('[Roblox Lead] Forward error:', fwdErr.message);
+
+    if (leadId) {
+      const c3 = await pool.connect();
+      try {
+        await c3.query(
+          "UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
+          [fwdErr.message, leadId]
+        );
+      } finally { c3.release(); }
+    }
+
+    return res.status(502).json({ ok: false, error: 'Failed to forward to buyer', detail: fwdErr.message });
+  }
+});
+// ─── END ROBLOX MASS TORT ────────────────────────────────────────────────────
+
+app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
       console.log(`API_KEY set: ${!!process.env.API_KEY}`);
       console.log(`LEAD_KEY set: ${!!process.env.LEAD_API_KEY}`);
