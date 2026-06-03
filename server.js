@@ -2070,6 +2070,186 @@ app.post('/leads/mva-nld2', async (req, res) => {
 });
 // ─── END MVA NLD2 ────────────────────────────────────────────────────────────
 
+
+// ─── RIDESHARE UBER/LYFT — TRUE BLUE FORWARDING ─────────────────────────────
+// Receives Rideshare (Uber/Lyft) leads from publishers and forwards to
+// True Blue Marketing's LeadsPedia endpoint.
+// Campaign: rideshare-tb | Buyer: True Blue Marketing
+// Completely separate from SSDI and FE verticals.
+
+const TRUEBLUE_RIDESHARE_URL          = 'https://trueblue.leadspediatrack.com/post.do';
+const TRUEBLUE_RIDESHARE_CAMPAIGN_ID  = '6a2061d7810c9';
+const TRUEBLUE_RIDESHARE_CAMPAIGN_KEY = '3LXznRbVmPyYrv9hWjdf';
+
+app.post('/leads/rideshare-tb', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Validate required fields
+  const missing = [];
+  if (!b.first_name)     missing.push('first_name');
+  if (!b.last_name)      missing.push('last_name');
+  if (!b.phone_home)     missing.push('phone_home');
+  if (!b.email_address)  missing.push('email_address');
+  if (!b.zip_code)       missing.push('zip_code');
+  if (!b.ip_address)     missing.push('ip_address');
+  if (!b.attorney)       missing.push('attorney');
+  if (!b.landing_page_url) missing.push('landing_page_url');
+  if (!b.jornaya_lead_id && !b.trusted_form_cert_id) missing.push('jornaya_lead_id or trusted_form_cert_id');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  // Publisher sub tracking
+  const publisherSub = b.publisher_sub || b.lp_s1 || null;
+
+  // Build True Blue payload
+  const payload = new URLSearchParams();
+  payload.append('lp_campaign_id',  TRUEBLUE_RIDESHARE_CAMPAIGN_ID);
+  payload.append('lp_campaign_key', TRUEBLUE_RIDESHARE_CAMPAIGN_KEY);
+  payload.append('lp_response',     'json');
+
+  // Required fields
+  payload.append('first_name',       b.first_name);
+  payload.append('last_name',        b.last_name);
+  payload.append('phone_home',       b.phone_home);
+  payload.append('email_address',    b.email_address);
+  payload.append('zip_code',         b.zip_code);
+  payload.append('ip_address',       b.ip_address);
+  payload.append('attorney',         b.attorney);
+  payload.append('landing_page_url', b.landing_page_url);
+  payload.append('lp_caller_id',     b.lp_caller_id || b.phone_home);
+
+  // TCPA compliance
+  if (b.jornaya_lead_id)      payload.append('jornaya_lead_id',      b.jornaya_lead_id);
+  if (b.trusted_form_cert_id) payload.append('trusted_form_cert_id', b.trusted_form_cert_id);
+
+  // Optional fields
+  const optFields = ['phone_cell','phone_work','phone_ext','address','address2',
+    'city','state','county','country','dob','experience_assault',
+    'description','lp_s1','lp_s2','lp_s3','lp_s4','lp_s5','lp_test'];
+  optFields.forEach(f => { if (b[f]) payload.append(f, b[f]); });
+
+  // Publisher sub as lp_s1 if not already set
+  if (publisherSub && !b.lp_s1) payload.append('lp_s1', publisherSub);
+
+  // Log the lead attempt
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, ip_address, status, raw, received_at)
+       VALUES ('rideshare-tb','Mass Tort - Rideshare',$1,$2,$3,$4,$5,$6,'pending',$7::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone_home, b.email_address,
+       publisherSub, b.ip_address,
+       JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[Rideshare TB] DB insert error:', dbErr.message);
+  } finally {
+    client.release();
+  }
+
+  // Forward to True Blue
+  try {
+    const https = require('https');
+    const postData = payload.toString();
+
+    const tbRes = await new Promise((resolve, reject) => {
+      const url = new URL(TRUEBLUE_RIDESHARE_URL);
+      const options = {
+        hostname: url.hostname,
+        path:     url.pathname,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(postData),
+        }
+      };
+      const req2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: data }));
+      });
+      req2.on('error', reject);
+      req2.write(postData);
+      req2.end();
+    });
+
+    // Parse JSON response
+    let tbResult = {};
+    try { tbResult = JSON.parse(tbRes.body); } catch(e) {
+      const xmlResult = tbRes.body.match(/<result>(.*?)<\/result>/)?.[1] || 'unknown';
+      const tbLeadId  = tbRes.body.match(/<lead_id>(.*?)<\/lead_id>/)?.[1] || null;
+      const price     = tbRes.body.match(/<price>(.*?)<\/price>/)?.[1] || '0.00';
+      tbResult = { result: xmlResult, lead_id: tbLeadId, price };
+    }
+
+    const accepted = tbResult.result === 'success';
+
+    // Update lead status in DB
+    if (leadId) {
+      const c2 = await pool.connect();
+      try {
+        await c2.query(
+          `UPDATE leads SET
+             status          = $1,
+             buyer_intake_id = $2,
+             buyer_response  = $3::jsonb,
+             revenue         = $4
+           WHERE id = $5`,
+          [
+            accepted ? 'forwarded' : 'buyer_rejected',
+            tbResult.lead_id || null,
+            JSON.stringify(tbResult),
+            parseFloat(tbResult.price) || 0,
+            leadId
+          ]
+        );
+      } finally { c2.release(); }
+    }
+
+    console.log(`[Rideshare TB] ${accepted ? '✅' : '❌'} ${b.first_name} ${b.last_name} → ${tbResult.result} | ${tbResult.lead_id || 'no id'} | $${tbResult.price || '0.00'}`);
+
+    return res.json({
+      ok:      accepted,
+      result:  tbResult.result,
+      lead_id: tbResult.lead_id || null,
+      price:   tbResult.price   || '0.00',
+      message: accepted ? 'Lead accepted by True Blue' : 'Lead rejected by True Blue',
+      errors:  tbResult.errors  || null,
+      krw_id:  leadId
+    });
+
+  } catch (fwdErr) {
+    console.error('[Rideshare TB] Forward error:', fwdErr.message);
+    if (leadId) {
+      const c3 = await pool.connect();
+      try {
+        await c3.query(
+          "UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
+          [fwdErr.message, leadId]
+        );
+      } finally { c3.release(); }
+    }
+    return res.status(502).json({ ok: false, error: 'Failed to forward to buyer', detail: fwdErr.message });
+  }
+});
+// ─── END RIDESHARE TRUE BLUE ─────────────────────────────────────────────────
+
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
       console.log(`API_KEY set: ${!!process.env.API_KEY}`);
