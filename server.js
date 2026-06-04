@@ -438,7 +438,7 @@ app.get('/leads/feed', requireKey, async (req, res) => {
     const wc = where.length ? 'WHERE '+where.join(' AND ') : '';
     const r = await pool.query(
       `SELECT id,received_at,campaign,first_name,last_name,email,phone,state,
-              status,zapier_status,buyer_intake_id,buyer_error,publisher_sub
+              status,zapier_status,buyer_intake_id,buyer_error,buyer_status,notes,publisher_sub
        FROM leads ${wc} ORDER BY received_at DESC LIMIT $${i}`, params);
     res.json({ ok:true, count:r.rows.length, leads:r.rows });
   } catch(err) { res.status(500).json({ error:err.message }); }
