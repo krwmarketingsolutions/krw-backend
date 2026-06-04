@@ -421,6 +421,37 @@ async function forwardToBuyer(leadId, leadRef, campaign, data, buyerUrl) {
   }
 }
 
+// ── Test email endpoint (remove after confirming email works) ─────────────────
+app.get('/test-email', requireKey, async (req, res) => {
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;background:#f4f6fb;padding:32px 20px">
+      <div style="background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08)">
+        <div style="background:#0f1c3f;padding:24px 28px">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.5);margin-bottom:6px">KRW Marketing Solutions</div>
+          <div style="font-size:22px;font-weight:700;color:#fff">✓ Billable Lead</div>
+          <div style="font-size:13px;color:rgba(255,255,255,.6);margin-top:4px">Test Email — ${new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>
+        </div>
+        <div style="padding:28px">
+          <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px 20px;margin-bottom:20px">
+            <div style="font-size:18px;font-weight:700;color:#15803d;margin-bottom:4px">Jane Smith</div>
+            <div style="font-size:13px;color:#166534">Marked billable — Accepted by Firm - Billable</div>
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;width:38%">Campaign</td><td style="padding:10px 0;font-weight:600;color:#0f1c3f">RIDESHARE-TB — Rideshare</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">CID</td><td style="padding:10px 0;font-family:monospace;color:#475569">1234567890</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Email</td><td style="padding:10px 0;color:#475569">jane.smith@email.com</td></tr>
+            <tr><td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Phone</td><td style="padding:10px 0;color:#475569">3105550123</td></tr>
+          </table>
+        </div>
+        <div style="padding:16px 28px;background:#f9fafb;border-top:1px solid #f1f5f9;font-size:11px;color:#9ca3af;text-align:center">KRW Marketing Solutions · Lead Notification System</div>
+      </div>
+    </div>`;
+
+  await sendEmailNotification('✓ Billable Lead — Jane Smith | Rideshare | RIDESHARE-TB', html);
+  res.json({ ok: true, message: 'Test email sent to waltersonkyle@gmail.com' });
+});
+// ── End test email ────────────────────────────────────────────────────────────
+
 // ══════════════════════════════════════════════════════
 //  LEAD READ ENDPOINTS (dashboard)
 // ══════════════════════════════════════════════════════
