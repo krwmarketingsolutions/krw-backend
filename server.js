@@ -148,6 +148,10 @@ async function initLeadsDB() {
     );
     CREATE INDEX IF NOT EXISTS idx_leads_campaign ON leads (campaign);
     CREATE INDEX IF NOT EXISTS idx_leads_received ON leads (received_at);
+    -- Add columns if upgrading existing table
+    ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_address     TEXT;
+    ALTER TABLE leads ADD COLUMN IF NOT EXISTS buyer_response JSONB;
+    ALTER TABLE leads ADD COLUMN IF NOT EXISTS revenue        NUMERIC(10,2);
   `);
   console.log('✅ Leads table ready');
 }
