@@ -42,26 +42,42 @@ function requireLeadKey(req, res, next) {
 
 // ── Email notifications ───────────────────────────────
 function getMailer() {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) return null;
-  return nodemailer.createTransport({
-    host:   process.env.SMTP_HOST || 'smtp.office365.com',
-    port:   parseInt(process.env.SMTP_PORT || '587'),
-    secure: false,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-    tls: { ciphers: 'SSLv3' },
-  });
+  // Gmail takes priority if configured
+  if (process.env.GMAIL_USER && process.env.GMAIL_PASS) {
+    return nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.GMAIL_USER,
+        pass: process.env.GMAIL_PASS,
+      },
+    });
+  }
+  // Fallback to SMTP (Outlook etc)
+  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+    return nodemailer.createTransport({
+      host:   process.env.SMTP_HOST || 'smtp.office365.com',
+      port:   parseInt(process.env.SMTP_PORT || '587'),
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+      tls: { ciphers: 'SSLv3' },
+    });
+  }
+  return null;
 }
+
+const NOTIFY_FROM  = process.env.GMAIL_USER || process.env.SMTP_USER || 'waltersonkyle@gmail.com';
+const NOTIFY_TO    = process.env.NOTIFY_EMAIL || 'waltersonkyle@gmail.com';
 
 async function sendEmailNotification(subject, html) {
   try {
     const mailer = getMailer();
     if (!mailer) { console.log('Email not configured - skipping notification'); return; }
     await mailer.sendMail({
-      from:    `"KRW Dashboard" <${process.env.SMTP_USER}>`,
-      to:      process.env.NOTIFY_EMAIL || 'kyler@krwmarketingsolutions.com',
+      from:    `"KRW Dashboard" <${NOTIFY_FROM}>`,
+      to:      NOTIFY_TO,
       subject,
       html,
     });
@@ -2365,6 +2381,11 @@ async function pollKALeadsSheet() {
           }
 
           const lead = lookup.rows[0];
+          const wasAlreadyBillable = (() => {
+            const prev = (lead.buyer_status || '').toLowerCase().trim();
+            return prev === 'signed' || prev.startsWith('signed') ||
+                   prev.includes('accepted') || prev.includes('billable');
+          })();
 
           // Build raw update patch
           const patch = JSON.stringify({
@@ -2389,6 +2410,74 @@ async function pollKALeadsSheet() {
               ? [nldStatus, notes, patch, leadStatus, lead.id]
               : [nldStatus, notes, patch, lead.id]
           );
+
+          // Fire billable email if this lead just flipped to billable/signed
+          const isNowBillable = (() => {
+            const cur = (nldStatus || '').toLowerCase().trim();
+            return cur === 'signed' || cur.startsWith('signed') ||
+                   cur.includes('accepted') || cur.includes('billable');
+          })();
+
+          if (isNowBillable && !wasAlreadyBillable) {
+            // Fetch full lead details for email
+            const fullLead = await client.query(
+              `SELECT first_name, last_name, email, phone, campaign, received_at
+               FROM leads WHERE id = $1`, [lead.id]
+            );
+            const fl = fullLead.rows[0] || {};
+            const name     = [fl.first_name, fl.last_name].filter(Boolean).join(' ') || 'Unknown';
+            const campaign = (fl.campaign || sheet.campaign).toUpperCase();
+            const vertical = sheet.name;
+            const dateStr  = new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+
+            const emailHtml = `
+              <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;background:#f4f6fb;padding:32px 20px">
+                <div style="background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08)">
+                  <div style="background:#0f1c3f;padding:24px 28px">
+                    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.5);margin-bottom:6px">KRW Marketing Solutions</div>
+                    <div style="font-size:22px;font-weight:700;color:#fff">✓ Billable Lead</div>
+                    <div style="font-size:13px;color:rgba(255,255,255,.6);margin-top:4px">${dateStr}</div>
+                  </div>
+                  <div style="padding:28px">
+                    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px 20px;margin-bottom:20px">
+                      <div style="font-size:18px;font-weight:700;color:#15803d;margin-bottom:4px">${name}</div>
+                      <div style="font-size:13px;color:#166534">Marked billable — ${nldStatus}</div>
+                    </div>
+                    <table style="width:100%;border-collapse:collapse;font-size:13px">
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.08em;width:40%">Campaign</td>
+                        <td style="padding:10px 0;font-weight:600;color:#0f1c3f">${campaign} — ${vertical}</td>
+                      </tr>
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.08em">CID</td>
+                        <td style="padding:10px 0;font-family:monospace;color:#475569">${cid}</td>
+                      </tr>
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.08em">Email</td>
+                        <td style="padding:10px 0;color:#475569">${fl.email || '—'}</td>
+                      </tr>
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.08em">Phone</td>
+                        <td style="padding:10px 0;color:#475569">${fl.phone || '—'}</td>
+                      </tr>
+                      ${notes ? `<tr>
+                        <td style="padding:10px 0;color:#9ca3af;font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.08em;vertical-align:top">Notes</td>
+                        <td style="padding:10px 0;color:#475569;line-height:1.5">${notes}</td>
+                      </tr>` : ''}
+                    </table>
+                  </div>
+                  <div style="padding:16px 28px;background:#f9fafb;border-top:1px solid #f1f5f9;font-size:11px;color:#9ca3af;text-align:center">
+                    KRW Marketing Solutions · Lead Notification System
+                  </div>
+                </div>
+              </div>`;
+
+            await sendEmailNotification(
+              `✓ Billable Lead — ${name} | ${vertical} | ${campaign}`,
+              emailHtml
+            );
+            console.log(`[KA Sheet Poll] 📧 Billable email sent for ${name} | ${campaign} | CID: ${cid}`);
+          }
 
           matched++;
         }
