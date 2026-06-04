@@ -148,10 +148,6 @@ async function initLeadsDB() {
     );
     CREATE INDEX IF NOT EXISTS idx_leads_campaign ON leads (campaign);
     CREATE INDEX IF NOT EXISTS idx_leads_received ON leads (received_at);
-    -- Add columns if upgrading existing table
-    ALTER TABLE leads ADD COLUMN IF NOT EXISTS ip_address     TEXT;
-    ALTER TABLE leads ADD COLUMN IF NOT EXISTS buyer_response JSONB;
-    ALTER TABLE leads ADD COLUMN IF NOT EXISTS revenue        NUMERIC(10,2);
   `);
   console.log('✅ Leads table ready');
 }
@@ -2253,6 +2249,166 @@ app.post('/leads/rideshare-tb', async (req, res) => {
   }
 });
 // ─── END RIDESHARE TRUE BLUE ─────────────────────────────────────────────────
+
+// ─── KEVIN ANTHONY LEADS SHEET POLLER ────────────────────────────────────────
+// Polls two Google Sheet tabs every hour (MVA + Rideshare).
+// Matches rows by CID → buyer_intake_id in the leads table.
+// Only touches leads with campaign IN ('mva-nld2', 'rideshare-tb').
+// SSDI and FE verticals are NEVER touched.
+// Sheet columns: Date | CID | First Name | Last Name | Email Address |
+//                Intake Center Status | NLD Status | Date of Notes Updated |
+//                Notes | Billable
+
+const KA_SHEET_ID = '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4';
+
+const KA_SHEETS = [
+  {
+    name:     'MVA',
+    campaign: 'mva-nld2',
+    url:      `https://docs.google.com/spreadsheets/d/${KA_SHEET_ID}/export?format=csv&gid=1713913985`,
+  },
+  {
+    name:     'Rideshare',
+    campaign: 'rideshare-tb',
+    url:      `https://docs.google.com/spreadsheets/d/${KA_SHEET_ID}/export?format=csv&gid=968537461`,
+  },
+];
+
+const KA_POLL_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
+async function fetchKASheetCSV(url) {
+  const https = require('https');
+  const http  = require('http');
+  return new Promise((resolve, reject) => {
+    const get = (u, redirectCount = 0) => {
+      if (redirectCount > 5) return reject(new Error('Too many redirects'));
+      const lib = u.startsWith('https') ? https : http;
+      lib.get(u, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          return get(res.headers.location, redirectCount + 1);
+        }
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => resolve(data));
+      }).on('error', reject);
+    };
+    get(url);
+  });
+}
+
+function parseKASheetCSV(text) {
+  const lines = text.trim().split('\n');
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+  return lines.slice(1).map(line => {
+    const cols = [];
+    let cur = '', inQuote = false;
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === '"') { inQuote = !inQuote; continue; }
+      if (line[i] === ',' && !inQuote) { cols.push(cur.trim()); cur = ''; continue; }
+      cur += line[i];
+    }
+    cols.push(cur.trim());
+    const row = {};
+    headers.forEach((h, i) => row[h] = cols[i] || '');
+    return row;
+  });
+}
+
+async function pollKALeadsSheet() {
+  for (const sheet of KA_SHEETS) {
+    try {
+      const csv  = await fetchKASheetCSV(sheet.url);
+      const rows = parseKASheetCSV(csv);
+      if (!rows.length) {
+        console.log(`[KA Sheet Poll] ${sheet.name}: no rows found`);
+        continue;
+      }
+
+      const client = await pool.connect();
+      try {
+        let matched = 0, unmatched = 0, skipped = 0;
+
+        for (const row of rows) {
+          const cid = (row['CID'] || '').trim();
+          if (!cid) { skipped++; continue; }
+
+          const intakeStatus  = (row['Intake Center Status'] || '').trim() || null;
+          const nldStatus     = (row['NLD Status']           || '').trim() || null;
+          const notes         = (row['Notes']                || '').trim() || null;
+          const billableRaw   = (row['Billable']             || '').trim().toLowerCase();
+          const billable      = billableRaw === 'yes' ? true : billableRaw === 'no' ? false : null;
+          const notesUpdated  = (row['Date of Notes Updated'] || '').trim() || null;
+
+          // Determine overall lead status from sheet
+          // Accepted by Firm = forwarded/billable, Disqualified = rejected, else pending
+          let leadStatus = null;
+          const nldLower = (nldStatus || '').toLowerCase();
+          if (nldLower.includes('accepted') || nldLower.includes('billable')) {
+            leadStatus = 'forwarded';
+          } else if (nldLower.includes('disqualified') || nldLower.includes('rejected')) {
+            leadStatus = 'buyer_rejected';
+          }
+
+          // Look up lead by CID (buyer_intake_id) — only touch correct campaign
+          const lookup = await client.query(
+            `SELECT id, status, buyer_status FROM leads
+             WHERE buyer_intake_id = $1
+               AND campaign = $2
+             LIMIT 1`,
+            [cid, sheet.campaign]
+          );
+
+          if (!lookup.rows.length) {
+            unmatched++;
+            continue;
+          }
+
+          const lead = lookup.rows[0];
+
+          // Build raw update patch
+          const patch = JSON.stringify({
+            ka_sheet_sync: {
+              intake_status:  intakeStatus,
+              nld_status:     nldStatus,
+              notes_updated:  notesUpdated,
+              billable:       billable,
+              source:         'ka_sheet_poll',
+              synced_at:      new Date().toISOString(),
+            }
+          });
+
+          await client.query(
+            `UPDATE leads SET
+               buyer_status = $1,
+               notes        = COALESCE($2, notes),
+               raw          = raw || $3::jsonb
+               ${leadStatus ? ', status = $4' : ''}
+             WHERE id = ${leadStatus ? '$5' : '$4'}`,
+            leadStatus
+              ? [nldStatus, notes, patch, leadStatus, lead.id]
+              : [nldStatus, notes, patch, lead.id]
+          );
+
+          matched++;
+        }
+
+        console.log(`[KA Sheet Poll] ${sheet.name}: ${matched} matched, ${unmatched} unmatched, ${skipped} skipped`);
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      console.error(`[KA Sheet Poll] ${sheet.name} error:`, err.message);
+    }
+  }
+}
+
+// Start polling 15 seconds after boot, then every hour
+setTimeout(() => {
+  pollKALeadsSheet();
+  setInterval(pollKALeadsSheet, KA_POLL_INTERVAL_MS);
+}, 15000);
+// ─── END KEVIN ANTHONY LEADS SHEET POLLER ────────────────────────────────────
 
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
