@@ -6,7 +6,6 @@
 
 require('dotenv').config();
 const express    = require('express');
-const nodemailer = require('nodemailer');
 const { Pool }   = require('pg');
 const path    = require('path');
 const fs      = require('fs');
@@ -42,46 +41,29 @@ function requireLeadKey(req, res, next) {
 }
 
 // ── Email notifications ───────────────────────────────
-// Uses Resend API (no SMTP, works from Railway) with Gmail fallback via nodemailer
+// Uses Resend API — no SMTP, works reliably from Railway
 async function sendEmailNotification(subject, html) {
   try {
-    // Try Resend first if API key is set
-    if (process.env.RESEND_API_KEY) {
-      const res = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from:    'KRW Dashboard <onboarding@resend.dev>',
-          to:      [process.env.NOTIFY_EMAIL || 'kyler@leadbloom.co'],
-          subject,
-          html,
-        }),
-      });
-      const d = await res.json();
-      if (res.ok) { console.log('Email sent via Resend:', subject); return; }
-      console.error('Resend error:', JSON.stringify(d));
-    }
-
-    // Fallback: Gmail via nodemailer
-    if (process.env.GMAIL_USER && process.env.GMAIL_PASS) {
-      const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS },
-      });
-      await transporter.sendMail({
-        from:    `"KRW Dashboard" <${process.env.GMAIL_USER}>`,
-        to:      process.env.NOTIFY_EMAIL || 'kyler@leadbloom.co',
-        subject,
-        html,
-      });
-      console.log('Email sent via Gmail:', subject);
+    if (!process.env.RESEND_API_KEY) {
+      console.log('RESEND_API_KEY not set — skipping email notification');
       return;
     }
-
-    console.log('Email not configured - skipping notification');
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from:    'KRW Dashboard <onboarding@resend.dev>',
+        to:      [process.env.NOTIFY_EMAIL || 'kyler@leadbloom.co'],
+        subject,
+        html,
+      }),
+    });
+    const d = await res.json();
+    if (res.ok) { console.log('Email sent:', subject); return; }
+    console.error('Resend error:', JSON.stringify(d));
   } catch(err) {
     console.error('Email send failed:', err.message);
   }
