@@ -2377,34 +2377,52 @@ async function pollKALeadsSheet() {
         let matched = 0, unmatched = 0, skipped = 0;
 
         for (const row of rows) {
+          const isMVA = sheet.campaign === 'mva-nld2';
+
+          // MVA sheet: Date, First Name, Last Name, Phone, Status, Notes (no CID)
+          // Rideshare sheet: Date, CID, First Name, Last Name, Email, Intake Center Status, NLD Status, ...
           const cid = (row['CID'] || '').trim();
-          if (!cid) { skipped++; continue; }
 
-          const intakeStatus  = (row['Intake Center Status'] || '').trim() || null;
-          const nldStatus     = (row['NLD Status']           || '').trim() || null;
-          const notes         = (row['Notes']                || '').trim() || null;
-          const billableRaw   = (row['Billable']             || '').trim().toLowerCase();
-          const billable      = billableRaw === 'yes' ? true : billableRaw === 'no' ? false : null;
-          const notesUpdated  = (row['Date of Notes Updated'] || '').trim() || null;
+          // For MVA, use phone as lookup key; for Rideshare use CID
+          const phone = (row['Phone'] || '').replace(/\D/g, '').trim() || null;
 
-          // Determine overall lead status from sheet
-          // Accepted by Firm = forwarded/billable, Disqualified = rejected, else pending
+          if (isMVA && !phone) { skipped++; continue; }
+          if (!isMVA && !cid)  { skipped++; continue; }
+
+          // Status column differs by sheet
+          const nldStatus    = isMVA
+            ? (row['Status'] || '').trim() || null
+            : ((row['NLD Status'] || '').trim() || (row['Intake Center Status'] || '').trim() || null);
+          const intakeStatus = isMVA ? nldStatus : (row['Intake Center Status'] || '').trim() || null;
+          const notes        = (row['Notes'] || '').trim() || null;
+          const billableRaw  = (row['Billable'] || '').trim().toLowerCase();
+          const billable     = billableRaw === 'yes' ? true : billableRaw === 'no' ? false : null;
+          const notesUpdated = (row['Date of Notes Updated'] || '').trim() || null;
+
+          // Determine lead status
           let leadStatus = null;
           const nldLower = (nldStatus || '').toLowerCase();
-          if (nldLower.includes('accepted') || nldLower.includes('billable')) {
+          if (nldLower.includes('accepted') || nldLower.includes('billable') || nldLower === 'signed' || nldLower.startsWith('signed')) {
             leadStatus = 'forwarded';
           } else if (nldLower.includes('disqualified') || nldLower.includes('rejected')) {
             leadStatus = 'buyer_rejected';
           }
 
-          // Look up lead by CID (buyer_intake_id) — only touch correct campaign
-          const lookup = await client.query(
-            `SELECT id, status, buyer_status FROM leads
-             WHERE buyer_intake_id = $1
-               AND campaign = $2
-             LIMIT 1`,
-            [cid, sheet.campaign]
-          );
+          // Look up lead — by CID for Rideshare, by phone for MVA
+          let lookup;
+          if (isMVA) {
+            lookup = await client.query(
+              `SELECT id, status, buyer_status FROM leads
+               WHERE phone = $1 AND campaign = $2 LIMIT 1`,
+              [phone, sheet.campaign]
+            );
+          } else {
+            lookup = await client.query(
+              `SELECT id, status, buyer_status FROM leads
+               WHERE buyer_intake_id = $1 AND campaign = $2 LIMIT 1`,
+              [cid, sheet.campaign]
+            );
+          }
 
           if (!lookup.rows.length) {
             unmatched++;
