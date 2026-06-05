@@ -42,47 +42,46 @@ function requireLeadKey(req, res, next) {
 }
 
 // ── Email notifications ───────────────────────────────
-function getMailer() {
-  // Gmail takes priority if configured
-  if (process.env.GMAIL_USER && process.env.GMAIL_PASS) {
-    return nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_PASS,
-      },
-    });
-  }
-  // Fallback to SMTP (Outlook etc)
-  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-    return nodemailer.createTransport({
-      host:   process.env.SMTP_HOST || 'smtp.office365.com',
-      port:   parseInt(process.env.SMTP_PORT || '587'),
-      secure: false,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-      tls: { ciphers: 'SSLv3' },
-    });
-  }
-  return null;
-}
-
-const NOTIFY_FROM  = process.env.GMAIL_USER || process.env.SMTP_USER || 'waltersonkyle@gmail.com';
-const NOTIFY_TO    = process.env.NOTIFY_EMAIL || 'waltersonkyle@gmail.com';
-
+// Uses Resend API (no SMTP, works from Railway) with Gmail fallback via nodemailer
 async function sendEmailNotification(subject, html) {
   try {
-    const mailer = getMailer();
-    if (!mailer) { console.log('Email not configured - skipping notification'); return; }
-    await mailer.sendMail({
-      from:    `"KRW Dashboard" <${NOTIFY_FROM}>`,
-      to:      NOTIFY_TO,
-      subject,
-      html,
-    });
-    console.log('Email notification sent:', subject);
+    // Try Resend first if API key is set
+    if (process.env.RESEND_API_KEY) {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from:    'KRW Dashboard <onboarding@resend.dev>',
+          to:      [process.env.NOTIFY_EMAIL || 'waltersonkyle@gmail.com'],
+          subject,
+          html,
+        }),
+      });
+      const d = await res.json();
+      if (res.ok) { console.log('Email sent via Resend:', subject); return; }
+      console.error('Resend error:', JSON.stringify(d));
+    }
+
+    // Fallback: Gmail via nodemailer
+    if (process.env.GMAIL_USER && process.env.GMAIL_PASS) {
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS },
+      });
+      await transporter.sendMail({
+        from:    `"KRW Dashboard" <${process.env.GMAIL_USER}>`,
+        to:      process.env.NOTIFY_EMAIL || 'waltersonkyle@gmail.com',
+        subject,
+        html,
+      });
+      console.log('Email sent via Gmail:', subject);
+      return;
+    }
+
+    console.log('Email not configured - skipping notification');
   } catch(err) {
     console.error('Email send failed:', err.message);
   }
@@ -2431,17 +2430,27 @@ async function pollKALeadsSheet() {
             }
           });
 
-          await client.query(
-            `UPDATE leads SET
-               buyer_status = $1,
-               notes        = COALESCE($2, notes),
-               raw          = raw || $3::jsonb
-               ${leadStatus ? ', status = $4' : ''}
-             WHERE id = ${leadStatus ? '$5' : '$4'}`,
-            leadStatus
-              ? [nldStatus, notes, patch, leadStatus, lead.id]
-              : [nldStatus, notes, patch, lead.id]
-          );
+          // Use two separate clean queries to avoid parameter type confusion
+          if (leadStatus) {
+            await client.query(
+              `UPDATE leads SET
+                 buyer_status = $1,
+                 notes        = COALESCE($2, notes),
+                 raw          = raw || $3::jsonb,
+                 status       = $4
+               WHERE id = $5`,
+              [nldStatus, notes, patch, leadStatus, lead.id]
+            );
+          } else {
+            await client.query(
+              `UPDATE leads SET
+                 buyer_status = $1,
+                 notes        = COALESCE($2, notes),
+                 raw          = raw || $3::jsonb
+               WHERE id = $4`,
+              [nldStatus, notes, patch, lead.id]
+            );
+          }
 
           // Fire billable email if this lead just flipped to billable/signed
           const isNowBillable = (() => {
