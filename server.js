@@ -55,7 +55,7 @@ async function sendEmailNotification(subject, html) {
         },
         body: JSON.stringify({
           from:    'KRW Dashboard <onboarding@resend.dev>',
-          to:      [process.env.NOTIFY_EMAIL || 'waltersonkyle@gmail.com'],
+          to:      [process.env.NOTIFY_EMAIL || 'kyler@leadbloom.co'],
           subject,
           html,
         }),
@@ -73,7 +73,7 @@ async function sendEmailNotification(subject, html) {
       });
       await transporter.sendMail({
         from:    `"KRW Dashboard" <${process.env.GMAIL_USER}>`,
-        to:      process.env.NOTIFY_EMAIL || 'waltersonkyle@gmail.com',
+        to:      process.env.NOTIFY_EMAIL || 'kyler@leadbloom.co',
         subject,
         html,
       });
@@ -448,7 +448,7 @@ app.get('/test-email', requireKey, async (req, res) => {
     </div>`;
 
   await sendEmailNotification('✓ Billable Lead — Jane Smith | Rideshare | RIDESHARE-TB', html);
-  res.json({ ok: true, message: 'Test email sent to waltersonkyle@gmail.com' });
+  res.json({ ok: true, message: 'Test email sent to kyler@leadbloom.co' });
 });
 // ── End test email ────────────────────────────────────────────────────────────
 
