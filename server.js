@@ -5,8 +5,9 @@
 // ══════════════════════════════════════════════════════
 
 require('dotenv').config();
-const express = require('express');
-const { Pool } = require('pg');
+const express    = require('express');
+const nodemailer = require('nodemailer');
+const { Pool }   = require('pg');
 const path    = require('path');
 const fs      = require('fs');
 const app     = express();
