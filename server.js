@@ -2394,14 +2394,14 @@ async function pollKALeadsSheet() {
           let lookup;
           if (isMVA) {
             lookup = await client.query(
-              `SELECT id, status, buyer_status FROM leads
-               WHERE phone = $1 AND campaign = $2 LIMIT 1`,
+              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
+               FROM leads WHERE phone = $1 AND campaign = $2 LIMIT 1`,
               [phone, sheet.campaign]
             );
           } else {
             lookup = await client.query(
-              `SELECT id, status, buyer_status FROM leads
-               WHERE buyer_intake_id = $1 AND campaign = $2 LIMIT 1`,
+              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
+               FROM leads WHERE buyer_intake_id = $1 AND campaign = $2 LIMIT 1`,
               [cid, sheet.campaign]
             );
           }
@@ -2412,6 +2412,13 @@ async function pollKALeadsSheet() {
           }
 
           const lead = lookup.rows[0];
+
+          // Skip locked leads — sheet can never overwrite them
+          if (lead.locked === 'true' || lead.locked === true) {
+            skipped++;
+            console.log(`[KA Sheet Poll] 🔒 Skipping locked lead id=${lead.id}`);
+            continue;
+          }
           const wasAlreadyBillable = (() => {
             const prev = (lead.buyer_status || '').toLowerCase().trim();
             return prev === 'signed' || prev.startsWith('signed') ||
@@ -2438,7 +2445,8 @@ async function pollKALeadsSheet() {
                  notes        = COALESCE($2, notes),
                  raw          = raw || $3::jsonb,
                  status       = $4
-               WHERE id = $5`,
+               WHERE id = $5
+                 AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
               [nldStatus, notes, patch, leadStatus, lead.id]
             );
           } else {
@@ -2447,7 +2455,8 @@ async function pollKALeadsSheet() {
                  buyer_status = $1,
                  notes        = COALESCE($2, notes),
                  raw          = raw || $3::jsonb
-               WHERE id = $4`,
+               WHERE id = $4
+                 AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
               [nldStatus, notes, patch, lead.id]
             );
           }
