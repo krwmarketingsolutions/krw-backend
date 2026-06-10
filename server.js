@@ -2549,6 +2549,235 @@ setTimeout(() => {
 }, 15000);
 // ─── END KEVIN ANTHONY LEADS SHEET POLLER ────────────────────────────────────
 
+// ─── LAIRD LEADS SHEET POLLER ─────────────────────────────────────────────────
+// Polls two Google Sheet tabs every hour (Roblox + Rideshare).
+// Sheet: 1pT525lw2u2ziFBZwmQnYk02ykEhhFjBp6TIDYhOzx5U
+// Flexible column mapping — adapts to whatever columns exist in the sheet.
+// Only touches leads with campaign IN ('roblox-mt', 'rideshare-tb')
+// AND publisher_sub IN ('KRW-LAIRD-2026-X23', 'KRW-LAIRD-2026-JEM').
+// SSDI, FE, and Kevin Anthony leads are NEVER touched.
+
+const LAIRD_SHEET_ID = '1pT525lw2u2ziFBZwmQnYk02ykEhhFjBp6TIDYhOzx5U';
+
+const LAIRD_SHEETS = [
+  {
+    name:     'Roblox',
+    campaign: 'roblox-mt',
+    pub_ids:  ['KRW-LAIRD-2026-X23'],
+    url:      `https://docs.google.com/spreadsheets/d/${LAIRD_SHEET_ID}/export?format=csv&gid=0`,
+  },
+  {
+    name:     'Rideshare',
+    campaign: 'rideshare-tb',
+    pub_ids:  ['KRW-LAIRD-2026-JEM'],
+    url:      `https://docs.google.com/spreadsheets/d/${LAIRD_SHEET_ID}/export?format=csv&gid=1706703348`,
+  },
+];
+
+const LAIRD_POLL_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
+// Flexible column finder — tries multiple common header variations
+function findCol(row, ...candidates) {
+  for (const c of candidates) {
+    const key = Object.keys(row).find(k => k.trim().toLowerCase() === c.toLowerCase());
+    if (key && row[key] && row[key].trim()) return row[key].trim();
+  }
+  return null;
+}
+
+async function pollLairdLeadsSheet() {
+  for (const sheet of LAIRD_SHEETS) {
+    try {
+      const csv  = await fetchKASheetCSV(sheet.url); // reuse existing CSV fetcher
+      const rows = parseKASheetCSV(csv);              // reuse existing CSV parser
+
+      if (!rows.length) {
+        console.log(`[Laird Sheet Poll] ${sheet.name}: empty sheet`);
+        continue;
+      }
+
+      // Skip if sheet only has a single header-like row with no data
+      const dataRows = rows.filter(r => Object.values(r).some(v => v && v.trim() && v.trim().toUpperCase() !== 'JUNE'));
+      if (!dataRows.length) {
+        console.log(`[Laird Sheet Poll] ${sheet.name}: no data rows yet`);
+        continue;
+      }
+
+      const client = await pool.connect();
+      try {
+        let matched = 0, unmatched = 0, skipped = 0;
+
+        for (const row of dataRows) {
+          // Flexible field extraction
+          const firstName   = findCol(row, 'first name', 'firstname', 'first');
+          const lastName    = findCol(row, 'last name', 'lastname', 'last');
+          const phone       = (findCol(row, 'phone', 'phone number', 'cell', 'cell phone') || '').replace(/\D/g, '') || null;
+          const state       = findCol(row, 'state', 'st') || null;
+          const status      = findCol(row, 'status', 'nld status', 'intake status', 'disposition') || null;
+          const notes       = findCol(row, 'notes', 'note', 'comments') || null;
+          const cid         = findCol(row, 'cid', 'id', 'lead id', 'leadid') || null;
+          const billableRaw = (findCol(row, 'billable', 'billed') || '').toLowerCase();
+          const billable    = billableRaw === 'yes' ? true : billableRaw === 'no' ? false : null;
+
+          // Skip rows with no identifying info
+          if (!phone && !cid && !firstName) { skipped++; continue; }
+
+          // Determine lead status
+          const statusLow = (status || '').toLowerCase();
+          let leadStatus = null;
+          if (statusLow.includes('accepted') || statusLow.includes('billable') || statusLow === 'signed' || statusLow.startsWith('signed')) {
+            leadStatus = 'forwarded';
+          } else if (statusLow.includes('disqualified') || statusLow.includes('rejected')) {
+            leadStatus = 'buyer_rejected';
+          }
+
+          // Look up lead — by CID first, then phone, scoped to Laird's pub_ids
+          let lookup;
+          if (cid) {
+            lookup = await client.query(
+              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
+               FROM leads WHERE buyer_intake_id = $1
+                 AND campaign = $2
+                 AND publisher_sub = ANY($3)
+               LIMIT 1`,
+              [cid, sheet.campaign, sheet.pub_ids]
+            );
+          } else if (phone) {
+            lookup = await client.query(
+              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
+               FROM leads WHERE phone = $1
+                 AND campaign = $2
+                 AND publisher_sub = ANY($3)
+               LIMIT 1`,
+              [phone, sheet.campaign, sheet.pub_ids]
+            );
+          } else {
+            unmatched++; continue;
+          }
+
+          if (!lookup.rows.length) { unmatched++; continue; }
+
+          const lead = lookup.rows[0];
+
+          // Respect billable lock
+          if (lead.locked === 'true' || lead.locked === true) {
+            skipped++;
+            continue;
+          }
+
+          const patch = JSON.stringify({
+            laird_sheet_sync: {
+              status:    status,
+              billable:  billable,
+              notes:     notes,
+              source:    'laird_sheet_poll',
+              synced_at: new Date().toISOString(),
+            }
+          });
+
+          // Check if newly billable for email notification
+          const wasAlreadyBillable = (() => {
+            const prev = (lead.buyer_status || '').toLowerCase().trim();
+            return prev === 'signed' || prev.startsWith('signed') ||
+                   prev.includes('accepted') || prev.includes('billable');
+          })();
+
+          if (leadStatus) {
+            await client.query(
+              `UPDATE leads SET
+                 buyer_status = $1, notes = COALESCE($2, notes),
+                 raw = raw || $3::jsonb, status = $4
+               WHERE id = $5
+                 AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
+              [status, notes, patch, leadStatus, lead.id]
+            );
+          } else {
+            await client.query(
+              `UPDATE leads SET
+                 buyer_status = $1, notes = COALESCE($2, notes),
+                 raw = raw || $3::jsonb
+               WHERE id = $4
+                 AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
+              [status, notes, patch, lead.id]
+            );
+          }
+
+          // Fire billable email if newly flipped
+          const isNowBillable = (() => {
+            const cur = (status || '').toLowerCase().trim();
+            return cur === 'signed' || cur.startsWith('signed') ||
+                   cur.includes('accepted') || cur.includes('billable');
+          })();
+
+          if (isNowBillable && !wasAlreadyBillable) {
+            const name     = [firstName, lastName].filter(Boolean).join(' ') || 'Unknown';
+            const campaign = sheet.campaign.toUpperCase();
+            const vertical = sheet.name;
+            const dateStr  = new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+
+            const emailHtml = `
+              <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;background:#f4f6fb;padding:32px 20px">
+                <div style="background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08)">
+                  <div style="background:#0f1c3f;padding:24px 28px">
+                    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.5);margin-bottom:6px">KRW Marketing Solutions</div>
+                    <div style="font-size:22px;font-weight:700;color:#fff">✓ Billable Lead</div>
+                    <div style="font-size:13px;color:rgba(255,255,255,.6);margin-top:4px">${dateStr}</div>
+                  </div>
+                  <div style="padding:28px">
+                    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px 20px;margin-bottom:20px">
+                      <div style="font-size:18px;font-weight:700;color:#15803d;margin-bottom:4px">${name}</div>
+                      <div style="font-size:13px;color:#166534">Marked billable — ${status}</div>
+                    </div>
+                    <table style="width:100%;border-collapse:collapse;font-size:13px">
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;width:38%">Publisher</td>
+                        <td style="padding:10px 0;font-weight:600;color:#0f1c3f">Laird</td>
+                      </tr>
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Campaign</td>
+                        <td style="padding:10px 0;font-weight:600;color:#0f1c3f">${campaign} — ${vertical}</td>
+                      </tr>
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Phone</td>
+                        <td style="padding:10px 0;color:#475569">${phone || '—'}</td>
+                      </tr>
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">State</td>
+                        <td style="padding:10px 0;color:#475569">${state || '—'}</td>
+                      </tr>
+                      ${notes ? `<tr><td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;vertical-align:top">Notes</td><td style="padding:10px 0;color:#475569;line-height:1.5">${notes}</td></tr>` : ''}
+                    </table>
+                  </div>
+                  <div style="padding:16px 28px;background:#f9fafb;border-top:1px solid #f1f5f9;font-size:11px;color:#9ca3af;text-align:center">KRW Marketing Solutions · Lead Notification System</div>
+                </div>
+              </div>`;
+
+            await sendEmailNotification(
+              `✓ Billable Lead — ${name} | ${vertical} | ${campaign} | Laird`,
+              emailHtml
+            );
+          }
+
+          matched++;
+        }
+
+        console.log(`[Laird Sheet Poll] ${sheet.name}: ${matched} matched, ${unmatched} unmatched, ${skipped} skipped`);
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      console.error(`[Laird Sheet Poll] ${sheet.name} error:`, err.message);
+    }
+  }
+}
+
+// Start polling 30 seconds after boot (offset from KA poller), then every hour
+setTimeout(() => {
+  pollLairdLeadsSheet();
+  setInterval(pollLairdLeadsSheet, LAIRD_POLL_INTERVAL_MS);
+}, 30000);
+// ─── END LAIRD LEADS SHEET POLLER ────────────────────────────────────────────
+
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
       console.log(`API_KEY set: ${!!process.env.API_KEY}`);
