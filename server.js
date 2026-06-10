@@ -825,8 +825,63 @@ app.post('/publishers/login', async (req, res) => {
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
-// Get calls for a publisher
-app.get('/publishers/:pub_id/calls', async (req, res) => {
+// ── Publisher portal config — returns all campaigns grouped by portal_id ──────
+app.post('/publishers/portal-config', async (req, res) => {
+  const { portal_id } = req.body || {};
+  if (!portal_id) return res.status(400).json({ ok: false, error: 'portal_id required' });
+  try {
+    // Get all publisher records for this portal_id
+    const pubs = await pool.query(
+      `SELECT pub_id, name, campaign, company, portal_id
+       FROM publishers
+       WHERE portal_id = $1 AND active = true`,
+      [portal_id]
+    );
+    if (!pubs.rows.length) return res.status(401).json({ ok: false, error: 'Portal ID not found' });
+
+    // Build unique campaign list with display names
+    const campaignMap = {
+      'mva-nld2':    { label: 'MVA — Motor Vehicle Accident', color: 'blue' },
+      'rideshare-tb':{ label: 'Rideshare — Uber & Lyft',      color: 'green' },
+      'roblox-mt':   { label: 'Roblox Mass Tort',             color: 'blue' },
+      'roundup':     { label: 'Roundup Mass Tort',            color: 'green' },
+      'roundup-lt':  { label: 'Roundup LT',                   color: 'green' },
+      'ssdi':        { label: 'SSDI',                         color: 'blue' },
+      'depo':        { label: 'Depo-Provera',                 color: 'green' },
+    };
+
+    // Collect unique campaigns across all pub records for this portal
+    const seen = new Set();
+    const campaigns = [];
+    const pubIds = [];
+
+    for (const pub of pubs.rows) {
+      if (pub.pub_id && !pubIds.includes(pub.pub_id)) pubIds.push(pub.pub_id);
+      if (pub.campaign && !seen.has(pub.campaign)) {
+        seen.add(pub.campaign);
+        campaigns.push({
+          slug:  pub.campaign,
+          label: (campaignMap[pub.campaign] || {}).label || pub.campaign.toUpperCase(),
+          color: (campaignMap[pub.campaign] || {}).color || 'blue',
+        });
+      }
+    }
+
+    // Use the first record's name as display name
+    const displayName = pubs.rows.find(p => p.name && !p.name.toLowerCase().includes('roblox') && !p.name.toLowerCase().includes('rideshare'))?.name
+      || pubs.rows[0].name;
+
+    res.json({
+      ok:        true,
+      portal_id,
+      name:      displayName,
+      pub_ids:   pubIds,
+      campaigns,
+    });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+app.get('/publishers/:pub_id/calls', requireKey, async (req, res) => {
   const { pub_id } = req.params;
   const { days = 30, billable_only } = req.query;
   try {
