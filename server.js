@@ -1976,16 +1976,225 @@ app.post('/leads/roblox', async (req, res) => {
 // ─── END ROBLOX MASS TORT ────────────────────────────────────────────────────
 
 
-// ─── MVA NLD2 — LEAD PROSPER FORWARDING ─────────────────────────────────────
+// ─── MVA — EMAIL AGENCY ROUTING ──────────────────────────────────────────────
+// Priority states go to Email Agency first.
+// All other states fall through to mva-nld2 (NLD) as fallback.
+// Campaign: mva-email-agency | Buyer: Email Agency (LawLogic)
+// Publisher: Kevin Anthony (KRW-KANTHONY-RS)
+
+const EMAIL_AGENCY_URL  = 'https://docs.emailagency.com/api/add-lead?json=1';
+const EMAIL_AGENCY_KEY  = 'e37b1b02-65cf-11f1-b481-fa163eff53f0';
+const EMAIL_AGENCY_CODE = 'MVALEADS';
+
+// 13 priority states for Email Agency
+const EMAIL_AGENCY_STATES = ['AZ','CO','IL','IN','MS','NM','NV','NY','OR','TN','UT','WA','WI'];
+
+app.post('/leads/mva-email-agency', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Required fields
+  const missing = [];
+  if (!b.first_name)     missing.push('first_name');
+  if (!b.last_name)      missing.push('last_name');
+  if (!b.phone)          missing.push('phone');
+  if (!b.email)          missing.push('email');
+  if (!b.state)          missing.push('state');
+  if (!b.incident_date)  missing.push('incident_date');
+  if (!b.have_attorney)  missing.push('have_attorney');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  const publisherSub = b.publisher_sub || null;
+  const stateUpper   = (b.state || '').toUpperCase().trim();
+  const isEmailAgencyState = EMAIL_AGENCY_STATES.includes(stateUpper);
+
+  // DB insert
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          state, zip, publisher_sub, ip_address, status, raw, received_at)
+       VALUES ('mva-email-agency','MVA',$1,$2,$3,$4,$5,$6,$7,$8,'pending',$9::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email,
+       stateUpper, b.zip || null,
+       publisherSub, b.ip_address || null,
+       JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[MVA Email Agency] DB insert error:', dbErr.message);
+  } finally {
+    client.release();
+  }
+
+  // Route based on state
+  if (!isEmailAgencyState) {
+    // State not in Email Agency priority list — hold for new buyer
+    const c2 = await pool.connect();
+    try {
+      await c2.query(
+        "UPDATE leads SET status='received', buyer_error='State not in Email Agency coverage — awaiting new buyer' WHERE id=$1",
+        [leadId]
+      );
+    } finally { c2.release(); }
+
+    console.log(`[MVA Email Agency] ⏸ ${b.first_name} ${b.last_name} | State: ${stateUpper} — not in priority list, held for new buyer`);
+    return res.json({
+      ok:      false,
+      result:  'held',
+      message: 'State not in current buyer coverage — lead saved and held for routing',
+      krw_id:  leadId,
+    });
+  }
+
+  // Forward to Email Agency
+  try {
+    const payload = {
+      key:                   EMAIL_AGENCY_KEY,
+      code:                  EMAIL_AGENCY_CODE,
+      first_name:            b.first_name,
+      last_name:             b.last_name,
+      phone:                 b.phone,
+      email:                 b.email,
+      state:                 stateUpper,
+      zip:                   b.zip                 || null,
+      address:               b.address             || null,
+      city:                  b.city                || null,
+      dob:                   b.dob                 || null,
+      ip_address:            b.ip_address          || null,
+      user_agent:            b.user_agent          || null,
+      attorney:              b.have_attorney       || null,
+      date_of_incident:      b.incident_date       || null,
+      accident_fault:        b.at_fault            || null,
+      settlement:            b.settlement          || null,
+      cited:                 b.cited               || null,
+      received_treatment:    b.doctor_treatment    || null,
+      has_injuries:          b.physical_injury     || null,
+      jornaya_id:            b.jornaya_leadid      || null,
+      trusted_form_cert_url: b.trustedform_cert_url|| null,
+      sub_id2:               publisherSub          || null,
+      channel:               b.channel             || 'Facebook',
+      language:              b.language            || 'English',
+      // Additional fields if provided
+      mva_injury:            b.mva_injury          || null,
+      mva_type:              b.mva_type            || null,
+      mva_treatment:         b.mva_treatment       || null,
+      police_report:         b.police_report       || null,
+      accident_state:        stateUpper,
+      accident_location:     b.accident_location   || null,
+      lost_wages:            b.lost_wages          || null,
+      accident_type:         b.accident_type       || null,
+      driver_or_passenger:   b.driver_or_passenger || null,
+      other_party_at_fault:  b.other_party_at_fault|| null,
+    };
+
+    // Strip null values — don't send empty fields to Email Agency
+    Object.keys(payload).forEach(k => { if (payload[k] === null || payload[k] === undefined) delete payload[k]; });
+
+    const https   = require('https');
+    const postData = JSON.stringify(payload);
+    const url      = new URL(EMAIL_AGENCY_URL);
+
+    const eaRes = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: url.hostname,
+        path:     url.pathname + url.search,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/json',
+          'Content-Length': Buffer.byteLength(postData),
+        }
+      };
+      const r2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: data }));
+      });
+      r2.on('error', reject);
+      r2.write(postData);
+      r2.end();
+    });
+
+    let eaResult = {};
+    try { eaResult = JSON.parse(eaRes.body); } catch(e) { eaResult = { status: false, message: eaRes.body }; }
+
+    const accepted = eaResult.status === true;
+
+    // Update DB
+    const c3 = await pool.connect();
+    try {
+      await c3.query(
+        `UPDATE leads SET
+           status          = $1,
+           buyer_intake_id = $2,
+           buyer_response  = $3::jsonb,
+           buyer_error     = $4
+         WHERE id = $5`,
+        [
+          accepted ? 'forwarded' : 'buyer_rejected',
+          eaResult.lead_id || null,
+          JSON.stringify(eaResult),
+          accepted ? null : eaResult.message,
+          leadId
+        ]
+      );
+    } finally { c3.release(); }
+
+    console.log(`[MVA Email Agency] ${accepted ? '✅' : '❌'} ${b.first_name} ${b.last_name} | ${stateUpper} → ${eaResult.message} | Lead ID: ${eaResult.lead_id || 'none'}`);
+
+    return res.json({
+      ok:      accepted,
+      result:  accepted ? 'success' : 'failed',
+      lead_id: eaResult.lead_id || null,
+      message: eaResult.message,
+      krw_id:  leadId,
+    });
+
+  } catch(fwdErr) {
+    console.error('[MVA Email Agency] Forward error:', fwdErr.message);
+    const c4 = await pool.connect();
+    try {
+      await c4.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2", [fwdErr.message, leadId]);
+    } finally { c4.release(); }
+    return res.status(502).json({ ok: false, error: 'Failed to forward to Email Agency', detail: fwdErr.message });
+  }
+});
+// ─── END MVA EMAIL AGENCY ─────────────────────────────────────────────────────
+
+// ─── MVA NLD2 — EMAIL AGENCY + LEAD PROSPER ROUTING ─────────────────────────
 // Receives MVA CPA leads from publishers, validates required fields,
-// and forwards to Lead Prosper / Nex Level Direct endpoint.
-// Campaign: mva-nld2 | Buyer: Nex Level Direct
-// Completely separate from SSDI and FE verticals.
+// and routes based on state:
+//   Email Agency priority states → Email Agency (LawLogic)
+//   All other states             → held (no fallback buyer yet)
+// Campaign: mva-nld2
+// SSDI and FE verticals are NEVER touched here.
 
 const LP_MVA_URL         = 'https://api.leadprosper.io/direct_post';
 const LP_MVA_CAMPAIGN_ID = '31080';
 const LP_MVA_SUPPLIER_ID = '110928';
 const LP_MVA_KEY         = 'ke21sx0koi7dld';
+
+// Email Agency (LawLogic) credentials
+const EA_MVA_URL  = 'https://docs.emailagency.com/api/add-lead?json=1';
+const EA_MVA_KEY  = 'e37b1b02-65cf-11f1-b481-fa163eff53f0';
+const EA_MVA_CODE = 'MVALEADS';
+
+// Email Agency priority states
+const EA_MVA_STATES = ['AZ','CO','IL','IN','MS','NM','NV','NY','OR','TN','UT','WA','WI'];
 
 app.post('/leads/mva-nld2', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
@@ -2021,33 +2230,9 @@ app.post('/leads/mva-nld2', async (req, res) => {
   // Publisher sub tracking
   const publisherSub = b.publisher_sub || b.lp_subid1 || null;
 
-  // Build Lead Prosper payload
-  const payload = {
-    lp_campaign_id: LP_MVA_CAMPAIGN_ID,
-    lp_supplier_id: LP_MVA_SUPPLIER_ID,
-    lp_key:         LP_MVA_KEY,
-    lp_action:      b.lp_action || '',
-    lp_subid1:      publisherSub || '',
-    lp_subid2:      b.lp_subid2 || '',
-    first_name:     b.first_name,
-    last_name:      b.last_name,
-    email:          b.email,
-    phone:          b.phone,
-    incident_state: b.incident_state,
-    incident_date:  b.incident_date,
-    have_attorney:  b.have_attorney,
-    at_fault:       b.at_fault,
-    settlement:     b.settlement,
-    cited:          b.cited,
-    doctor_treatment: b.doctor_treatment,
-    physical_injury:  b.physical_injury,
-  };
-
-  // Optional fields
-  const optFields = ['date_of_birth','gender','address','city','state','zip_code',
-    'ip_address','user_agent','landing_page_url','jornaya_leadid',
-    'trustedform_cert_url','tcpa_text'];
-  optFields.forEach(f => { if (b[f]) payload[f] = b[f]; });
+  // Determine routing based on state
+  const leadState   = (b.incident_state || b.state || '').toUpperCase().trim();
+  const useEmailAgency = EA_MVA_STATES.includes(leadState);
 
   // Log the lead attempt
   const client = await pool.connect();
@@ -2056,101 +2241,150 @@ app.post('/leads/mva-nld2', async (req, res) => {
     const insert = await client.query(
       `INSERT INTO leads
          (campaign, vertical, first_name, last_name, phone, email,
-          publisher_sub, ip_address, status, raw, received_at)
-       VALUES ('mva-nld2','MVA',$1,$2,$3,$4,$5,$6,'pending',$7::jsonb,NOW())
+          publisher_sub, ip_address, state, status, raw, received_at)
+       VALUES ('mva-nld2','MVA',$1,$2,$3,$4,$5,$6,$7,'pending',$8::jsonb,NOW())
        RETURNING id`,
       [b.first_name, b.last_name, b.phone, b.email,
-       publisherSub, b.ip_address || null,
+       publisherSub, b.ip_address || null, leadState || null,
        JSON.stringify(b)]
     );
     leadId = insert.rows[0].id;
   } catch(dbErr) {
-    console.error('[MVA NLD2] DB insert error:', dbErr.message);
+    console.error('[MVA] DB insert error:', dbErr.message);
   } finally {
     client.release();
   }
 
-  // Forward to Lead Prosper
-  try {
-    const https = require('https');
-    const postData = JSON.stringify(payload);
-
-    const lpRes = await new Promise((resolve, reject) => {
-      const url = new URL(LP_MVA_URL);
-      const options = {
-        hostname: url.hostname,
-        path:     url.pathname,
-        method:   'POST',
-        headers:  {
-          'Content-Type':   'application/json',
-          'Content-Length': Buffer.byteLength(postData),
-        }
+  // ── Route to Email Agency (priority states) ───────────────────────────────
+  if (useEmailAgency) {
+    try {
+      const eaPayload = {
+        key:          EA_MVA_KEY,
+        code:         EA_MVA_CODE,
+        first_name:   b.first_name,
+        last_name:    b.last_name,
+        phone:        b.phone,
+        email:        b.email,
+        state:        leadState,
+        zip:          b.zip_code || b.zip || null,
+        address:      b.address  || null,
+        city:         b.city     || null,
+        ip_address:   b.ip_address || null,
+        user_agent:   b.user_agent || null,
+        attorney:     b.have_attorney || null,
+        date_of_incident: b.incident_date || null,
+        accident_fault:   b.at_fault     || null,
+        settlement:       b.settlement   || null,
+        cited:            b.cited        || null,
+        received_treatment: b.doctor_treatment || null,
+        has_injuries:       b.physical_injury  || null,
+        jornaya_id:         b.jornaya_leadid   || b.jornaya_lead_id || null,
+        trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url || null,
+        sub_id2:      publisherSub || null,
+        channel:      'Facebook',
       };
-      const req2 = https.request(options, (r) => {
-        let data = '';
-        r.on('data', chunk => data += chunk);
-        r.on('end', () => resolve({ status: r.statusCode, body: data }));
+
+      // Remove null fields
+      Object.keys(eaPayload).forEach(k => { if (eaPayload[k] === null) delete eaPayload[k]; });
+
+      const https = require('https');
+      const postData = JSON.stringify(eaPayload);
+      const url = new URL(EA_MVA_URL);
+
+      const eaRes = await new Promise((resolve, reject) => {
+        const options = {
+          hostname: url.hostname,
+          path:     url.pathname + url.search,
+          method:   'POST',
+          headers:  {
+            'Content-Type':   'application/json',
+            'Content-Length': Buffer.byteLength(postData),
+          }
+        };
+        const r2 = https.request(options, (r) => {
+          let data = '';
+          r.on('data', chunk => data += chunk);
+          r.on('end', () => resolve({ status: r.statusCode, body: data }));
+        });
+        r2.on('error', reject);
+        r2.write(postData);
+        r2.end();
       });
-      req2.on('error', reject);
-      req2.write(postData);
-      req2.end();
-    });
 
-    let lpResult = {};
-    try { lpResult = JSON.parse(lpRes.body); } catch(e) {
-      lpResult = { status: 'ERROR', message: lpRes.body };
+      let eaResult = {};
+      try { eaResult = JSON.parse(eaRes.body); } catch(e) {
+        eaResult = { status: false, message: eaRes.body };
+      }
+
+      const accepted  = eaResult.status === true;
+      const duplicate = (eaResult.message || '').toLowerCase().includes('duplicate');
+
+      if (leadId) {
+        const c2 = await pool.connect();
+        try {
+          await c2.query(
+            `UPDATE leads SET
+               status          = $1,
+               buyer_intake_id = $2,
+               buyer_response  = $3::jsonb,
+               buyer_status    = $4,
+               revenue         = 0
+             WHERE id = $5`,
+            [
+              accepted ? 'forwarded' : duplicate ? 'duplicate' : 'buyer_rejected',
+              eaResult.lead_id || null,
+              JSON.stringify(eaResult),
+              accepted ? 'Accepted' : duplicate ? 'Duplicate' : 'Rejected',
+              leadId
+            ]
+          );
+        } finally { c2.release(); }
+      }
+
+      console.log(`[MVA→EA] ${accepted ? '✅' : duplicate ? '🔁' : '❌'} ${b.first_name} ${b.last_name} | ${leadState} | ${eaResult.message || 'no msg'} | ID: ${eaResult.lead_id || 'none'}`);
+
+      return res.json({
+        ok:      accepted,
+        result:  accepted ? 'success' : duplicate ? 'duplicate' : 'rejected',
+        lead_id: eaResult.lead_id || null,
+        message: eaResult.message || null,
+        buyer:   'Email Agency',
+        krw_id:  leadId
+      });
+
+    } catch(fwdErr) {
+      console.error('[MVA→EA] Forward error:', fwdErr.message);
+      if (leadId) {
+        const c3 = await pool.connect();
+        try {
+          await c3.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
+            [fwdErr.message, leadId]);
+        } finally { c3.release(); }
+      }
+      return res.status(502).json({ ok: false, error: 'Failed to forward to Email Agency', detail: fwdErr.message });
     }
-
-    const accepted = lpResult.status === 'ACCEPTED';
-    const duplicate = lpResult.status === 'DUPLICATED';
-
-    // Update lead status in DB
-    if (leadId) {
-      const c2 = await pool.connect();
-      try {
-        await c2.query(
-          `UPDATE leads SET
-             status          = $1,
-             buyer_intake_id = $2,
-             buyer_response  = $3::jsonb,
-             revenue         = 0
-           WHERE id = $4`,
-          [
-            accepted ? 'forwarded' : duplicate ? 'duplicate' : 'buyer_rejected',
-            lpResult.lead_id || null,
-            JSON.stringify(lpResult),
-            leadId
-          ]
-        );
-      } finally { c2.release(); }
-    }
-
-    console.log(`[MVA NLD2] ${accepted ? '✅' : duplicate ? '🔁' : '❌'} ${b.first_name} ${b.last_name} → ${lpResult.status} | ${lpResult.lead_id || 'no id'}`);
-
-    return res.json({
-      ok:      accepted,
-      status:  lpResult.status,
-      lead_id: lpResult.lead_id || null,
-      message: accepted ? 'Lead accepted' : duplicate ? 'Duplicate lead' : 'Lead rejected',
-      code:    lpResult.code || null,
-      krw_id:  leadId
-    });
-
-  } catch (fwdErr) {
-    console.error('[MVA NLD2] Forward error:', fwdErr.message);
-
-    if (leadId) {
-      const c3 = await pool.connect();
-      try {
-        await c3.query(
-          "UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
-          [fwdErr.message, leadId]
-        );
-      } finally { c3.release(); }
-    }
-
-    return res.status(502).json({ ok: false, error: 'Failed to forward to buyer', detail: fwdErr.message });
   }
+
+  // ── Non-Email Agency states — hold until fallback buyer is ready ──────────
+  if (leadId) {
+    const c4 = await pool.connect();
+    try {
+      await c4.query(
+        "UPDATE leads SET status='received', buyer_error='No buyer configured for state: '+$1 WHERE id=$2",
+        [leadState, leadId]
+      );
+    } finally { c4.release(); }
+  }
+
+  console.log(`[MVA] ⏸ ${b.first_name} ${b.last_name} | ${leadState} — no buyer for this state yet`);
+
+  return res.json({
+    ok:      false,
+    result:  'held',
+    message: `No buyer configured for state: ${leadState}. Lead saved — will route once buyer is set up.`,
+    krw_id:  leadId
+  });
+
 });
 // ─── END MVA NLD2 ────────────────────────────────────────────────────────────
 
