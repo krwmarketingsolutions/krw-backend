@@ -2208,20 +2208,18 @@ app.post('/leads/mva-nld2', async (req, res) => {
 
   const b = req.body || {};
 
-  // Validate required fields
+  // Validate required fields — per Email Agency spec
   const missing = [];
-  if (!b.first_name)     missing.push('first_name');
-  if (!b.last_name)      missing.push('last_name');
-  if (!b.email)          missing.push('email');
-  if (!b.phone)          missing.push('phone');
-  if (!b.incident_state) missing.push('incident_state');
-  if (!b.incident_date)  missing.push('incident_date');
-  if (!b.have_attorney)  missing.push('have_attorney');
-  if (!b.at_fault)       missing.push('at_fault');
-  if (!b.settlement)     missing.push('settlement');
-  if (!b.cited)          missing.push('cited');
-  if (!b.doctor_treatment) missing.push('doctor_treatment');
-  if (!b.physical_injury)  missing.push('physical_injury');
+  if (!b.first_name)           missing.push('first_name');
+  if (!b.last_name)            missing.push('last_name');
+  if (!b.phone)                missing.push('phone');
+  if (!b.email)                missing.push('email');
+  if (!b.ip_address)           missing.push('ip_address');
+  if (!b.have_attorney)        missing.push('have_attorney');
+  if (!b.at_fault)             missing.push('at_fault');
+  if (!b.channel)              missing.push('channel');
+  if (!b.trustedform_cert_url && !b.trusted_form_cert_url) missing.push('trustedform_cert_url');
+  if (!b.publisher_sub)        missing.push('publisher_sub');
 
   if (missing.length) {
     return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
@@ -2265,27 +2263,21 @@ app.post('/leads/mva-nld2', async (req, res) => {
         last_name:    b.last_name,
         phone:        b.phone,
         email:        b.email,
-        state:        leadState,
-        zip:          b.zip_code || b.zip || null,
-        address:      b.address  || null,
-        city:         b.city     || null,
-        ip_address:   b.ip_address || null,
-        user_agent:   b.user_agent || null,
-        attorney:     b.have_attorney || null,
-        date_of_incident: b.incident_date || null,
-        accident_fault:   b.at_fault     || null,
-        settlement:       b.settlement   || null,
-        cited:            b.cited        || null,
-        received_treatment: b.doctor_treatment || null,
-        has_injuries:       b.physical_injury  || null,
-        jornaya_id:         b.jornaya_leadid   || b.jornaya_lead_id || null,
-        trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url || null,
-        sub_id2:      publisherSub || null,
-        channel:      'Facebook',
+        ip_address:   b.ip_address,
+        attorney:     b.have_attorney,
+        accident_fault: b.at_fault,
+        channel:      b.channel,
+        trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url,
+        sub_id2:      b.publisher_sub,
       };
 
-      // Remove null fields
-      Object.keys(eaPayload).forEach(k => { if (eaPayload[k] === null) delete eaPayload[k]; });
+      // Optional fields if available
+      if (b.address)       eaPayload.address = b.address;
+      if (b.city)          eaPayload.city    = b.city;
+      if (b.state || b.incident_state) eaPayload.state = b.state || b.incident_state;
+      if (b.zip_code || b.zip) eaPayload.zip = b.zip_code || b.zip;
+      if (b.date_of_birth) eaPayload.dob     = b.date_of_birth;
+      if (b.user_agent)    eaPayload.user_agent = b.user_agent;
 
       const https = require('https');
       const postData = JSON.stringify(eaPayload);
@@ -2627,24 +2619,20 @@ app.get('/debug-trueblue', requireKey, async (req, res) => {
 app.get('/debug-emailagency', requireKey, async (req, res) => {
   try {
     const testPayload = {
-      key:              EA_MVA_KEY,
-      code:             EA_MVA_CODE,
-      first_name:       'Test',
-      last_name:        'Lead',
-      phone:            '3105550123',
-      email:            'test@test.com',
-      state:            'AZ',
-      zip:              '85001',
-      ip_address:       '72.21.198.66',
-      attorney:         'No',
-      date_of_incident: '01/01/2025',
-      accident_fault:   'No',
-      settlement:       'No',
-      cited:            'No',
-      received_treatment: 'Yes',
-      has_injuries:       'Yes',
-      sub_id2:          'KRW-KANTHONY-RS',
-      channel:          'Facebook',
+      key:          EA_MVA_KEY,
+      code:         EA_MVA_CODE,
+      first_name:   'Test',
+      last_name:    'Lead',
+      phone:        '3105550123',
+      email:        'test@test.com',
+      ip_address:   '72.21.198.66',
+      attorney:     'No',
+      accident_fault: 'No',
+      channel:      'Facebook',
+      trusted_form_cert_url: 'https://cert.trustedform.com/test123',
+      sub_id2:      'KRW-KANTHONY-RS',
+      state:        'AZ',
+      zip:          '85001',
     };
 
     const https    = require('https');
