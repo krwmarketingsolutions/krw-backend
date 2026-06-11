@@ -2500,11 +2500,12 @@ app.post('/leads/rideshare-tb', async (req, res) => {
     const insert = await client.query(
       `INSERT INTO leads
          (campaign, vertical, first_name, last_name, phone, email,
-          publisher_sub, ip_address, status, raw, received_at)
-       VALUES ('rideshare-tb','Mass Tort - Rideshare',$1,$2,$3,$4,$5,$6,'pending',$7::jsonb,NOW())
+          publisher_sub, ip_address, zip, state, status, raw, received_at)
+       VALUES ('rideshare-tb','Mass Tort - Rideshare',$1,$2,$3,$4,$5,$6,$7,$8,'pending',$9::jsonb,NOW())
        RETURNING id`,
       [b.first_name, b.last_name, b.phone_home, b.email_address,
-       publisherSub, b.ip_address,
+       publisherSub, b.ip_address || null,
+       b.zip_code || null, b.state || null,
        JSON.stringify(b)]
     );
     leadId = insert.rows[0].id;
