@@ -2334,7 +2334,62 @@ app.post('/leads/rideshare-tb', async (req, res) => {
 });
 // ─── END RIDESHARE TRUE BLUE ─────────────────────────────────────────────────
 
-// ─── KEVIN ANTHONY LEADS SHEET POLLER ────────────────────────────────────────
+// ── True Blue debug endpoint — remove after testing ──────────────────────────
+app.get('/debug-trueblue', requireKey, async (req, res) => {
+  try {
+    const payload = new URLSearchParams();
+    payload.append('lp_campaign_id',  TRUEBLUE_RIDESHARE_CAMPAIGN_ID);
+    payload.append('lp_campaign_key', TRUEBLUE_RIDESHARE_CAMPAIGN_KEY);
+    payload.append('lp_response',     'json');
+    payload.append('lp_test',         '1');
+    payload.append('first_name',      'Test');
+    payload.append('last_name',       'Lead');
+    payload.append('phone_home',      '3105550123');
+    payload.append('email_address',   'test@test.com');
+    payload.append('zip_code',        '90210');
+    payload.append('ip_address',      '72.21.198.66');
+    payload.append('attorney',        'No');
+    payload.append('landing_page_url','https://krwmarketingsolutions.com');
+    payload.append('lp_caller_id',    '3105550123');
+    payload.append('jornaya_lead_id', 'test-jornaya-token-123');
+
+    const https = require('https');
+    const postData = payload.toString();
+    const url = new URL(TRUEBLUE_RIDESHARE_URL);
+
+    const tbRes = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: url.hostname,
+        path:     url.pathname,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(postData),
+        }
+      };
+      const r2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: data, headers: r.headers }));
+      });
+      r2.on('error', reject);
+      r2.write(postData);
+      r2.end();
+    });
+
+    res.json({
+      http_status:    tbRes.status,
+      raw_body:       tbRes.body,
+      response_headers: tbRes.headers,
+      payload_sent:   postData,
+    });
+  } catch(err) {
+    res.json({ error: err.message });
+  }
+});
+// ── End True Blue debug ───────────────────────────────────────────────────────
+
+
 // Polls two Google Sheet tabs every hour (MVA + Rideshare).
 // Matches rows by CID → buyer_intake_id in the leads table.
 // Only touches leads with campaign IN ('mva-nld2', 'rideshare-tb').
