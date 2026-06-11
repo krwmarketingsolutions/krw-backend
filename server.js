@@ -2623,6 +2623,69 @@ app.get('/debug-trueblue', requireKey, async (req, res) => {
 });
 // ── End True Blue debug ───────────────────────────────────────────────────────
 
+// ── Email Agency debug endpoint — remove after testing ───────────────────────
+app.get('/debug-emailagency', requireKey, async (req, res) => {
+  try {
+    const testPayload = {
+      key:              EA_MVA_KEY,
+      code:             EA_MVA_CODE,
+      first_name:       'Test',
+      last_name:        'Lead',
+      phone:            '3105550123',
+      email:            'test@test.com',
+      state:            'AZ',
+      zip:              '85001',
+      ip_address:       '72.21.198.66',
+      attorney:         'No',
+      date_of_incident: '01/01/2025',
+      accident_fault:   'No',
+      settlement:       'No',
+      cited:            'No',
+      received_treatment: 'Yes',
+      has_injuries:       'Yes',
+      sub_id2:          'KRW-KANTHONY-RS',
+      channel:          'Facebook',
+    };
+
+    const https    = require('https');
+    const postData = JSON.stringify(testPayload);
+    const url      = new URL(EA_MVA_URL);
+
+    const eaRes = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: url.hostname,
+        path:     url.pathname + url.search,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/json',
+          'Content-Length': Buffer.byteLength(postData),
+        }
+      };
+      const r2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: data }));
+      });
+      r2.on('error', reject);
+      r2.write(postData);
+      r2.end();
+    });
+
+    let eaResult = {};
+    try { eaResult = JSON.parse(eaRes.body); } catch(e) { eaResult = { raw: eaRes.body }; }
+
+    res.json({
+      http_status:  eaRes.status,
+      raw_body:     eaRes.body,
+      parsed:       eaResult,
+      payload_sent: testPayload,
+    });
+  } catch(err) {
+    res.json({ error: err.message });
+  }
+});
+// ── End Email Agency debug ────────────────────────────────────────────────────
+
 
 // Polls two Google Sheet tabs every hour (MVA + Rideshare).
 // Matches rows by CID → buyer_intake_id in the leads table.
