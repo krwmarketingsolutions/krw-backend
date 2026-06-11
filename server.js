@@ -2422,7 +2422,173 @@ app.post('/leads/mva-nld2', (req, res) => {
 
 // ─── END MVA FUNNEL ───────────────────────────────────────────────────────────
 
-// ─── RIDESHARE UBER/LYFT — TRUE BLUE FORWARDING ─────────────────────────────
+// ─── MVA FUNNEL POSTBACK — EMAIL AGENCY STATUS UPDATES ───────────────────────
+// Receives lead status postbacks from Email Agency.
+// Matches by lead_id (buyer_intake_id) or phone.
+// Updates buyer_status, status, and notes in the leads table.
+// Fires billable email notification if lead flips to billable.
+// No publisher info is exposed — internal only.
+
+app.post('/postback/mva-funnel', async (req, res) => {
+  // Accept postbacks with or without API key — Email Agency won't send one
+  const b = req.body || {};
+
+  const leadId   = (b.lead_id   || '').trim();
+  const phone    = (b.phone     || '').replace(/\D/g, '').trim();
+  const status   = (b.status    || '').trim();
+  const firstName = (b.first_name || '').trim();
+  const lastName  = (b.last_name  || '').trim();
+  const state     = (b.state      || '').trim();
+
+  if (!leadId && !phone) {
+    return res.status(400).json({ ok: false, error: 'lead_id or phone required' });
+  }
+  if (!status) {
+    return res.status(400).json({ ok: false, error: 'status required' });
+  }
+
+  try {
+    const client = await pool.connect();
+    try {
+      // Look up lead by buyer_intake_id first, then phone
+      let lookup;
+      if (leadId) {
+        lookup = await client.query(
+          `SELECT id, first_name, last_name, phone, email, buyer_status, campaign
+           FROM leads
+           WHERE buyer_intake_id = $1 AND campaign = 'mva-funnel'
+           LIMIT 1`,
+          [leadId]
+        );
+      }
+      if (!lookup || !lookup.rows.length) {
+        lookup = await client.query(
+          `SELECT id, first_name, last_name, phone, email, buyer_status, campaign
+           FROM leads
+           WHERE phone = $1 AND campaign = 'mva-funnel'
+           ORDER BY received_at DESC LIMIT 1`,
+          [phone]
+        );
+      }
+
+      if (!lookup.rows.length) {
+        console.log(`[MVA Postback] No match — lead_id: ${leadId} | phone: ${phone}`);
+        return res.json({ ok: false, error: 'Lead not found' });
+      }
+
+      const lead = lookup.rows[0];
+
+      // Check if newly billable
+      const wasAlreadyBillable = (() => {
+        const prev = (lead.buyer_status || '').toLowerCase().trim();
+        return prev.includes('billable') || prev.includes('accepted') || prev === 'signed';
+      })();
+
+      const isNowBillable = (() => {
+        const cur = status.toLowerCase().trim();
+        return cur.includes('billable') || cur.includes('accepted') || cur === 'signed';
+      })();
+
+      // Map status to lead status
+      const statusLow = status.toLowerCase();
+      let leadStatus = null;
+      if (isNowBillable) leadStatus = 'forwarded';
+      else if (statusLow.includes('reject') || statusLow.includes('disqualif')) leadStatus = 'buyer_rejected';
+
+      // Update the lead
+      const patch = JSON.stringify({
+        ea_postback: {
+          status:     status,
+          state:      state || null,
+          synced_at:  new Date().toISOString(),
+        }
+      });
+
+      if (leadStatus) {
+        await client.query(
+          `UPDATE leads SET
+             buyer_status = $1,
+             status       = $2,
+             raw          = raw || $3::jsonb
+           WHERE id = $4
+             AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
+          [status, leadStatus, patch, lead.id]
+        );
+      } else {
+        await client.query(
+          `UPDATE leads SET
+             buyer_status = $1,
+             raw          = raw || $2::jsonb
+           WHERE id = $3
+             AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
+          [status, patch, lead.id]
+        );
+      }
+
+      console.log(`[MVA Postback] ✅ ID ${lead.id} | ${lead.first_name} ${lead.last_name} | ${status}`);
+
+      // Fire billable email if newly flipped
+      if (isNowBillable && !wasAlreadyBillable) {
+        const name     = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unknown';
+        const dateStr  = new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+        const emailHtml = `
+          <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;background:#f4f6fb;padding:32px 20px">
+            <div style="background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08)">
+              <div style="background:#0f1c3f;padding:24px 28px">
+                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.5);margin-bottom:6px">KRW Marketing Solutions</div>
+                <div style="font-size:22px;font-weight:700;color:#fff">✓ Billable Lead</div>
+                <div style="font-size:13px;color:rgba(255,255,255,.6);margin-top:4px">${dateStr}</div>
+              </div>
+              <div style="padding:28px">
+                <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px 20px;margin-bottom:20px">
+                  <div style="font-size:18px;font-weight:700;color:#15803d;margin-bottom:4px">${name}</div>
+                  <div style="font-size:13px;color:#166534">Marked billable — ${status}</div>
+                </div>
+                <table style="width:100%;border-collapse:collapse;font-size:13px">
+                  <tr style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;width:38%">Campaign</td>
+                    <td style="padding:10px 0;font-weight:600;color:#0f1c3f">MVA Funnel</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Phone</td>
+                    <td style="padding:10px 0;color:#475569">${lead.phone || '—'}</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">State</td>
+                    <td style="padding:10px 0;color:#475569">${state || lead.state || '—'}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Status</td>
+                    <td style="padding:10px 0;color:#475569">${status}</td>
+                  </tr>
+                </table>
+              </div>
+              <div style="padding:16px 28px;background:#f9fafb;border-top:1px solid #f1f5f9;font-size:11px;color:#9ca3af;text-align:center">
+                KRW Marketing Solutions · Lead Notification System
+              </div>
+            </div>
+          </div>`;
+
+        await sendEmailNotification(
+          `✓ Billable Lead — ${name} | MVA | mva-funnel`,
+          emailHtml
+        );
+        console.log(`[MVA Postback] 📧 Billable email sent for ${name}`);
+      }
+
+      return res.json({ ok: true, lead_id: lead.id, status_updated: status });
+
+    } finally {
+      client.release();
+    }
+  } catch(err) {
+    console.error('[MVA Postback] Error:', err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+// ─── END MVA FUNNEL POSTBACK ──────────────────────────────────────────────────
+
+
 // Receives Rideshare (Uber/Lyft) leads from publishers and forwards to
 // True Blue Marketing's LeadsPedia endpoint.
 // Campaign: rideshare-tb | Buyer: True Blue Marketing
