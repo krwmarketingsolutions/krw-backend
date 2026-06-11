@@ -2175,88 +2175,58 @@ app.post('/leads/mva-email-agency', async (req, res) => {
 });
 // ─── END MVA EMAIL AGENCY ─────────────────────────────────────────────────────
 
-// ─── MVA NLD2 — EMAIL AGENCY + LEAD PROSPER ROUTING ─────────────────────────
-// Receives MVA CPA leads from publishers, validates required fields,
-// and routes based on state:
-//   Email Agency priority states → Email Agency (LawLogic)
-//   All other states             → held (no fallback buyer yet)
-// Campaign: mva-nld2
+// ─── MVA FUNNEL — TIERED BUYER ROUTING ───────────────────────────────────────
+// Routes MVA leads through a tiered buyer waterfall based on state.
+// Campaign: mva-funnel
+//
+// TO ADD A NEW BUYER: add an entry to MVA_BUYERS array below with:
+//   - name:   display name for logs
+//   - states: array of 2-letter state codes this buyer accepts
+//   - post:   async function(b, publisherSub) → { accepted, duplicate, lead_id, raw }
+//
 // SSDI and FE verticals are NEVER touched here.
+// ─────────────────────────────────────────────────────────────────────────────
 
-const LP_MVA_URL         = 'https://api.leadprosper.io/direct_post';
-const LP_MVA_CAMPAIGN_ID = '31080';
-const LP_MVA_SUPPLIER_ID = '110928';
-const LP_MVA_KEY         = 'ke21sx0koi7dld';
-
-// Email Agency (LawLogic) credentials
 const EA_MVA_URL  = 'https://docs.emailagency.com/api/add-lead?json=1';
 const EA_MVA_KEY  = 'e37b1b02-65cf-11f1-b481-fa163eff53f0';
 const EA_MVA_CODE = 'MVALEADS';
 
-// Email Agency priority states
-const EA_MVA_STATES = ['AZ','CO','IL','IN','MS','NM','NV','NY','OR','TN','UT','WA','WI'];
+// ── Helper: post JSON to a URL via https ──────────────────────────────────────
+function postJSON(urlStr, payload) {
+  return new Promise((resolve, reject) => {
+    const https    = require('https');
+    const postData = JSON.stringify(payload);
+    const url      = new URL(urlStr);
+    const options  = {
+      hostname: url.hostname,
+      path:     url.pathname + (url.search || ''),
+      method:   'POST',
+      headers:  {
+        'Content-Type':   'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+      }
+    };
+    const req2 = https.request(options, (r) => {
+      let data = '';
+      r.on('data', chunk => data += chunk);
+      r.on('end', () => resolve({ status: r.statusCode, body: data }));
+    });
+    req2.on('error', reject);
+    req2.write(postData);
+    req2.end();
+  });
+}
 
-app.post('/leads/mva-nld2', async (req, res) => {
-  const key = req.headers['x-api-key'] || req.query.api_key || '';
-  const validKeys = [
-    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
-    process.env.LEAD_API_KEY || 'krwleads2026secure',
-  ];
-  if (!validKeys.includes(key)) {
-    return res.status(401).json({ ok: false, error: 'Invalid API key' });
-  }
+// ── MVA Buyer Tiers ───────────────────────────────────────────────────────────
+// Add new buyers here. Order = priority (Tier 1 first).
+const MVA_BUYERS = [
 
-  const b = req.body || {};
-
-  // Validate required fields — per Email Agency spec
-  const missing = [];
-  if (!b.first_name)           missing.push('first_name');
-  if (!b.last_name)            missing.push('last_name');
-  if (!b.phone)                missing.push('phone');
-  if (!b.email)                missing.push('email');
-  if (!b.ip_address)           missing.push('ip_address');
-  if (!b.have_attorney)        missing.push('have_attorney');
-  if (!b.at_fault)             missing.push('at_fault');
-  if (!b.channel)              missing.push('channel');
-  if (!b.trustedform_cert_url && !b.trusted_form_cert_url) missing.push('trustedform_cert_url');
-  if (!b.publisher_sub)        missing.push('publisher_sub');
-
-  if (missing.length) {
-    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
-  }
-
-  // Publisher sub tracking
-  const publisherSub = b.publisher_sub || b.lp_subid1 || null;
-
-  // Determine routing based on state
-  const leadState   = (b.incident_state || b.state || '').toUpperCase().trim();
-  const useEmailAgency = EA_MVA_STATES.includes(leadState);
-
-  // Log the lead attempt
-  const client = await pool.connect();
-  let leadId = null;
-  try {
-    const insert = await client.query(
-      `INSERT INTO leads
-         (campaign, vertical, first_name, last_name, phone, email,
-          publisher_sub, ip_address, state, status, raw, received_at)
-       VALUES ('mva-nld2','MVA',$1,$2,$3,$4,$5,$6,$7,'pending',$8::jsonb,NOW())
-       RETURNING id`,
-      [b.first_name, b.last_name, b.phone, b.email,
-       publisherSub, b.ip_address || null, leadState || null,
-       JSON.stringify(b)]
-    );
-    leadId = insert.rows[0].id;
-  } catch(dbErr) {
-    console.error('[MVA] DB insert error:', dbErr.message);
-  } finally {
-    client.release();
-  }
-
-  // ── Route to Email Agency (priority states) ───────────────────────────────
-  if (useEmailAgency) {
-    try {
-      const eaPayload = {
+  // ── Tier 1: Email Agency ─────────────────────────────────────────────────
+  {
+    name:   'Email Agency',
+    states: ['AZ','CO','IL','IN','MS','NM','NV','NY','OR','TN','UT','WA','WI'],
+    async post(b, publisherSub) {
+      const payload = {
         key:          EA_MVA_KEY,
         code:         EA_MVA_CODE,
         first_name:   b.first_name,
@@ -2268,118 +2238,189 @@ app.post('/leads/mva-nld2', async (req, res) => {
         accident_fault: b.at_fault,
         channel:      b.channel,
         trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url,
-        sub_id2:      b.publisher_sub,
+        sub_id2:      publisherSub,
       };
+      if (b.address)                    payload.address    = b.address;
+      if (b.city)                       payload.city       = b.city;
+      if (b.state || b.incident_state)  payload.state      = b.state || b.incident_state;
+      if (b.zip_code || b.zip)          payload.zip        = b.zip_code || b.zip;
+      if (b.date_of_birth)              payload.dob        = b.date_of_birth;
+      if (b.user_agent)                 payload.user_agent = b.user_agent;
 
-      // Optional fields if available
-      if (b.address)       eaPayload.address = b.address;
-      if (b.city)          eaPayload.city    = b.city;
-      if (b.state || b.incident_state) eaPayload.state = b.state || b.incident_state;
-      if (b.zip_code || b.zip) eaPayload.zip = b.zip_code || b.zip;
-      if (b.date_of_birth) eaPayload.dob     = b.date_of_birth;
-      if (b.user_agent)    eaPayload.user_agent = b.user_agent;
-
-      const https = require('https');
-      const postData = JSON.stringify(eaPayload);
-      const url = new URL(EA_MVA_URL);
-
-      const eaRes = await new Promise((resolve, reject) => {
-        const options = {
-          hostname: url.hostname,
-          path:     url.pathname + url.search,
-          method:   'POST',
-          headers:  {
-            'Content-Type':   'application/json',
-            'Content-Length': Buffer.byteLength(postData),
-          }
-        };
-        const r2 = https.request(options, (r) => {
-          let data = '';
-          r.on('data', chunk => data += chunk);
-          r.on('end', () => resolve({ status: r.statusCode, body: data }));
-        });
-        r2.on('error', reject);
-        r2.write(postData);
-        r2.end();
-      });
-
-      let eaResult = {};
-      try { eaResult = JSON.parse(eaRes.body); } catch(e) {
-        eaResult = { status: false, message: eaRes.body };
-      }
-
-      const accepted  = eaResult.status === true;
-      const duplicate = (eaResult.message || '').toLowerCase().includes('duplicate');
-
-      if (leadId) {
-        const c2 = await pool.connect();
-        try {
-          await c2.query(
-            `UPDATE leads SET
-               status          = $1,
-               buyer_intake_id = $2,
-               buyer_response  = $3::jsonb,
-               buyer_status    = $4,
-               revenue         = 0
-             WHERE id = $5`,
-            [
-              accepted ? 'forwarded' : duplicate ? 'duplicate' : 'buyer_rejected',
-              eaResult.lead_id || null,
-              JSON.stringify(eaResult),
-              accepted ? 'Accepted' : duplicate ? 'Duplicate' : 'Rejected',
-              leadId
-            ]
-          );
-        } finally { c2.release(); }
-      }
-
-      console.log(`[MVA→EA] ${accepted ? '✅' : duplicate ? '🔁' : '❌'} ${b.first_name} ${b.last_name} | ${leadState} | ${eaResult.message || 'no msg'} | ID: ${eaResult.lead_id || 'none'}`);
-
-      return res.json({
-        ok:      accepted,
-        result:  accepted ? 'success' : duplicate ? 'duplicate' : 'rejected',
-        lead_id: eaResult.lead_id || null,
-        message: eaResult.message || null,
-        buyer:   'Email Agency',
-        krw_id:  leadId
-      });
-
-    } catch(fwdErr) {
-      console.error('[MVA→EA] Forward error:', fwdErr.message);
-      if (leadId) {
-        const c3 = await pool.connect();
-        try {
-          await c3.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
-            [fwdErr.message, leadId]);
-        } finally { c3.release(); }
-      }
-      return res.status(502).json({ ok: false, error: 'Failed to forward to Email Agency', detail: fwdErr.message });
+      const res  = await postJSON(EA_MVA_URL, payload);
+      let   result = {};
+      try { result = JSON.parse(res.body); } catch(e) { result = { status: false, message: res.body }; }
+      return {
+        accepted:  result.status === true,
+        duplicate: (result.message || '').toLowerCase().includes('duplicate'),
+        lead_id:   result.lead_id || null,
+        message:   result.message || null,
+        raw:       result,
+      };
     }
+  },
+
+  // ── Tier 2: Placeholder — add CPL buyer here when ready ──────────────────
+  // {
+  //   name:   'CPL Buyer',
+  //   states: ['CA','TX','FL', ...],
+  //   async post(b, publisherSub) {
+  //     const payload = { ... map fields to their API spec ... };
+  //     const res = await postJSON('https://buyer2api.com/post', payload);
+  //     let result = {};
+  //     try { result = JSON.parse(res.body); } catch(e) { result = { status: false }; }
+  //     return {
+  //       accepted:  result.accepted === true,
+  //       duplicate: false,
+  //       lead_id:   result.id || null,
+  //       message:   result.message || null,
+  //       raw:       result,
+  //     };
+  //   }
+  // },
+
+  // ── Tier 3: Placeholder — add 3rd level buyer here when ready ────────────
+  // {
+  //   name:   'Tier 3 Buyer',
+  //   states: ['GA','NC','VA', ...],
+  //   async post(b, publisherSub) { ... }
+  // },
+
+];
+
+app.post('/leads/mva-funnel', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
   }
 
-  // ── Non-Email Agency states — hold until fallback buyer is ready ──────────
-  if (leadId) {
-    const c4 = await pool.connect();
-    try {
-      await c4.query(
-        "UPDATE leads SET status='received', buyer_error='No buyer configured for state: '+$1 WHERE id=$2",
-        [leadState, leadId]
-      );
-    } finally { c4.release(); }
+  const b = req.body || {};
+
+  // Validate required fields
+  const missing = [];
+  if (!b.first_name)    missing.push('first_name');
+  if (!b.last_name)     missing.push('last_name');
+  if (!b.phone)         missing.push('phone');
+  if (!b.email)         missing.push('email');
+  if (!b.ip_address)    missing.push('ip_address');
+  if (!b.have_attorney) missing.push('have_attorney');
+  if (!b.at_fault)      missing.push('at_fault');
+  if (!b.channel)       missing.push('channel');
+  if (!b.trustedform_cert_url && !b.trusted_form_cert_url) missing.push('trustedform_cert_url');
+  if (!b.publisher_sub) missing.push('publisher_sub');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
   }
 
-  console.log(`[MVA] ⏸ ${b.first_name} ${b.last_name} | ${leadState} — no buyer for this state yet`);
+  const publisherSub = b.publisher_sub;
+  const leadState    = (b.incident_state || b.state || '').toUpperCase().trim();
 
-  return res.json({
-    ok:      false,
-    result:  'held',
-    message: `No buyer configured for state: ${leadState}. Lead saved — will route once buyer is set up.`,
-    krw_id:  leadId
-  });
+  // Insert lead into DB
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, ip_address, state, status, raw, received_at)
+       VALUES ('mva-funnel','MVA',$1,$2,$3,$4,$5,$6,$7,'pending',$8::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email,
+       publisherSub, b.ip_address, leadState || null,
+       JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[MVA Funnel] DB insert error:', dbErr.message);
+  } finally {
+    client.release();
+  }
 
+  // Find matching buyer for this state
+  const buyer = MVA_BUYERS.find(byr => byr.states.includes(leadState));
+
+  if (!buyer) {
+    // No buyer configured for this state — hold lead
+    if (leadId) {
+      const c2 = await pool.connect();
+      try {
+        await c2.query(
+          "UPDATE leads SET status='received', buyer_error=$1 WHERE id=$2",
+          [`No buyer configured for state: ${leadState}`, leadId]
+        );
+      } finally { c2.release(); }
+    }
+    console.log(`[MVA Funnel] ⏸ ${b.first_name} ${b.last_name} | ${leadState} — no buyer for this state`);
+    return res.json({
+      ok:      false,
+      result:  'held',
+      message: `No buyer configured for state: ${leadState}. Lead saved.`,
+      krw_id:  leadId
+    });
+  }
+
+  // Forward to matched buyer
+  try {
+    const result = await buyer.post(b, publisherSub);
+
+    if (leadId) {
+      const c3 = await pool.connect();
+      try {
+        await c3.query(
+          `UPDATE leads SET
+             status          = $1,
+             buyer_intake_id = $2,
+             buyer_response  = $3::jsonb,
+             buyer_status    = $4,
+             revenue         = 0
+           WHERE id = $5`,
+          [
+            result.accepted ? 'forwarded' : result.duplicate ? 'duplicate' : 'buyer_rejected',
+            result.lead_id || null,
+            JSON.stringify(result.raw),
+            result.accepted ? 'Accepted' : result.duplicate ? 'Duplicate' : 'Rejected',
+            leadId
+          ]
+        );
+      } finally { c3.release(); }
+    }
+
+    console.log(`[MVA Funnel→${buyer.name}] ${result.accepted ? '✅' : result.duplicate ? '🔁' : '❌'} ${b.first_name} ${b.last_name} | ${leadState} | ${result.message || ''} | ID: ${result.lead_id || 'none'}`);
+
+    return res.json({
+      ok:      result.accepted,
+      result:  result.accepted ? 'success' : result.duplicate ? 'duplicate' : 'rejected',
+      lead_id: result.lead_id || null,
+      message: result.message || null,
+      buyer:   buyer.name,
+      krw_id:  leadId
+    });
+
+  } catch(fwdErr) {
+    console.error(`[MVA Funnel→${buyer.name}] Forward error:`, fwdErr.message);
+    if (leadId) {
+      const c4 = await pool.connect();
+      try {
+        await c4.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
+          [fwdErr.message, leadId]);
+      } finally { c4.release(); }
+    }
+    return res.status(502).json({ ok: false, error: `Failed to forward to ${buyer.name}`, detail: fwdErr.message });
+  }
 });
-// ─── END MVA NLD2 ────────────────────────────────────────────────────────────
 
+// Also keep old route as alias so any existing integrations don't break
+app.post('/leads/mva-nld2', (req, res) => {
+  req.url = '/leads/mva-funnel';
+  app.handle(req, res);
+});
+
+// ─── END MVA FUNNEL ───────────────────────────────────────────────────────────
 
 // ─── RIDESHARE UBER/LYFT — TRUE BLUE FORWARDING ─────────────────────────────
 // Receives Rideshare (Uber/Lyft) leads from publishers and forwards to
