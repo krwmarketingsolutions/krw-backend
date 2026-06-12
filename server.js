@@ -2886,7 +2886,7 @@ app.get('/debug-emailagency', requireKey, async (req, res) => {
 
 // Polls two Google Sheet tabs every hour (MVA + Rideshare).
 // Matches rows by CID → buyer_intake_id in the leads table.
-// Only touches leads with campaign IN ('mva-nld2', 'rideshare-tb').
+// Only touches leads with campaign IN ('mva-funnel', 'rideshare-tb').
 // SSDI and FE verticals are NEVER touched.
 // Sheet columns: Date | CID | First Name | Last Name | Email Address |
 //                Intake Center Status | NLD Status | Date of Notes Updated |
@@ -2897,7 +2897,7 @@ const KA_SHEET_ID = '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4';
 const KA_SHEETS = [
   {
     name:     'MVA',
-    campaign: 'mva-nld2',
+    campaign: 'mva-funnel',
     url:      `https://docs.google.com/spreadsheets/d/${KA_SHEET_ID}/export?format=csv&gid=1713913985`,
   },
   {
@@ -2963,7 +2963,7 @@ async function pollKALeadsSheet() {
         let matched = 0, unmatched = 0, skipped = 0;
 
         for (const row of rows) {
-          const isMVA = sheet.campaign === 'mva-nld2';
+          const isMVA = sheet.campaign === 'mva-funnel';
 
           // MVA sheet: Date, First Name, Last Name, Phone, Status, Notes (no CID)
           // Rideshare sheet: Date, CID, First Name, Last Name, Email, Intake Center Status, NLD Status, ...
