@@ -841,6 +841,7 @@ app.post('/publishers/portal-config', async (req, res) => {
 
     // Build unique campaign list with display names
     const campaignMap = {
+      'mva-funnel':  { label: 'MVA — Motor Vehicle Accident', color: 'blue' },
       'mva-nld2':    { label: 'MVA — Motor Vehicle Accident', color: 'blue' },
       'rideshare-tb':{ label: 'Rideshare — Uber & Lyft',      color: 'green' },
       'roblox-mt':   { label: 'Roblox Mass Tort',             color: 'blue' },
