@@ -3346,16 +3346,39 @@ function findCol(row, ...candidates) {
 async function pollLairdLeadsSheet() {
   for (const sheet of LAIRD_SHEETS) {
     try {
-      const csv  = await fetchKASheetCSV(sheet.url); // reuse existing CSV fetcher
-      const rows = parseKASheetCSV(csv);              // reuse existing CSV parser
+      const csv  = await fetchKASheetCSV(sheet.url);
+
+      // The sheet has metadata rows at top — find the real header row
+      // by looking for a row containing 'First Name' or 'Caller ID'
+      const rawLines = csv.split('\n').map(l => l.trim()).filter(Boolean);
+      let headerIdx = -1;
+      for (let i = 0; i < rawLines.length; i++) {
+        const lower = rawLines[i].toLowerCase();
+        if (lower.includes('first name') || lower.includes('caller id')) {
+          headerIdx = i;
+          break;
+        }
+      }
+      if (headerIdx === -1) {
+        console.log(`[Laird Sheet Poll] ${sheet.name}: could not find header row`);
+        continue;
+      }
+
+      // Rebuild CSV from the real header row onwards
+      const cleanCsv = rawLines.slice(headerIdx).join('\n');
+      const rows = parseKASheetCSV(cleanCsv);
 
       if (!rows.length) {
         console.log(`[Laird Sheet Poll] ${sheet.name}: empty sheet`);
         continue;
       }
 
-      // Skip if sheet only has a single header-like row with no data
-      const dataRows = rows.filter(r => Object.values(r).some(v => v && v.trim() && v.trim().toUpperCase() !== 'JUNE'));
+      const dataRows = rows.filter(r => {
+        const phone = (findCol(r, 'caller id', 'caller_id', 'phone') || '').replace(/\D/g,'');
+        const name  = findCol(r, 'first name', 'firstname') || '';
+        return phone.length >= 10 || name.length > 1;
+      });
+
       if (!dataRows.length) {
         console.log(`[Laird Sheet Poll] ${sheet.name}: no data rows yet`);
         continue;
