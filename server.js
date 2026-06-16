@@ -454,12 +454,27 @@ app.get('/leads/summary', requireKey, async (req, res) => {
 
 app.get('/leads/feed', requireKey, async (req, res) => {
   try {
-    const { campaign, status, limit=100, pub, days } = req.query;
+    const { campaign, status, limit=100, pub, days, portal_id } = req.query;
     const where=[], params=[];
     let i=1;
-    if (campaign) { where.push(`campaign=$${i++}`);       params.push(campaign); }
-    if (status)   { where.push(`status=$${i++}`);         params.push(status); }
-    if (pub)      { where.push(`publisher_sub=$${i++}`);  params.push(pub); }
+    if (campaign) { where.push(`campaign=$${i++}`); params.push(campaign); }
+    if (status)   { where.push(`status=$${i++}`);   params.push(status); }
+
+    // Support portal_id lookup — finds all pub_ids for that portal then filters
+    if (portal_id) {
+      const pubs = await pool.query(
+        `SELECT pub_id FROM publishers WHERE portal_id=$1 AND active=true`, [portal_id]
+      );
+      const pubIds = pubs.rows.map(p => p.pub_id);
+      if (pubIds.length) {
+        where.push(`publisher_sub = ANY($${i++})`);
+        params.push(pubIds);
+      }
+    } else if (pub) {
+      where.push(`publisher_sub=$${i++}`);
+      params.push(pub);
+    }
+
     if (days && parseInt(days) < 9999) {
       where.push(`received_at >= NOW() - INTERVAL '${parseInt(days)} days'`);
     }
