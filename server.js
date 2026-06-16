@@ -3294,8 +3294,11 @@ setTimeout(() => {
 // Only touches leads with campaign IN ('roblox-mt', 'rideshare-tb')
 // AND publisher_sub IN ('KRW-LAIRD-2026-X23', 'KRW-LAIRD-2026-JEM').
 // SSDI, FE, and Kevin Anthony leads are NEVER touched.
+// New sheet: combined tab with Campaign column to split Roblox/Rideshare
+// Columns: First Name, Last Name, Caller ID, Lead Date, Campaign, Status,
+//          Amount, Call Date Dispositioned, Invoice Date, Billable (yes/no), Notes
 
-const LAIRD_SHEET_ID = '1pT525lw2u2ziFBZwmQnYk02ykEhhFjBp6TIDYhOzx5U';
+const LAIRD_SHEET_ID = '1SJi0U-Cu7OnP06YIcwKRHgVn01NbDMmrSyFtv3UgBbA';
 
 const LAIRD_SHEETS = [
   {
@@ -3303,12 +3306,14 @@ const LAIRD_SHEETS = [
     campaign: 'roblox-mt',
     pub_ids:  ['KRW-LAIRD-2026-X23'],
     url:      `https://docs.google.com/spreadsheets/d/${LAIRD_SHEET_ID}/export?format=csv&gid=0`,
+    campaignFilter: 'roblox',
   },
   {
     name:     'Rideshare',
     campaign: 'rideshare-tb',
     pub_ids:  ['KRW-LAIRD-2026-JEM'],
-    url:      `https://docs.google.com/spreadsheets/d/${LAIRD_SHEET_ID}/export?format=csv&gid=1706703348`,
+    url:      `https://docs.google.com/spreadsheets/d/${LAIRD_SHEET_ID}/export?format=csv&gid=0`,
+    campaignFilter: 'rideshare',
   },
 ];
 
@@ -3346,48 +3351,50 @@ async function pollLairdLeadsSheet() {
         let matched = 0, unmatched = 0, skipped = 0;
 
         for (const row of dataRows) {
-          // Flexible field extraction
+          // Filter by Campaign column — each sheet entry processes only its vertical
+          const rowCampaign = (findCol(row, 'campaign') || '').toLowerCase();
+          if (sheet.campaignFilter && !rowCampaign.includes(sheet.campaignFilter)) {
+            skipped++; continue;
+          }
+
+          // Flexible field extraction — handles new sheet column names
           const firstName   = findCol(row, 'first name', 'firstname', 'first');
           const lastName    = findCol(row, 'last name', 'lastname', 'last');
-          const phone       = (findCol(row, 'phone', 'phone number', 'cell', 'cell phone') || '').replace(/\D/g, '') || null;
+          const phone       = (findCol(row, 'caller id', 'caller_id', 'phone', 'phone number', 'cell') || '').replace(/\D/g, '') || null;
           const state       = findCol(row, 'state', 'st') || null;
           const status      = findCol(row, 'status', 'nld status', 'intake status', 'disposition') || null;
           const notes       = findCol(row, 'notes', 'note', 'comments') || null;
           const cid         = findCol(row, 'cid', 'id', 'lead id', 'leadid') || null;
-          const billableRaw = (findCol(row, 'billable', 'billed') || '').toLowerCase();
+          const billableRaw = (findCol(row, 'billable (yes/no)', 'billable', 'billed') || '').toLowerCase().trim();
           const billable    = billableRaw === 'yes' ? true : billableRaw === 'no' ? false : null;
 
           // Skip rows with no identifying info
           if (!phone && !cid && !firstName) { skipped++; continue; }
 
-          // Determine lead status
+          // Determine lead status from sheet
           const statusLow = (status || '').toLowerCase();
           let leadStatus = null;
-          if (statusLow.includes('accepted') || statusLow.includes('billable') || statusLow === 'signed' || statusLow.startsWith('signed')) {
+          if (billable === true || statusLow.includes('accepted') || statusLow.includes('billable') || statusLow === 'signed') {
             leadStatus = 'forwarded';
           } else if (statusLow.includes('disqualified') || statusLow.includes('rejected')) {
             leadStatus = 'buyer_rejected';
           }
+          // Intake in Process, Call Attempted, Pending — leave status as-is
 
-          // Look up lead — by CID first, then phone, scoped to Laird's pub_ids
+          // Look up lead — by phone, also check without pub_id filter since some came in untagged
           let lookup;
           if (cid) {
             lookup = await client.query(
               `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
-               FROM leads WHERE buyer_intake_id = $1
-                 AND campaign = $2
-                 AND publisher_sub = ANY($3)
-               LIMIT 1`,
-              [cid, sheet.campaign, sheet.pub_ids]
+               FROM leads WHERE buyer_intake_id = $1 AND campaign = $2 LIMIT 1`,
+              [cid, sheet.campaign]
             );
           } else if (phone) {
             lookup = await client.query(
               `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
-               FROM leads WHERE phone = $1
-                 AND campaign = $2
-                 AND publisher_sub = ANY($3)
-               LIMIT 1`,
-              [phone, sheet.campaign, sheet.pub_ids]
+               FROM leads WHERE phone = $1 AND campaign = $2
+               ORDER BY received_at DESC LIMIT 1`,
+              [phone, sheet.campaign]
             );
           } else {
             unmatched++; continue;
