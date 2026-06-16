@@ -2589,6 +2589,140 @@ app.post('/postback/mva-funnel', async (req, res) => {
 });
 // ─── END MVA FUNNEL POSTBACK ──────────────────────────────────────────────────
 
+// ─── SSDI CALLS POSTBACK — RINGBA ────────────────────────────────────────────
+// Receives call completion postbacks from Ringba for SSDI campaign.
+// Stores call data in calls table and links to publisher portal.
+// DID: +1 (321) 603-3068 | Publisher: Joshua Duran (KRW-JOSHUA-2026-76M)
+
+app.post('/postback/ssdi-calls', async (req, res) => {
+  const b = req.body || {};
+
+  const phone        = (b.phone         || '').replace(/\D/g, '').trim() || null;
+  const firstName    = (b.first_name    || '').trim() || null;
+  const lastName     = (b.last_name     || '').trim() || null;
+  const cid          = (b.cid           || '').trim() || null;
+  const duration     = parseInt(b.duration) || 0;
+  const recordingUrl = (b.recording_url || '').trim() || null;
+  const state        = (b.state         || '').trim().toUpperCase() || null;
+  const publisherSub = (b.publisher_sub || 'KRW-JOSHUA-2026-76M').trim();
+
+  if (!phone && !cid) {
+    return res.status(400).json({ ok: false, error: 'phone or cid required' });
+  }
+
+  try {
+    const client = await pool.connect();
+    try {
+      // Check for duplicate by CID
+      if (cid) {
+        const dup = await client.query(
+          `SELECT id FROM calls WHERE buyer_call_id = $1 LIMIT 1`, [cid]
+        );
+        if (dup.rows.length) {
+          return res.json({ ok: true, duplicate: true, message: 'Call already recorded', id: dup.rows[0].id });
+        }
+      }
+
+      // Determine billable status based on duration (threshold: 120 seconds)
+      const billable = duration >= 120;
+
+      // Insert into calls table
+      const insert = await client.query(
+        `INSERT INTO calls
+           (campaign, caller_id, caller_name, call_duration, billable,
+            call_status_label, disposition, publisher_sub, buyer_call_id,
+            recording_url, state, call_date, raw)
+         VALUES ('ssdi',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),$11::jsonb)
+         RETURNING id`,
+        [
+          phone,
+          [firstName, lastName].filter(Boolean).join(' ') || null,
+          duration,
+          billable,
+          billable ? 'Billable' : 'Non-Billable',
+          billable ? 'Transferred' : 'Short Call',
+          publisherSub,
+          cid,
+          recordingUrl,
+          state,
+          JSON.stringify(b),
+        ]
+      );
+
+      const callId = insert.rows[0].id;
+      console.log(`[SSDI Postback] ✅ Call ${callId} | ${firstName} ${lastName} | ${phone} | ${duration}s | ${billable ? 'Billable' : 'Not Billable'}`);
+
+      // Fire email if billable
+      if (billable) {
+        const name    = [firstName, lastName].filter(Boolean).join(' ') || phone;
+        const dateStr = new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+        const emailHtml = `
+          <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;background:#f4f6fb;padding:32px 20px">
+            <div style="background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08)">
+              <div style="background:#0f1c3f;padding:24px 28px">
+                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.5);margin-bottom:6px">KRW Marketing Solutions</div>
+                <div style="font-size:22px;font-weight:700;color:#fff">✓ Billable SSDI Call</div>
+                <div style="font-size:13px;color:rgba(255,255,255,.6);margin-top:4px">${dateStr}</div>
+              </div>
+              <div style="padding:28px">
+                <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px 20px;margin-bottom:20px">
+                  <div style="font-size:18px;font-weight:700;color:#15803d;margin-bottom:4px">${name}</div>
+                  <div style="font-size:13px;color:#166534">Billable transfer — ${duration}s duration</div>
+                </div>
+                <table style="width:100%;border-collapse:collapse;font-size:13px">
+                  <tr style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;width:38%">Campaign</td>
+                    <td style="padding:10px 0;font-weight:600;color:#0f1c3f">SSDI Filed — Campaign 1696</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Phone</td>
+                    <td style="padding:10px 0;color:#475569">${phone || '—'}</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">State</td>
+                    <td style="padding:10px 0;color:#475569">${state || '—'}</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Duration</td>
+                    <td style="padding:10px 0;color:#475569">${duration} seconds</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Call ID</td>
+                    <td style="padding:10px 0;font-family:monospace;color:#475569">${cid || '—'}</td>
+                  </tr>
+                  ${recordingUrl ? `<tr>
+                    <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Recording</td>
+                    <td style="padding:10px 0"><a href="${recordingUrl}" style="color:#2563eb">Listen</a></td>
+                  </tr>` : ''}
+                </table>
+              </div>
+              <div style="padding:16px 28px;background:#f9fafb;border-top:1px solid #f1f5f9;font-size:11px;color:#9ca3af;text-align:center">
+                KRW Marketing Solutions · Lead Notification System
+              </div>
+            </div>
+          </div>`;
+
+        await sendEmailNotification(
+          `✓ Billable SSDI Call — ${name} | ${duration}s | Campaign 1696`,
+          emailHtml
+        );
+        console.log(`[SSDI Postback] 📧 Billable email sent for ${name}`);
+      }
+
+      return res.json({ ok: true, id: callId, billable, duration, message: billable ? 'Billable call recorded' : 'Call recorded' });
+
+    } finally {
+      client.release();
+    }
+  } catch(err) {
+    console.error('[SSDI Postback] Error:', err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+// ─── END SSDI CALLS POSTBACK ─────────────────────────────────────────────────
+
+
+
 
 // Receives Rideshare (Uber/Lyft) leads from publishers and forwards to
 // True Blue Marketing's LeadsPedia endpoint.
