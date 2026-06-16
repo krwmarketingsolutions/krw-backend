@@ -3384,6 +3384,12 @@ async function pollLairdLeadsSheet() {
         continue;
       }
 
+      console.log(`[Laird Sheet Poll] ${sheet.name}: found ${dataRows.length} data rows`);
+      if (dataRows.length > 0) {
+        console.log(`[Laird Sheet Poll] Sample keys: ${Object.keys(dataRows[0]).join(' | ')}`);
+        console.log(`[Laird Sheet Poll] Sample vals: ${Object.values(dataRows[0]).slice(0,6).join(' | ')}`);
+      }
+
       const client = await pool.connect();
       try {
         let matched = 0, unmatched = 0, skipped = 0;
@@ -3391,6 +3397,7 @@ async function pollLairdLeadsSheet() {
         for (const row of dataRows) {
           // Filter by Campaign column — each sheet entry processes only its vertical
           const rowCampaign = (findCol(row, 'campaign') || '').toLowerCase();
+          console.log(`[Laird Sheet Poll] Row campaign: "${rowCampaign}" | filter: "${sheet.campaignFilter}" | match: ${!sheet.campaignFilter || rowCampaign.includes(sheet.campaignFilter)}`);
           if (sheet.campaignFilter && !rowCampaign.includes(sheet.campaignFilter)) {
             skipped++; continue;
           }
