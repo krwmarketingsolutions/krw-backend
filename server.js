@@ -3349,16 +3349,24 @@ async function pollLairdLeadsSheet() {
       const csv  = await fetchKASheetCSV(sheet.url);
 
       // The sheet has metadata rows at top — find the real header row
-      // by looking for a row containing 'First Name' or 'Caller ID'
+      // by looking for a row containing key column identifiers
       const rawLines = csv.split('\n').map(l => l.trim()).filter(Boolean);
       let headerIdx = -1;
       for (let i = 0; i < rawLines.length; i++) {
         const lower = rawLines[i].toLowerCase();
-        if (lower.includes('first name') || lower.includes('caller id')) {
+        if (lower.includes('first') || lower.includes('caller') || lower.includes('phone') || lower.includes('status')) {
           headerIdx = i;
           break;
         }
       }
+
+      // Log what we found for debugging
+      console.log(`[Laird Sheet Poll] ${sheet.name}: total lines ${rawLines.length}, header at ${headerIdx}`);
+      if (rawLines.length > 0) console.log(`[Laird Sheet Poll] Line 0: ${rawLines[0].substring(0,80)}`);
+      if (rawLines.length > 1) console.log(`[Laird Sheet Poll] Line 1: ${rawLines[1].substring(0,80)}`);
+      if (rawLines.length > 2) console.log(`[Laird Sheet Poll] Line 2: ${rawLines[2].substring(0,80)}`);
+      if (rawLines.length > 3) console.log(`[Laird Sheet Poll] Line 3: ${rawLines[3].substring(0,80)}`);
+
       if (headerIdx === -1) {
         console.log(`[Laird Sheet Poll] ${sheet.name}: could not find header row`);
         continue;
