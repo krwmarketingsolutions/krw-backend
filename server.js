@@ -3445,20 +3445,23 @@ async function pollLairdLeadsSheet() {
           if (leadStatus) {
             await client.query(
               `UPDATE leads SET
-                 buyer_status = $1, notes = COALESCE($2, notes),
-                 raw = raw || $3::jsonb, status = $4
+                 buyer_status = $1,
+                 notes        = COALESCE($2, notes),
+                 raw          = raw || $3::jsonb,
+                 status       = $4
                WHERE id = $5
                  AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
-              [status, notes, patch, leadStatus, lead.id]
+              [status, notes || null, patch, leadStatus, lead.id]
             );
           } else {
             await client.query(
               `UPDATE leads SET
-                 buyer_status = $1, notes = COALESCE($2, notes),
-                 raw = raw || $3::jsonb
+                 buyer_status = $1,
+                 notes        = COALESCE($2, notes),
+                 raw          = raw || $3::jsonb
                WHERE id = $4
                  AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
-              [status, notes, patch, lead.id]
+              [status, notes || null, patch, lead.id]
             );
           }
 
