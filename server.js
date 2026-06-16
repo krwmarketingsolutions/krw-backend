@@ -3539,7 +3539,18 @@ setTimeout(() => {
   pollLairdLeadsSheet();
   setInterval(pollLairdLeadsSheet, LAIRD_POLL_INTERVAL_MS);
 }, 30000);
-// ─── END LAIRD LEADS SHEET POLLER ────────────────────────────────────────────
+// ── Manual Laird sheet poll trigger ──────────────────────────────────────────
+app.get('/debug-poll-laird', requireKey, async (req, res) => {
+  try {
+    await pollLairdLeadsSheet();
+    res.json({ ok: true, message: 'Laird sheet poll complete — check logs for details' });
+  } catch(err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+// ─────────────────────────────────────────────────────────────────────────────
+
+
 
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
