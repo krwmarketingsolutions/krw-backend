@@ -2760,29 +2760,16 @@ app.post('/leads/Lssdi-shore', async (req, res) => {
 
   const b = req.body || {};
 
-  // Validate required fields — everything on buyer's spec sheet is treated as required
+  // Validate required fields — per updated buyer requirements
   const missing = [];
-  if (!b.first_name)              missing.push('first_name');
-  if (!b.last_name)                missing.push('last_name');
-  if (!b.phone)                    missing.push('phone');
-  if (!b.email)                    missing.push('email');
-  if (!b.dob)                      missing.push('dob');
-  if (!b.age)                      missing.push('age');
-  if (!b.gender)                   missing.push('gender');
-  if (!b.address)                  missing.push('address');
-  if (!b.city)                     missing.push('city');
-  if (!b.state)                    missing.push('state');
-  if (!b.zip)                      missing.push('zip');
-  if (!b.trustedform_cert_url)     missing.push('trustedform_cert_url');
-  if (!b.currently_receiving_ssdi) missing.push('currently_receiving_ssdi');
-  if (!b.applied)                  missing.push('applied');
-  if (!b.injury)                   missing.push('injury');
-  if (!b.injury_timeframe)         missing.push('injury_timeframe');
-  if (!b.treated)                  missing.push('treated');
-  if (!b.attorney)                 missing.push('attorney');
-  if (!b.work_negligence)          missing.push('work_negligence');
-  if (!b.working_now)              missing.push('working_now');
-  if (!b.publisher_sub)            missing.push('publisher_sub');
+  if (!b.first_name)          missing.push('first_name');
+  if (!b.last_name)            missing.push('last_name');
+  if (!b.dob)                  missing.push('dob');
+  if (!b.email)                missing.push('email');
+  if (!b.phone)                missing.push('phone');
+  if (!b.trustedform_cert_url) missing.push('trustedform_cert_url');
+  if (!b.zip)                  missing.push('zip');
+  if (!b.publisher_sub)        missing.push('publisher_sub');
 
   if (missing.length) {
     return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
@@ -2820,27 +2807,29 @@ app.post('/leads/Lssdi-shore', async (req, res) => {
     trustedFormURL:         b.trustedform_cert_url,
     email:                  b.email,
     optInDate:              new Date().toISOString().split('T')[0],
-    currentlyReceivingSsdi: b.currently_receiving_ssdi,
-    applied:                b.applied,
-    injury:                 b.injury,
-    injuryTimeFrame:        b.injury_timeframe,
-    treated:                b.treated,
-    attorney:               b.attorney,
     firstName:              b.first_name,
     lastname:                b.last_name,
     dob:                    b.dob,
-    consumerAge:            String(b.age),
-    gender:                 (b.gender || '').toUpperCase(),
-    city:                   b.city,
     zip:                    b.zip,
     centerCode:             LSSDI_SHORE_CENTER_CODE,
-    workNegligence:         b.work_negligence,
-    workingNow:             b.working_now,
-    address:                b.address,
-    state:                  (b.state || '').toUpperCase(),
     source:                 publisherSub,
     validateProductFields:  1,
   };
+
+  // Optional fields — included only if provided
+  if (b.age)                      payload.consumerAge            = String(b.age);
+  if (b.gender)                   payload.gender                 = (b.gender || '').toUpperCase();
+  if (b.address)                  payload.address                = b.address;
+  if (b.city)                     payload.city                   = b.city;
+  if (b.state)                    payload.state                  = (b.state || '').toUpperCase();
+  if (b.currently_receiving_ssdi) payload.currentlyReceivingSsdi  = b.currently_receiving_ssdi;
+  if (b.applied)                  payload.applied                = b.applied;
+  if (b.injury)                   payload.injury                 = b.injury;
+  if (b.injury_timeframe)         payload.injuryTimeFrame         = b.injury_timeframe;
+  if (b.treated)                  payload.treated                = b.treated;
+  if (b.attorney)                 payload.attorney               = b.attorney;
+  if (b.work_negligence)          payload.workNegligence         = b.work_negligence;
+  if (b.working_now)              payload.workingNow             = b.working_now;
 
   try {
     const https    = require('https');
@@ -2927,24 +2916,11 @@ app.get('/debug-lssdi-shore', requireKey, async (req, res) => {
       trustedFormURL:         'https://cert.trustedform.com/0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f',
       email:                  'janedoe@example.com',
       optInDate:              new Date().toISOString().split('T')[0],
-      currentlyReceivingSsdi: 'NO',
-      applied:                'NO',
-      injury:                 'Lower back injury',
-      injuryTimeFrame:        '6 months',
-      treated:                'YES',
-      attorney:               'NO',
       firstName:              'Jane',
       lastname:                'Doe',
       dob:                    '1968-04-12',
-      consumerAge:            '57',
-      gender:                 'FEMALE',
-      city:                   'Phoenix',
       zip:                    '85001',
       centerCode:             LSSDI_SHORE_CENTER_CODE,
-      workNegligence:         'NO',
-      workingNow:             'NO',
-      address:                '123 Main St',
-      state:                  'AZ',
       source:                 'KRW-debug-test',
       validateProductFields:  1,
     };
