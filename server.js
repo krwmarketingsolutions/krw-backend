@@ -2883,6 +2883,84 @@ app.post('/leads/Lssdi-shore', async (req, res) => {
 
     console.log(`[Lssdi-shore] ${accepted ? '✅' : '❌'} ${b.first_name} ${b.last_name} | ${result.message || 'no msg'}`);
 
+    // Mirror this lead into the calls table so it shows on the same publisher
+    // portal Joshua uses — keeps a single consistent portal experience across
+    // both calls-based and leads-based SSDI publishers.
+    if (accepted) {
+      const c4 = await pool.connect();
+      try {
+        await c4.query(
+          `INSERT INTO calls
+             (campaign, caller_id, caller_name, billable,
+              call_status_label, disposition, publisher_sub, buyer_call_id,
+              source_system, call_date, raw)
+           VALUES ('ssdi',$1,$2,true,'Billable','Lead Accepted',$3,$4,'partner',NOW(),$5::jsonb)`,
+          [
+            b.phone,
+            [b.first_name, b.last_name].filter(Boolean).join(' ') || null,
+            publisherSub,
+            'lssdi-' + leadId,
+            JSON.stringify(b)
+          ]
+        );
+      } catch(callErr) {
+        console.error('[Lssdi-shore] calls table insert error:', callErr.message);
+      } finally {
+        c4.release();
+      }
+
+      // Fire billable email — same format as SSDI calls notification
+      const name    = [b.first_name, b.last_name].filter(Boolean).join(' ') || b.phone;
+      const dateStr = new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+      const emailHtml = `
+        <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;background:#f4f6fb;padding:32px 20px">
+          <div style="background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08)">
+            <div style="background:#0f1c3f;padding:24px 28px">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.5);margin-bottom:6px">KRW Marketing Solutions</div>
+              <div style="font-size:22px;font-weight:700;color:#fff">✓ Billable SSDI Lead</div>
+              <div style="font-size:13px;color:rgba(255,255,255,.6);margin-top:4px">${dateStr}</div>
+            </div>
+            <div style="padding:28px">
+              <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px 20px;margin-bottom:20px">
+                <div style="font-size:18px;font-weight:700;color:#15803d;margin-bottom:4px">${name}</div>
+                <div style="font-size:13px;color:#166534">Lead accepted by buyer</div>
+              </div>
+              <table style="width:100%;border-collapse:collapse;font-size:13px">
+                <tr style="border-bottom:1px solid #f1f5f9">
+                  <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;width:38%">Campaign</td>
+                  <td style="padding:10px 0;font-weight:600;color:#0f1c3f">SSDI — Lssdi-shore</td>
+                </tr>
+                <tr style="border-bottom:1px solid #f1f5f9">
+                  <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Phone</td>
+                  <td style="padding:10px 0;color:#475569">${b.phone || '—'}</td>
+                </tr>
+                <tr style="border-bottom:1px solid #f1f5f9">
+                  <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Email</td>
+                  <td style="padding:10px 0;color:#475569">${b.email || '—'}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">KRW Lead ID</td>
+                  <td style="padding:10px 0;font-family:monospace;color:#475569">${leadId || '—'}</td>
+                </tr>
+              </table>
+            </div>
+            <div style="padding:16px 28px;background:#f9fafb;border-top:1px solid #f1f5f9;font-size:11px;color:#9ca3af;text-align:center">
+              KRW Marketing Solutions · Lead Notification System
+            </div>
+          </div>
+        </div>`;
+
+      try {
+        await sendEmailNotification(
+          `✓ Billable SSDI Lead — ${name} | Lssdi-shore`,
+          emailHtml
+        );
+        console.log(`[Lssdi-shore] 📧 Billable email sent for ${name}`);
+      } catch(emailErr) {
+        console.error('[Lssdi-shore] Email error:', emailErr.message);
+      }
+    }
+
     return res.json({
       ok:      accepted,
       result:  accepted ? 'success' : 'rejected',
