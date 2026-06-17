@@ -2102,7 +2102,7 @@ app.post('/leads/mva-email-agency', async (req, res) => {
       has_injuries:          b.physical_injury     || null,
       jornaya_id:            b.jornaya_leadid      || null,
       trusted_form_cert_url: b.trustedform_cert_url|| null,
-      sub_id2:               publisherSub          || null,
+      sub_id2:               aliasPub(publisherSub),
       channel:               b.channel             || 'Facebook',
       language:              b.language            || 'English',
       // Additional fields if provided
@@ -2233,6 +2233,25 @@ function postJSON(urlStr, payload) {
   });
 }
 
+// ── Publisher Alias Map ────────────────────────────────────────────────────
+// Disguises internal pub_id values before they're sent to any external buyer
+// as sub_id2 / publisher_sub / source. Buyers should never see which
+// publisher sent a lead — only KRW needs that mapping internally.
+const PUBLISHER_ALIAS = {
+  'KRW-KANTHONY-RS':     'MVA K',
+  'KRW-KANTHONY-2026-SMG': 'MVA K',
+  'KRW-LAIRD-2026-JEM':  'MVA L',
+  'KRW-LAIRD-2026-X23':  'MVA L',
+  'KRW-LAIRD-2026-1L2':  'MVA L',
+  'KRW-SHORE-2026-LSD':  'SSDI S',
+  'KRW-JOSHUA-2026-76M': 'SSDI J',
+};
+
+function aliasPub(pubId) {
+  if (!pubId) return null;
+  return PUBLISHER_ALIAS[pubId] || pubId;
+}
+
 // ── MVA Buyer Tiers ───────────────────────────────────────────────────────────
 // Add new buyers here. Order = priority (Tier 1 first).
 const MVA_BUYERS = [
@@ -2254,7 +2273,7 @@ const MVA_BUYERS = [
         accident_fault: b.at_fault,
         channel:      b.channel,
         trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url,
-        sub_id2:      publisherSub,
+        sub_id2:      aliasPub(publisherSub),
       };
       if (b.address)                    payload.address    = b.address;
       if (b.city)                       payload.city       = b.city;
@@ -3290,7 +3309,7 @@ app.get('/debug-emailagency', requireKey, async (req, res) => {
       accident_fault: 'No',
       channel:      'Facebook',
       trusted_form_cert_url: 'https://cert.trustedform.com/test123',
-      sub_id2:      'KRW-KANTHONY-RS',
+      sub_id2:      'MVA K',
       state:        'AZ',
       zip:          '85001',
     };
