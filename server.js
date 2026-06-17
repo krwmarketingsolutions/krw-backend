@@ -2736,6 +2736,254 @@ app.post('/postback/ssdi-calls', async (req, res) => {
 });
 // ─── END SSDI CALLS POSTBACK ─────────────────────────────────────────────────
 
+// ─── LSSDI-SHORE — CLIENT 50 PHONEXA BUYER ──────────────────────────────────
+// Receives SSDI leads from publisher and forwards to Client 50's Phonexa
+// "Set Data" endpoint. Campaign: Lssdi-shore | Buyer: Client 50 (Phonexa)
+// centerCode is a fixed internal value, injected server-side, never exposed
+// to the publisher in any request, response, or error message.
+
+const LSSDI_SHORE_URL        = 'https://leads-inst362-client.phonexa.com/store/setdata';
+const LSSDI_SHORE_API_ID     = 'B17725F3F50E44BFB2F1BD84CAC1A8C5';
+const LSSDI_SHORE_API_PASS   = '0b0ebc19dc3eab7bd5d8bf19f';
+const LSSDI_SHORE_PRODUCT_ID = 207;
+const LSSDI_SHORE_CENTER_CODE = 'lisa 115'; // NEVER expose this value to publisher-facing responses
+
+app.post('/leads/Lssdi-shore', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Validate required fields — everything on buyer's spec sheet is treated as required
+  const missing = [];
+  if (!b.first_name)              missing.push('first_name');
+  if (!b.last_name)                missing.push('last_name');
+  if (!b.phone)                    missing.push('phone');
+  if (!b.email)                    missing.push('email');
+  if (!b.dob)                      missing.push('dob');
+  if (!b.age)                      missing.push('age');
+  if (!b.gender)                   missing.push('gender');
+  if (!b.address)                  missing.push('address');
+  if (!b.city)                     missing.push('city');
+  if (!b.state)                    missing.push('state');
+  if (!b.zip)                      missing.push('zip');
+  if (!b.trustedform_cert_url)     missing.push('trustedform_cert_url');
+  if (!b.currently_receiving_ssdi) missing.push('currently_receiving_ssdi');
+  if (!b.applied)                  missing.push('applied');
+  if (!b.injury)                   missing.push('injury');
+  if (!b.injury_timeframe)         missing.push('injury_timeframe');
+  if (!b.treated)                  missing.push('treated');
+  if (!b.attorney)                 missing.push('attorney');
+  if (!b.work_negligence)          missing.push('work_negligence');
+  if (!b.working_now)              missing.push('working_now');
+  if (!b.publisher_sub)            missing.push('publisher_sub');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  const publisherSub = b.publisher_sub;
+
+  // Insert lead into DB
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, state, zip, status, raw, received_at)
+       VALUES ('Lssdi-shore','SSDI',$1,$2,$3,$4,$5,$6,$7,'pending',$8::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email,
+       publisherSub, b.state, b.zip,
+       JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[Lssdi-shore] DB insert error:', dbErr.message);
+  } finally {
+    client.release();
+  }
+
+  // Build Phonexa payload — centerCode injected here, never from publisher input
+  const payload = {
+    apiId:                  LSSDI_SHORE_API_ID,
+    apiPassword:            LSSDI_SHORE_API_PASS,
+    productId:              LSSDI_SHORE_PRODUCT_ID,
+    phoneNumber:            b.phone,
+    trustedFormURL:         b.trustedform_cert_url,
+    email:                  b.email,
+    optInDate:              new Date().toISOString().split('T')[0],
+    currentlyReceivingSsdi: b.currently_receiving_ssdi,
+    applied:                b.applied,
+    injury:                 b.injury,
+    injuryTimeFrame:        b.injury_timeframe,
+    treated:                b.treated,
+    attorney:               b.attorney,
+    firstName:              b.first_name,
+    lastname:                b.last_name,
+    dob:                    b.dob,
+    consumerAge:            String(b.age),
+    gender:                 (b.gender || '').toUpperCase(),
+    city:                   b.city,
+    zip:                    b.zip,
+    centerCode:             LSSDI_SHORE_CENTER_CODE,
+    workNegligence:         b.work_negligence,
+    workingNow:             b.working_now,
+    address:                b.address,
+    state:                  (b.state || '').toUpperCase(),
+    source:                 publisherSub,
+    validateProductFields:  1,
+  };
+
+  try {
+    const https    = require('https');
+    const postData = JSON.stringify(payload);
+    const url      = new URL(LSSDI_SHORE_URL);
+
+    const buyerRes = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: url.hostname,
+        path:     url.pathname,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/json',
+          'Content-Length': Buffer.byteLength(postData),
+        }
+      };
+      const r2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: data }));
+      });
+      r2.on('error', reject);
+      r2.write(postData);
+      r2.end();
+    });
+
+    let result = {};
+    try { result = JSON.parse(buyerRes.body); } catch(e) { result = { status: 0, message: buyerRes.body }; }
+
+    const accepted = result.status === 1;
+
+    if (leadId) {
+      const c2 = await pool.connect();
+      try {
+        await c2.query(
+          `UPDATE leads SET
+             status          = $1,
+             buyer_response  = $2::jsonb,
+             buyer_error     = $3,
+             revenue         = 0
+           WHERE id = $4`,
+          [
+            accepted ? 'forwarded' : 'buyer_rejected',
+            JSON.stringify(result),
+            accepted ? null : (result.message || JSON.stringify(result.errors) || 'rejected'),
+            leadId
+          ]
+        );
+      } finally { c2.release(); }
+    }
+
+    console.log(`[Lssdi-shore] ${accepted ? '✅' : '❌'} ${b.first_name} ${b.last_name} | ${result.message || 'no msg'}`);
+
+    return res.json({
+      ok:      accepted,
+      result:  accepted ? 'success' : 'rejected',
+      message: result.message || null,
+      krw_id:  leadId
+    });
+
+  } catch(fwdErr) {
+    console.error('[Lssdi-shore] Forward error:', fwdErr.message);
+    if (leadId) {
+      const c3 = await pool.connect();
+      try {
+        await c3.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
+          [fwdErr.message, leadId]);
+      } finally { c3.release(); }
+    }
+    return res.status(502).json({ ok: false, error: 'Failed to forward lead', detail: fwdErr.message });
+  }
+});
+// ─── END LSSDI-SHORE ──────────────────────────────────────────────────────────
+
+// ── Lssdi-shore debug endpoint — remove after testing ────────────────────────
+// NOTE: Buyer requires REAL data on test calls, not the word "test"
+app.get('/debug-lssdi-shore', requireKey, async (req, res) => {
+  try {
+    const payload = {
+      apiId:                  LSSDI_SHORE_API_ID,
+      apiPassword:            LSSDI_SHORE_API_PASS,
+      productId:              LSSDI_SHORE_PRODUCT_ID,
+      phoneNumber:            '3105550199',
+      trustedFormURL:         'https://cert.trustedform.com/0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f',
+      email:                  'janedoe@example.com',
+      optInDate:              new Date().toISOString().split('T')[0],
+      currentlyReceivingSsdi: 'NO',
+      applied:                'NO',
+      injury:                 'Lower back injury',
+      injuryTimeFrame:        '6 months',
+      treated:                'YES',
+      attorney:               'NO',
+      firstName:              'Jane',
+      lastname:                'Doe',
+      dob:                    '1968-04-12',
+      consumerAge:            '57',
+      gender:                 'FEMALE',
+      city:                   'Phoenix',
+      zip:                    '85001',
+      centerCode:             LSSDI_SHORE_CENTER_CODE,
+      workNegligence:         'NO',
+      workingNow:             'NO',
+      address:                '123 Main St',
+      state:                  'AZ',
+      source:                 'KRW-debug-test',
+      validateProductFields:  1,
+    };
+
+    const https    = require('https');
+    const postData = JSON.stringify(payload);
+    const url      = new URL(LSSDI_SHORE_URL);
+
+    const buyerRes = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: url.hostname,
+        path:     url.pathname,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/json',
+          'Content-Length': Buffer.byteLength(postData),
+        }
+      };
+      const r2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: data }));
+      });
+      r2.on('error', reject);
+      r2.write(postData);
+      r2.end();
+    });
+
+    res.json({
+      http_status:  buyerRes.status,
+      raw_body:     buyerRes.body,
+      payload_sent: { ...payload, apiPassword: '[redacted]', centerCode: '[redacted]' },
+    });
+  } catch(err) {
+    res.json({ error: err.message });
+  }
+});
+// ── End Lssdi-shore debug ─────────────────────────────────────────────────────
+
 
 
 
