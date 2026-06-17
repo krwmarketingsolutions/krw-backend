@@ -482,11 +482,29 @@ app.get('/leads/feed', requireKey, async (req, res) => {
     const wc = where.length ? 'WHERE '+where.join(' AND ') : '';
     const r = await pool.query(
       `SELECT id,received_at,campaign,first_name,last_name,email,phone,state,
-              status,zapier_status,buyer_intake_id,buyer_error,buyer_status,notes,publisher_sub
+              status,zapier_status,buyer_intake_id,buyer_error,buyer_status,notes,publisher_sub,billable
        FROM leads ${wc} ORDER BY received_at DESC LIMIT $${i}`, params);
     res.json({ ok:true, count:r.rows.length, leads:r.rows });
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
+
+// ── Manual billable toggle (admin-only, not exposed to publisher portal) ────
+app.post('/leads/:id/billable', requireKey, async (req, res) => {
+  const { id } = req.params;
+  const { billable } = req.body || {};
+  if (typeof billable !== 'boolean') {
+    return res.status(400).json({ ok: false, error: 'billable must be true or false' });
+  }
+  try {
+    const r = await pool.query(
+      `UPDATE leads SET billable=$1 WHERE id=$2 RETURNING id, first_name, last_name, billable`,
+      [billable, id]
+    );
+    if (!r.rows.length) return res.status(404).json({ ok: false, error: 'Lead not found' });
+    res.json({ ok: true, lead: r.rows[0] });
+  } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 
 app.get('/leads/export/:campaign', requireKey, async (req, res) => {
   try {
