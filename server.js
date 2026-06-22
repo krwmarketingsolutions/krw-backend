@@ -3940,11 +3940,11 @@ const JOSHUA_SHEET_ID = '1ouur8pCxP8pnyc1lyqlUqdsUF4S0mGFj2sq0dVXH91w';
 const JOSHUA_SHEETS = [
   {
     name: 'DEALS',
-    url:  `https://docs.google.com/spreadsheets/d/${JOSHUA_SHEET_ID}/export?format=csv&gid=0`,
+    url:  `https://docs.google.com/spreadsheets/d/${JOSHUA_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=DEALS`,
   },
   {
     name: 'DISPOS',
-    url:  `https://docs.google.com/spreadsheets/d/${JOSHUA_SHEET_ID}/export?format=csv&gid=522895126`,
+    url:  `https://docs.google.com/spreadsheets/d/${JOSHUA_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=DISPOS`,
   },
 ];
 const JOSHUA_POLL_INTERVAL_MS = 60 * 60 * 1000;
@@ -3954,7 +3954,13 @@ async function pollJoshuaCallsSheet() {
   for (const sheet of JOSHUA_SHEETS) {
     try {
       const csv = await fetchKASheetCSV(sheet.url);
-      const rawLines = csv.split('\n').map(l => l.trim()).filter(Boolean);
+
+      // Normalize multiline quoted cells in header — the sheet has:
+      // "contacted_date,"\n\nintakecompleted_date"" which breaks column alignment
+      // Collapse any quoted fields containing only whitespace/newlines into a single token
+      const normalizedCsv = csv.replace(/"[\s\n\r]+([^"]+)"/g, '"$1"');
+
+      const rawLines = normalizedCsv.split('\n').map(l => l.trim()).filter(Boolean);
 
       // Find real header row
       let headerIdx = -1;
