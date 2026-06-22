@@ -1798,7 +1798,7 @@ app.get('/calls/feed', requireKey, async (req, res) => {
     const params = [];
     let query = `SELECT * FROM calls WHERE source_system IN ('partner','sheet_import')`;
     if (daysInt < 9999) {
-      query += ` AND (received_at >= NOW() - INTERVAL '${daysInt} days' OR call_date >= (CURRENT_DATE - INTERVAL '${daysInt} days')::date)`;
+      query += ` AND (received_at::timestamptz >= NOW() - INTERVAL '${daysInt} days' OR call_date >= (CURRENT_DATE - INTERVAL '${daysInt} days')::date)`;
     }
     if (pub) {
       params.push(pub);
