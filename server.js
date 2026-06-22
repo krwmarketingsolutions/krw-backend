@@ -3944,7 +3944,7 @@ const JOSHUA_SHEETS = [
   },
   {
     name: 'DISPOS',
-    url:  `https://docs.google.com/spreadsheets/d/${JOSHUA_SHEET_ID}/export?format=csv&gid=1947810341`,
+    url:  `https://docs.google.com/spreadsheets/d/${JOSHUA_SHEET_ID}/export?format=csv&gid=522895126`,
   },
 ];
 const JOSHUA_POLL_INTERVAL_MS = 60 * 60 * 1000;
@@ -3996,14 +3996,24 @@ async function pollJoshuaCallsSheet() {
           if (rawPhone.startsWith('1') && rawPhone.length === 11) rawPhone = rawPhone.slice(1);
           if (rawPhone.length !== 10) { unmatched++; continue; }
 
-          const intakeId     = findCol(row, 'intake_id', 'intakeid')              || null;
-          const retainedDate = findCol(row, 'retained_date', 'retaineddate', 'retained') || null;
-          const filedDate    = findCol(row, 'filed_date', 'fileddate', 'filed')   || null;
-          const intakeDate   = findCol(row, 'intake_date', 'intakedate')          || null;
-          const age          = findCol(row, 'age')                                || null;
+          // Use direct key scan since findCol requires exact match
+          // Sheet columns: retained_date, filed_date — scan all keys for partial match
+          function findColLoose(row, ...candidates) {
+            for (const c of candidates) {
+              const key = Object.keys(row).find(k => k.trim().toLowerCase().includes(c.toLowerCase()));
+              if (key !== undefined && row[key] !== undefined && String(row[key]).trim()) return String(row[key]).trim();
+            }
+            return null;
+          }
+
+          const intakeId     = findColLoose(row, 'intake_id', 'intakeid')          || null;
+          const retainedDate = findColLoose(row, 'retained_date', 'retained')      || null;
+          const filedDate    = findColLoose(row, 'filed_date', 'filed')            || null;
+          const intakeDate   = findColLoose(row, 'intake_date', 'intakedate')      || null;
+          const age          = findColLoose(row, 'age')                            || null;
 
           // Debug log to confirm values
-          console.log(`[Joshua Sheet Poll] Phone: ${rawPhone} | retained: "${retainedDate}" | filed: "${filedDate}"`);
+          console.log(`[Joshua Sheet Poll] Phone: ${rawPhone} | retained: "${retainedDate}" | filed: "${filedDate}" | keys: ${Object.keys(row).join('|')}`);
 
           // Signed = retained AND filed both present and non-empty
           const isSigned = !!(retainedDate && retainedDate.trim().length > 0 && filedDate && filedDate.trim().length > 0);
