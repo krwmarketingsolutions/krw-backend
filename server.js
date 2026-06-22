@@ -3927,6 +3927,223 @@ app.get('/debug-poll-laird', requireKey, async (req, res) => {
 });
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── JOSHUA DURAN SSDI CALLS SHEET POLLER ────────────────────────────────────
+// Polls Lead Tree / Forge SSDI Google Sheet every hour.
+// Sheet: 1ouur8pCxP8pnyc1lyqlUqdsUF4S0mGFj2sq0dVXH91w
+// Tabs: DEALS (billable/signed) and DISPOS (all dispositions)
+// Match by: caller_primary_phone (strip leading 1) against calls.caller_id
+// Signed = YES when both retained_date AND filed_date are present
+// Updates calls table: billable=true, call_status_label='Signed'
+// Fires billable email on new sign
+
+const JOSHUA_SHEET_ID = '1ouur8pCxP8pnyc1lyqlUqdsUF4S0mGFj2sq0dVXH91w';
+const JOSHUA_SHEETS = [
+  {
+    name: 'DEALS',
+    url:  `https://docs.google.com/spreadsheets/d/${JOSHUA_SHEET_ID}/export?format=csv&gid=0`,
+  },
+  {
+    name: 'DISPOS',
+    url:  `https://docs.google.com/spreadsheets/d/${JOSHUA_SHEET_ID}/export?format=csv&gid=1947810341`,
+  },
+];
+const JOSHUA_POLL_INTERVAL_MS = 60 * 60 * 1000;
+const JOSHUA_PUB_ID = 'KRW-JOSHUA-2026-76M';
+
+async function pollJoshuaCallsSheet() {
+  for (const sheet of JOSHUA_SHEETS) {
+    try {
+      const csv = await fetchKASheetCSV(sheet.url);
+      const rawLines = csv.split('\n').map(l => l.trim()).filter(Boolean);
+
+      // Find real header row
+      let headerIdx = -1;
+      for (let i = 0; i < rawLines.length; i++) {
+        const lower = rawLines[i].toLowerCase();
+        if (lower.includes('intake_id') || lower.includes('caller_primary_phone')) {
+          headerIdx = i;
+          break;
+        }
+      }
+      if (headerIdx === -1) {
+        console.log(`[Joshua Sheet Poll] ${sheet.name}: could not find header row — is sheet public?`);
+        console.log(`[Joshua Sheet Poll] Line 0: ${(rawLines[0]||'').substring(0,80)}`);
+        continue;
+      }
+
+      const cleanCsv = rawLines.slice(headerIdx).join('\n');
+      const rows = parseKASheetCSV(cleanCsv);
+
+      const dataRows = rows.filter(r => {
+        const phone = findCol(r, 'caller_primary_phone', 'phone w/ leading 1') || '';
+        return phone.replace(/\D/g, '').length >= 10;
+      });
+
+      if (!dataRows.length) {
+        console.log(`[Joshua Sheet Poll] ${sheet.name}: no data rows`);
+        continue;
+      }
+
+      console.log(`[Joshua Sheet Poll] ${sheet.name}: ${dataRows.length} rows to process`);
+
+      const client = await pool.connect();
+      try {
+        let matched = 0, unmatched = 0;
+
+        for (const row of dataRows) {
+          // Strip leading 1 from phone
+          let rawPhone = (findCol(row, 'caller_primary_phone') || '').replace(/\D/g, '');
+          if (rawPhone.startsWith('1') && rawPhone.length === 11) rawPhone = rawPhone.slice(1);
+          if (rawPhone.length !== 10) { unmatched++; continue; }
+
+          const intakeId     = findCol(row, 'intake_id')     || null;
+          const retainedDate = findCol(row, 'retained_date') || null;
+          const filedDate    = findCol(row, 'filed_date')    || null;
+          const intakeDate   = findCol(row, 'intake_date')   || null;
+          const age          = findCol(row, 'age')           || null;
+
+          // Signed = retained AND filed both present
+          const isSigned = !!(retainedDate && retainedDate.trim() && filedDate && filedDate.trim());
+
+          // Look up call by phone and publisher
+          let lookup = await client.query(
+            `SELECT id, caller_id, caller_name, billable, call_status_label
+             FROM calls
+             WHERE caller_id = $1 AND publisher_sub = $2 AND campaign = 'ssdi'
+             ORDER BY call_date DESC LIMIT 1`,
+            [rawPhone, JOSHUA_PUB_ID]
+          );
+
+          // Fallback — campaign-agnostic
+          if (!lookup.rows.length) {
+            lookup = await client.query(
+              `SELECT id, caller_id, caller_name, billable, call_status_label
+               FROM calls
+               WHERE caller_id = $1 AND publisher_sub = $2
+               ORDER BY call_date DESC LIMIT 1`,
+              [rawPhone, JOSHUA_PUB_ID]
+            );
+          }
+
+          if (!lookup.rows.length) { unmatched++; continue; }
+
+          const call = lookup.rows[0];
+          const wasAlreadySigned = call.billable === true;
+
+          await client.query(
+            `UPDATE calls SET
+               billable          = $1,
+               call_status_label = $2,
+               disposition       = $3,
+               raw               = COALESCE(raw, '{}'::jsonb) || $4::jsonb
+             WHERE id = $5`,
+            [
+              isSigned,
+              isSigned ? 'Signed' : (retainedDate ? 'Retained' : 'In Progress'),
+              isSigned ? 'Filed'  : (retainedDate ? 'Retained' : 'Intake'),
+              JSON.stringify({
+                joshua_sheet_sync: {
+                  intake_id:     intakeId,
+                  retained_date: retainedDate || null,
+                  filed_date:    filedDate    || null,
+                  intake_date:   intakeDate   || null,
+                  age:           age          || null,
+                  signed:        isSigned,
+                  synced_at:     new Date().toISOString(),
+                  source:        'joshua_sheet_poll',
+                }
+              }),
+              call.id,
+            ]
+          );
+
+          // Fire billable email on newly signed
+          if (isSigned && !wasAlreadySigned) {
+            const name    = call.caller_name || rawPhone;
+            const dateStr = new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+            const emailHtml = `
+              <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;background:#f4f6fb;padding:32px 20px">
+                <div style="background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08)">
+                  <div style="background:#0f1c3f;padding:24px 28px">
+                    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.5);margin-bottom:6px">KRW Marketing Solutions</div>
+                    <div style="font-size:22px;font-weight:700;color:#fff">✓ Signed SSDI Case</div>
+                    <div style="font-size:13px;color:rgba(255,255,255,.6);margin-top:4px">${dateStr}</div>
+                  </div>
+                  <div style="padding:28px">
+                    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px 20px;margin-bottom:20px">
+                      <div style="font-size:18px;font-weight:700;color:#15803d;margin-bottom:4px">${name}</div>
+                      <div style="font-size:13px;color:#166534">Retained & Filed — CPA triggered</div>
+                    </div>
+                    <table style="width:100%;border-collapse:collapse;font-size:13px">
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;width:38%">Campaign</td>
+                        <td style="padding:10px 0;font-weight:600;color:#0f1c3f">SSDI Filed — Campaign 1696</td>
+                      </tr>
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Publisher</td>
+                        <td style="padding:10px 0;color:#475569">Joshua Duran</td>
+                      </tr>
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Phone</td>
+                        <td style="padding:10px 0;color:#475569">${rawPhone}</td>
+                      </tr>
+                      <tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Retained</td>
+                        <td style="padding:10px 0;color:#475569">${retainedDate || '—'}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding:10px 0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Filed</td>
+                        <td style="padding:10px 0;color:#475569">${filedDate || '—'}</td>
+                      </tr>
+                    </table>
+                  </div>
+                  <div style="padding:16px 28px;background:#f9fafb;border-top:1px solid #f1f5f9;font-size:11px;color:#9ca3af;text-align:center">
+                    KRW Marketing Solutions · Lead Notification System
+                  </div>
+                </div>
+              </div>`;
+
+            try {
+              await sendEmailNotification(
+                `✓ Signed SSDI Case — ${name} | Retained & Filed | Campaign 1696`,
+                emailHtml
+              );
+              console.log(`[Joshua Sheet Poll] 📧 Billable email sent for ${name}`);
+            } catch(emailErr) {
+              console.error('[Joshua Sheet Poll] Email error:', emailErr.message);
+            }
+          }
+
+          matched++;
+        }
+
+        console.log(`[Joshua Sheet Poll] ${sheet.name}: ${matched} matched, ${unmatched} unmatched`);
+      } finally {
+        client.release();
+      }
+    } catch(err) {
+      console.error(`[Joshua Sheet Poll] ${sheet.name} error:`, err.message);
+    }
+  }
+}
+
+// Start 60s after boot (offset from other pollers), then every hour
+setTimeout(() => {
+  pollJoshuaCallsSheet();
+  setInterval(pollJoshuaCallsSheet, JOSHUA_POLL_INTERVAL_MS);
+}, 60000);
+
+// Manual trigger
+app.get('/debug-poll-joshua', requireKey, async (req, res) => {
+  try {
+    await pollJoshuaCallsSheet();
+    res.json({ ok: true, message: 'Joshua sheet poll complete — check logs' });
+  } catch(err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+// ─── END JOSHUA SSDI CALLS SHEET POLLER ──────────────────────────────────────
+
 
 
 app.listen(PORT, '0.0.0.0', () => {
