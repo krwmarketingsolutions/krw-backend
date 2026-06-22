@@ -4025,37 +4025,74 @@ async function pollJoshuaCallsSheet() {
             );
           }
 
-          if (!lookup.rows.length) { unmatched++; continue; }
+          if (!lookup.rows.length) {
+            // No existing call — create one from sheet data so it shows on portal
+            const callerName = findCol(row, 'caller_name', 'name', 'client_name') || null;
+            const callDate   = intakeDate ? intakeDate.split('T')[0] : new Date().toISOString().split('T')[0];
+            const insert = await client.query(
+              `INSERT INTO calls
+                 (campaign, caller_id, caller_name, billable, call_status_label,
+                  disposition, publisher_sub, source_system, call_date, raw)
+               VALUES ('ssdi',$1,$2,$3,$4,$5,$6,'sheet_import',$7::date,$8::jsonb)
+               RETURNING id, caller_id, caller_name, billable, call_status_label`,
+              [
+                rawPhone,
+                callerName,
+                isSigned,
+                isSigned ? 'Signed'      : (retainedDate ? 'Retained'  : 'In Progress'),
+                isSigned ? 'Filed'       : (retainedDate ? 'Retained'  : 'Intake'),
+                JOSHUA_PUB_ID,
+                callDate,
+                JSON.stringify({
+                  joshua_sheet_sync: {
+                    intake_id:     intakeId,
+                    retained_date: retainedDate || null,
+                    filed_date:    filedDate    || null,
+                    intake_date:   intakeDate   || null,
+                    age:           age          || null,
+                    signed:        isSigned,
+                    synced_at:     new Date().toISOString(),
+                    source:        'joshua_sheet_poll_created',
+                  }
+                }),
+              ]
+            );
+            lookup = { rows: [insert.rows[0]] };
+            console.log(`[Joshua Sheet Poll] ➕ Created call record for ${rawPhone} from sheet`);
+          }
 
           const call = lookup.rows[0];
           const wasAlreadySigned = call.billable === true;
 
-          await client.query(
-            `UPDATE calls SET
-               billable          = $1,
-               call_status_label = $2,
-               disposition       = $3,
-               raw               = COALESCE(raw, '{}'::jsonb) || $4::jsonb
-             WHERE id = $5`,
-            [
-              isSigned,
-              isSigned ? 'Signed' : (retainedDate ? 'Retained' : 'In Progress'),
-              isSigned ? 'Filed'  : (retainedDate ? 'Retained' : 'Intake'),
-              JSON.stringify({
-                joshua_sheet_sync: {
-                  intake_id:     intakeId,
-                  retained_date: retainedDate || null,
-                  filed_date:    filedDate    || null,
-                  intake_date:   intakeDate   || null,
-                  age:           age          || null,
-                  signed:        isSigned,
-                  synced_at:     new Date().toISOString(),
-                  source:        'joshua_sheet_poll',
-                }
-              }),
-              call.id,
-            ]
-          );
+          // Only run UPDATE if this was an existing record (not just created)
+          if (call.id && !call.source_system) {
+            await client.query(
+              `UPDATE calls SET
+                 billable          = $1,
+                 call_status_label = $2,
+                 disposition       = $3,
+                 raw               = COALESCE(raw, '{}'::jsonb) || $4::jsonb
+               WHERE id = $5`,
+              [
+                isSigned,
+                isSigned ? 'Signed' : (retainedDate ? 'Retained' : 'In Progress'),
+                isSigned ? 'Filed'  : (retainedDate ? 'Retained' : 'Intake'),
+                JSON.stringify({
+                  joshua_sheet_sync: {
+                    intake_id:     intakeId,
+                    retained_date: retainedDate || null,
+                    filed_date:    filedDate    || null,
+                    intake_date:   intakeDate   || null,
+                    age:           age          || null,
+                    signed:        isSigned,
+                    synced_at:     new Date().toISOString(),
+                    source:        'joshua_sheet_poll',
+                  }
+                }),
+                call.id,
+              ]
+            );
+          }
 
           // Fire billable email on newly signed
           if (isSigned && !wasAlreadySigned) {
