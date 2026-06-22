@@ -3996,14 +3996,17 @@ async function pollJoshuaCallsSheet() {
           if (rawPhone.startsWith('1') && rawPhone.length === 11) rawPhone = rawPhone.slice(1);
           if (rawPhone.length !== 10) { unmatched++; continue; }
 
-          const intakeId     = findCol(row, 'intake_id')     || null;
-          const retainedDate = findCol(row, 'retained_date') || null;
-          const filedDate    = findCol(row, 'filed_date')    || null;
-          const intakeDate   = findCol(row, 'intake_date')   || null;
-          const age          = findCol(row, 'age')           || null;
+          const intakeId     = findCol(row, 'intake_id', 'intakeid')              || null;
+          const retainedDate = findCol(row, 'retained_date', 'retaineddate', 'retained') || null;
+          const filedDate    = findCol(row, 'filed_date', 'fileddate', 'filed')   || null;
+          const intakeDate   = findCol(row, 'intake_date', 'intakedate')          || null;
+          const age          = findCol(row, 'age')                                || null;
 
-          // Signed = retained AND filed both present
-          const isSigned = !!(retainedDate && retainedDate.trim() && filedDate && filedDate.trim());
+          // Debug log to confirm values
+          console.log(`[Joshua Sheet Poll] Phone: ${rawPhone} | retained: "${retainedDate}" | filed: "${filedDate}"`);
+
+          // Signed = retained AND filed both present and non-empty
+          const isSigned = !!(retainedDate && retainedDate.trim().length > 0 && filedDate && filedDate.trim().length > 0);
 
           // Look up call by phone and publisher
           let lookup = await client.query(
@@ -4066,6 +4069,12 @@ async function pollJoshuaCallsSheet() {
 
           // Only run UPDATE if this was an existing record (not just created)
           if (call.id && !call.source_system) {
+            // Never downgrade a record already marked billable/signed
+            if (call.billable === true && !isSigned) {
+              console.log(`[Joshua Sheet Poll] Skipping downgrade for ${rawPhone} — already billable`);
+              matched++;
+              continue;
+            }
             await client.query(
               `UPDATE calls SET
                  billable          = $1,
