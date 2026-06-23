@@ -4051,8 +4051,8 @@ async function pollJoshuaCallsSheet() {
             const insert = await client.query(
               `INSERT INTO calls
                  (campaign, caller_id, caller_name, billable, call_status_label,
-                  disposition, publisher_sub, source_system, call_date, raw)
-               VALUES ('ssdi',$1,$2,$3,$4,$5,$6,'sheet_import',$7::date,$8::jsonb)
+                  disposition, publisher_sub, source_system, call_date, payout_amount, raw)
+               VALUES ('ssdi',$1,$2,$3,$4,$5,$6,'sheet_import',$7::date,$8,$9::jsonb)
                RETURNING id, caller_id, caller_name, billable, call_status_label`,
               [
                 rawPhone,
@@ -4062,6 +4062,7 @@ async function pollJoshuaCallsSheet() {
                 isSigned ? 'Filed'       : (retainedDate ? 'Retained'  : 'Intake'),
                 JOSHUA_PUB_ID,
                 callDate,
+                isSigned ? 400.00 : 0,
                 JSON.stringify({
                   joshua_sheet_sync: {
                     intake_id:     intakeId,
@@ -4096,12 +4097,14 @@ async function pollJoshuaCallsSheet() {
                  billable          = $1,
                  call_status_label = $2,
                  disposition       = $3,
-                 raw               = COALESCE(raw, '{}'::jsonb) || $4::jsonb
-               WHERE id = $5`,
+                 payout_amount     = $4,
+                 raw               = COALESCE(raw, '{}'::jsonb) || $5::jsonb
+               WHERE id = $6`,
               [
                 isSigned,
                 isSigned ? 'Signed' : (retainedDate ? 'Retained' : 'In Progress'),
                 isSigned ? 'Filed'  : (retainedDate ? 'Retained' : 'Intake'),
+                isSigned ? 400.00 : 0,
                 JSON.stringify({
                   joshua_sheet_sync: {
                     intake_id:     intakeId,
