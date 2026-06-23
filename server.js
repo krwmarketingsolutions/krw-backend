@@ -2656,7 +2656,10 @@ app.post('/postback/ssdi-calls', async (req, res) => {
   const duration     = parseInt(b.duration) || 0;
   const recordingUrl = (b.recording_url || '').trim() || null;
   const state        = (b.state         || '').trim().toUpperCase() || null;
-  const publisherSub = (b.publisher_sub || 'KRW-JOSHUA-2026-76M').trim();
+
+  // publisher_sub is ALWAYS set server-side — never from buyer postback
+  // Buyer sends "KRW SSDI Pub" or nothing — we ignore it and inject the real value
+  const publisherSub = 'KRW-JOSHUA-2026-76M';
 
   if (!phone && !cid) {
     return res.status(400).json({ ok: false, error: 'phone or cid required' });
