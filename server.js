@@ -1815,13 +1815,13 @@ app.get('/calls/summary', requireKey, async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT
-        COUNT(*)                                          AS total,
-        COUNT(*) FILTER(WHERE billable=true)              AS billable,
-        COUNT(*) FILTER(WHERE DATE(received_at)=CURRENT_DATE) AS today,
-        COALESCE(SUM(payout_amount) FILTER(WHERE billable=true),0) AS total_payout
+        COUNT(*)                                                                        AS total,
+        COUNT(*) FILTER(WHERE billable=true)                                            AS billable,
+        COUNT(*) FILTER(WHERE call_date=CURRENT_DATE OR DATE(received_at)=CURRENT_DATE) AS today,
+        COALESCE(SUM(payout_amount) FILTER(WHERE billable=true),0)                     AS total_payout
       FROM calls
-      WHERE source_system='partner'
-        AND received_at >= NOW() - INTERVAL '30 days'
+      WHERE source_system IN ('partner','sheet_import')
+        AND (source_system='sheet_import' OR received_at >= NOW() - INTERVAL '30 days')
     `);
     res.json({ ok: true, ...r.rows[0] });
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
