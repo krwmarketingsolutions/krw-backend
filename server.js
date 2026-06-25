@@ -2649,16 +2649,17 @@ app.post('/postback/mva-funnel', async (req, res) => {
 app.post('/postback/ssdi-calls', async (req, res) => {
   const b = req.body || {};
 
-  const phone        = (b.phone         || '').replace(/\D/g, '').trim() || null;
+  // Accept both our field names and Ringba's field names
+  const phone        = ((b.phone || b.caller_id || '')).replace(/\D/g, '').trim() || null;
   const firstName    = (b.first_name    || '').trim() || null;
   const lastName     = (b.last_name     || '').trim() || null;
-  const cid          = (b.cid           || '').trim() || null;
-  const duration     = parseInt(b.duration) || 0;
+  const cid          = (b.cid || b.call_id || '').trim() || null;
+  const duration     = parseInt(b.duration || b.call_length || 0) || 0;
   const recordingUrl = (b.recording_url || '').trim() || null;
-  const state        = (b.state         || '').trim().toUpperCase() || null;
+  const state        = (b.state || '').trim().toUpperCase() || null;
 
   // publisher_sub is ALWAYS set server-side — never from buyer postback
-  // Buyer sends "KRW SSDI Pub" or nothing — we ignore it and inject the real value
+  // Ringba sends publisher_id which we ignore and inject the real value
   const publisherSub = 'KRW-JOSHUA-2026-76M';
 
   if (!phone && !cid) {
