@@ -2263,6 +2263,7 @@ const PUBLISHER_ALIAS = {
   'KRW-LAIRD-2026-1L2':  'MVA L',
   'KRW-SHORE-2026-LSD':  'SSDI S',
   'KRW-JOSHUA-2026-76M': 'SSDI J',
+  'KRW-MVA-2026-8RT':    'MVA 2',
 };
 
 function aliasPub(pubId) {
