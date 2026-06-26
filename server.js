@@ -1,4 +1,4 @@
-// ══════════════════════════════════════════════════════
+\// ══════════════════════════════════════════════════════
 // FILE: server.js
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
@@ -2111,9 +2111,9 @@ app.post('/leads/mva-email-agency', async (req, res) => {
       dob:                   b.dob                 || null,
       ip_address:            b.ip_address          || null,
       user_agent:            b.user_agent          || null,
-      attorney:              b.have_attorney       || null,
-      date_of_incident:      b.incident_date       || null,
-      accident_fault:        b.at_fault            || null,
+      attorney:              b.have_attorney || b.attorney       || null,
+      date_of_incident:      b.incident_date                     || null,
+      accident_fault:        b.at_fault      || b.accident_fault || null,
       settlement:            b.settlement          || null,
       cited:                 b.cited               || null,
       received_treatment:    b.doctor_treatment    || null,
@@ -2121,7 +2121,7 @@ app.post('/leads/mva-email-agency', async (req, res) => {
       jornaya_id:            b.jornaya_leadid      || null,
       trusted_form_cert_url: b.trustedform_cert_url|| null,
       sub_id2:               aliasPub(publisherSub),
-      channel:               b.channel             || 'Facebook',
+      channel:               (['Facebook','Google','Email','SMS','Display','Native','Other'].includes(b.channel) ? b.channel : 'Facebook'),
       language:              b.language            || 'English',
       // Additional fields if provided
       mva_injury:            b.mva_injury          || null,
@@ -2290,7 +2290,7 @@ const MVA_BUYERS = [
         ip_address:   b.ip_address,
         attorney:     b.have_attorney,
         accident_fault: b.at_fault,
-        channel:      b.channel,
+        channel:      (['Facebook','Google','Email','SMS','Display','Native','Other'].includes(b.channel) ? b.channel : 'Facebook'),
         trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url,
         sub_id2:      aliasPub(publisherSub),
       };
@@ -2361,9 +2361,9 @@ app.post('/leads/mva-funnel', async (req, res) => {
   if (!b.phone)         missing.push('phone');
   if (!b.email)         missing.push('email');
   if (!b.ip_address)    missing.push('ip_address');
-  if (!b.have_attorney) missing.push('have_attorney');
-  if (!b.at_fault)      missing.push('at_fault');
-  if (!b.channel)       missing.push('channel');
+  if (!b.have_attorney && !b.attorney) missing.push('have_attorney');
+  if (!b.at_fault && !b.accident_fault) missing.push('at_fault');
+  // channel is optional — defaults to 'Facebook' if missing or invalid
   if (!b.trustedform_cert_url && !b.trusted_form_cert_url) missing.push('trustedform_cert_url');
   if (!b.publisher_sub) missing.push('publisher_sub');
 
