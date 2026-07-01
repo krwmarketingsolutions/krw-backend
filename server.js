@@ -457,7 +457,13 @@ app.get('/leads/feed', requireKey, async (req, res) => {
     const { campaign, status, limit=100, pub, days, portal_id } = req.query;
     const where=[], params=[];
     let i=1;
-    if (campaign) { where.push(`campaign=$${i++}`); params.push(campaign); }
+    if (campaign) {
+      where.push(`campaign=$${i++}`);
+      params.push(campaign);
+    } else {
+      // Exclude SSDI lead campaigns from the general feed — they show on the SSDI tab only
+      where.push(`campaign NOT IN ('Lssdi-shore')`);
+    }
     if (status)   { where.push(`status=$${i++}`);   params.push(status); }
 
     // Support portal_id lookup — finds all pub_ids for that portal then filters
