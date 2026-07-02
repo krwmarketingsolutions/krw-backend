@@ -460,7 +460,7 @@ app.get('/leads/feed', requireKey, async (req, res) => {
     if (campaign) {
       where.push(`campaign=$${i++}`);
       params.push(campaign);
-    } else {
+    } else if (!portal_id && !pub) {
       // Exclude SSDI lead campaigns from the general feed — they show on the SSDI tab only
       where.push(`campaign NOT IN ('Lssdi-shore')`);
     }
@@ -880,14 +880,15 @@ app.post('/publishers/portal-config', async (req, res) => {
 
     // Build unique campaign list with display names
     const campaignMap = {
-      'mva-funnel':  { label: 'MVA — Motor Vehicle Accident', color: 'blue' },
-      'mva-nld2':    { label: 'MVA — Motor Vehicle Accident', color: 'blue' },
-      'rideshare-tb':{ label: 'Rideshare — Uber & Lyft',      color: 'green' },
-      'roblox-mt':   { label: 'Roblox Mass Tort',             color: 'blue' },
-      'roundup':     { label: 'Roundup Mass Tort',            color: 'green' },
-      'roundup-lt':  { label: 'Roundup LT',                   color: 'green' },
-      'ssdi':        { label: 'SSDI',                         color: 'blue' },
-      'depo':        { label: 'Depo-Provera',                 color: 'green' },
+      'mva-funnel':   { label: 'MVA — Motor Vehicle Accident', color: 'blue' },
+      'mva-nld2':     { label: 'MVA — Motor Vehicle Accident', color: 'blue' },
+      'rideshare-tb': { label: 'Rideshare — Uber & Lyft',      color: 'green' },
+      'roblox-mt':    { label: 'Roblox Mass Tort',             color: 'blue' },
+      'roundup':      { label: 'Roundup Mass Tort',            color: 'green' },
+      'roundup-lt':   { label: 'Roundup LT',                   color: 'green' },
+      'ssdi':         { label: 'SSDI',                         color: 'blue' },
+      'Lssdi-shore':  { label: 'SSDI Filed',                   color: 'blue' },
+      'depo':         { label: 'Depo-Provera',                 color: 'green' },
     };
 
     // Collect unique campaigns across all pub records for this portal
