@@ -4156,13 +4156,13 @@ async function pollJoshuaCallsSheet() {
   }
 }
 
-// Start 60s after boot (offset from other pollers), then every hour
-setTimeout(() => {
-  pollJoshuaCallsSheet();
-  setInterval(pollJoshuaCallsSheet, JOSHUA_POLL_INTERVAL_MS);
-}, 60000);
+// ── Joshua sheet poller PAUSED — re-enable when ready ────────────────────────
+// setTimeout(() => {
+//   pollJoshuaCallsSheet();
+//   setInterval(pollJoshuaCallsSheet, JOSHUA_POLL_INTERVAL_MS);
+// }, 60000);
 
-// Manual trigger
+// Manual trigger (still available for testing)
 app.get('/debug-poll-joshua', requireKey, async (req, res) => {
   try {
     await pollJoshuaCallsSheet();
