@@ -2494,12 +2494,13 @@ app.post('/postback/mva-funnel', async (req, res) => {
   // Accept postbacks with or without API key — Email Agency won't send one
   const b = req.body || {};
 
-  const leadId   = (b.lead_id   || '').trim();
-  const phone    = (b.phone     || '').replace(/\D/g, '').trim();
-  const status   = (b.status    || '').trim();
-  const firstName = (b.first_name || '').trim();
-  const lastName  = (b.last_name  || '').trim();
-  const state     = (b.state      || '').trim();
+  const leadId     = (b.lead_id      || '').trim();
+  const phone      = (b.phone        || '').replace(/\D/g, '').trim();
+  const status     = (b.status       || '').trim();
+  const disposition = (b.disposition || b.last_call_disposition || b.dispo || '').trim();
+  const firstName  = (b.first_name   || '').trim();
+  const lastName   = (b.last_name    || '').trim();
+  const state      = (b.state        || '').trim();
 
   if (!leadId && !phone) {
     return res.status(400).json({ ok: false, error: 'lead_id or phone required' });
@@ -2556,12 +2557,16 @@ app.post('/postback/mva-funnel', async (req, res) => {
       if (isNowBillable) leadStatus = 'forwarded';
       else if (statusLow.includes('reject') || statusLow.includes('disqualif')) leadStatus = 'buyer_rejected';
 
+      // Build notes from disposition if provided
+      const notesUpdate = disposition || null;
+
       // Update the lead
       const patch = JSON.stringify({
         ea_postback: {
-          status:     status,
-          state:      state || null,
-          synced_at:  new Date().toISOString(),
+          status:      status,
+          disposition: disposition || null,
+          state:       state || null,
+          synced_at:   new Date().toISOString(),
         }
       });
 
@@ -2570,19 +2575,21 @@ app.post('/postback/mva-funnel', async (req, res) => {
           `UPDATE leads SET
              buyer_status = $1,
              status       = $2,
+             notes        = CASE WHEN $5 IS NOT NULL AND $5 != '' THEN $5 ELSE notes END,
              raw          = raw || $3::jsonb
            WHERE id = $4
              AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
-          [status, leadStatus, patch, lead.id]
+          [status, leadStatus, patch, lead.id, notesUpdate]
         );
       } else {
         await client.query(
           `UPDATE leads SET
              buyer_status = $1,
+             notes        = CASE WHEN $3 IS NOT NULL AND $3 != '' THEN $3 ELSE notes END,
              raw          = raw || $2::jsonb
-           WHERE id = $3
+           WHERE id = $4
              AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
-          [status, patch, lead.id]
+          [status, patch, notesUpdate, lead.id]
         );
       }
 
