@@ -2575,21 +2575,21 @@ app.post('/postback/mva-funnel', async (req, res) => {
           `UPDATE leads SET
              buyer_status = $1,
              status       = $2,
-             notes        = CASE WHEN $5 IS NOT NULL AND $5 != '' THEN $5 ELSE notes END,
+             notes        = CASE WHEN $5::text IS NOT NULL AND $5::text != '' THEN $5::text ELSE notes END,
              raw          = raw || $3::jsonb
            WHERE id = $4
              AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
-          [status, leadStatus, patch, lead.id, notesUpdate]
+          [status, leadStatus, patch, lead.id, notesUpdate || null]
         );
       } else {
         await client.query(
           `UPDATE leads SET
              buyer_status = $1,
-             notes        = CASE WHEN $3 IS NOT NULL AND $3 != '' THEN $3 ELSE notes END,
+             notes        = CASE WHEN $3::text IS NOT NULL AND $3::text != '' THEN $3::text ELSE notes END,
              raw          = raw || $2::jsonb
            WHERE id = $4
              AND (raw->>'billable_locked') IS DISTINCT FROM 'true'`,
-          [status, patch, notesUpdate, lead.id]
+          [status, patch, notesUpdate || null, lead.id]
         );
       }
 
