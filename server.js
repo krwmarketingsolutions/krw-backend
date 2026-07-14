@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js
+// FILE: server.js (v121)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -443,10 +443,10 @@ app.get('/leads/summary', requireKey, async (req, res) => {
     const weekAgo    = new Date(Date.now()-7*86400000).toISOString().split('T')[0];
     const monthStart = new Date().toISOString().slice(0,7)+'-01';
     const [todayQ,weekQ,monthQ,statusQ] = await Promise.all([
-      pool.query(`SELECT campaign, COUNT(*) as count FROM leads WHERE received_at::date=CURRENT_DATE GROUP BY campaign`),
-      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1`,[weekAgo]),
-      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1`,[monthStart]),
-      pool.query(`SELECT status, COUNT(*) as count FROM leads GROUP BY status ORDER BY count DESC`),
+      pool.query(`SELECT campaign, COUNT(*) as count FROM leads WHERE received_at::date=CURRENT_DATE AND campaign NOT IN ('Lssdi-shore') GROUP BY campaign`),
+      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND campaign NOT IN ('Lssdi-shore')`,[weekAgo]),
+      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND campaign NOT IN ('Lssdi-shore')`,[monthStart]),
+      pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE campaign NOT IN ('Lssdi-shore') GROUP BY status ORDER BY count DESC`),
     ]);
     res.json({ ok:true, today:todayQ.rows, week:parseInt(weekQ.rows[0]?.count||0), month:parseInt(monthQ.rows[0]?.count||0), by_status:statusQ.rows });
   } catch(err) { res.status(500).json({ error:err.message }); }
