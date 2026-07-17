@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v121)
+// FILE: server.js (v122)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -488,7 +488,7 @@ app.get('/leads/feed', requireKey, async (req, res) => {
     const wc = where.length ? 'WHERE '+where.join(' AND ') : '';
     const r = await pool.query(
       `SELECT id,received_at,campaign,first_name,last_name,email,phone,state,
-              status,zapier_status,buyer_intake_id,buyer_error,buyer_status,notes,publisher_sub,billable
+              status,zapier_status,buyer_intake_id,buyer_error,buyer_status,notes,publisher_sub,billable,revenue
        FROM leads ${wc} ORDER BY received_at DESC LIMIT $${i}`, params);
     res.json({ ok:true, count:r.rows.length, leads:r.rows });
   } catch(err) { res.status(500).json({ error:err.message }); }
