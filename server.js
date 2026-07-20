@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v121)
+// FILE: server.js (v123)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -469,12 +469,15 @@ app.get('/leads/feed', requireKey, async (req, res) => {
     // Support portal_id lookup — finds all pub_ids for that portal then filters
     if (portal_id) {
       const pubs = await pool.query(
-        `SELECT pub_id FROM publishers WHERE portal_id=$1 AND active=true`, [portal_id]
+        `SELECT pub_id FROM publishers WHERE (portal_id=$1 OR pub_id=$1) AND active=true`, [portal_id]
       );
       const pubIds = pubs.rows.map(p => p.pub_id);
       if (pubIds.length) {
         where.push(`publisher_sub = ANY($${i++})`);
         params.push(pubIds);
+      } else {
+        // No publisher matches this portal_id/pub_id at all — fail closed, never return unfiltered data
+        where.push('1=0');
       }
     } else if (pub) {
       where.push(`publisher_sub=$${i++}`);
@@ -488,7 +491,7 @@ app.get('/leads/feed', requireKey, async (req, res) => {
     const wc = where.length ? 'WHERE '+where.join(' AND ') : '';
     const r = await pool.query(
       `SELECT id,received_at,campaign,first_name,last_name,email,phone,state,
-              status,zapier_status,buyer_intake_id,buyer_error,buyer_status,notes,publisher_sub,billable
+              status,zapier_status,buyer_intake_id,buyer_error,buyer_status,notes,publisher_sub,billable,revenue
        FROM leads ${wc} ORDER BY received_at DESC LIMIT $${i}`, params);
     res.json({ ok:true, count:r.rows.length, leads:r.rows });
   } catch(err) { res.status(500).json({ error:err.message }); }
