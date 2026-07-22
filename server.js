@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v123)
+// FILE: server.js (v124)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2807,6 +2807,15 @@ const LSSDI_SHORE_API_PASS   = '0b0ebc19dc3eab7bd5d8bf19f';
 const LSSDI_SHORE_PRODUCT_ID = 207;
 const LSSDI_SHORE_CENTER_CODE = 'lisa 115'; // NEVER expose this value to publisher-facing responses
 
+// Per-publisher center code overrides — buyer requirement, injected server-side.
+// Publishers never see or need to send this; it's added automatically based on publisher_sub.
+const LSSDI_SHORE_CENTER_CODE_OVERRIDES = {
+  'KRW-NEXUS-2026-G2B': 'Lisa 118', // Nexus-7 — buyer-required center code
+};
+function getLssdiShoreCenterCode(publisherSub) {
+  return LSSDI_SHORE_CENTER_CODE_OVERRIDES[publisherSub] || LSSDI_SHORE_CENTER_CODE;
+}
+
 app.post('/leads/Lssdi-shore', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
   const validKeys = [
@@ -2870,7 +2879,7 @@ app.post('/leads/Lssdi-shore', async (req, res) => {
     lastname:                b.last_name,
     dob:                    b.dob,
     zip:                    b.zip,
-    centerCode:             LSSDI_SHORE_CENTER_CODE,
+    centerCode:             getLssdiShoreCenterCode(publisherSub),
     source:                 publisherSub,
     validateProductFields:  1,
   };
