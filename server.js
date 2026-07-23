@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v124)
+// FILE: server.js (v125)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2810,7 +2810,7 @@ const LSSDI_SHORE_CENTER_CODE = 'lisa 115'; // NEVER expose this value to publis
 // Per-publisher center code overrides — buyer requirement, injected server-side.
 // Publishers never see or need to send this; it's added automatically based on publisher_sub.
 const LSSDI_SHORE_CENTER_CODE_OVERRIDES = {
-  'KRW-NEXUS-2026-G2B': 'Lisa 118', // Nexus-7 — buyer-required center code
+  'KRW-SSDI-2026-4QM': 'Lisa 118', // Nexus-7 — buyer-required center code (confirmed via live test posting 7/20)
 };
 function getLssdiShoreCenterCode(publisherSub) {
   return LSSDI_SHORE_CENTER_CODE_OVERRIDES[publisherSub] || LSSDI_SHORE_CENTER_CODE;
