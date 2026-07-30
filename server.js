@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v125)
+// FILE: server.js (v126)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -4192,6 +4192,111 @@ app.get('/debug-poll-joshua', requireKey, async (req, res) => {
 });
 // ─── END JOSHUA SSDI CALLS SHEET POLLER ──────────────────────────────────────
 
+
+
+// ─── NEXUS-7 SSDI DISPOSITION SHEET POLLER ───────────────────────────────────
+// Read-only sync: pulls lead disposition status from the buyer's (Email Agency/
+// Lisa) Google Sheet into the `calls` table, so it displays on Nexus-7's
+// existing portal (calls-based, same login as always — KRW-NEXUS-2026).
+// This NEVER sets billable=true or touches payout_amount — billing stays a
+// fully manual, explicit action, same as every other publisher in this system.
+// The sheet's "Center Code" column is intentionally read and discarded —
+// never stored, never surfaced anywhere.
+const NEXUS7_SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/1WjTRF2Ani3YwRW0d-8hDhNXYVzS5x3gBSuqf0yNXCDI/export?format=csv&gid=0';
+const NEXUS7_PUBLISHER_SUB = 'KRW-SSDI-2026-4QM'; // Nexus-7's confirmed real pub_id
+
+function normalizePhone10(raw) {
+  const digits = (raw || '').replace(/\D/g, '');
+  if (digits.length === 11 && digits[0] === '1') return digits.slice(1);
+  return digits;
+}
+
+async function pollNexus7SsdiSheet() {
+  try {
+    const resp = await fetch(NEXUS7_SHEET_CSV_URL);
+    if (!resp.ok) {
+      console.log(`[Nexus-7 Sheet Poll] Fetch failed: ${resp.status}`);
+      return;
+    }
+    const csv  = await resp.text();
+    const rows = parseCSV(csv);
+    console.log(`[Nexus-7 Sheet Poll] ${rows.length} rows fetched`);
+
+    for (const row of rows) {
+      const phone = normalizePhone10(row['Phone']);
+      if (!phone) continue;
+
+      const firstName   = (row['First Name'] || '').trim();
+      const lastName    = (row['Last Name']  || '').trim();
+      const leadStatus  = (row['Lead Status'] || '').trim();
+      const reason      = (row['Reason Disqualified/Sub-Status'] || '').trim();
+      const trustedForm = (row['Trusted Form URL'] || '').trim();
+      const createDate  = (row['Create Date'] || '').trim();
+      // NOTE: row['Center Code'] is intentionally never read into anything stored.
+
+      const syncData = {
+        nexus7_sheet_sync: {
+          source: 'buyer_sheet_import',
+          lead_status: leadStatus,
+          reason: reason || null,
+          synced_at: new Date().toISOString(),
+        }
+      };
+
+      const existing = await pool.query(
+        `SELECT id, billable FROM calls WHERE caller_id=$1 AND publisher_sub=$2 LIMIT 1`,
+        [phone, NEXUS7_PUBLISHER_SUB]
+      );
+
+      if (existing.rows.length) {
+        // Update disposition only — never touch billable/payout_amount on existing rows
+        await pool.query(
+          `UPDATE calls
+           SET disposition=$1, call_status_label=$2, raw = COALESCE(raw,'{}'::jsonb) || $3::jsonb
+           WHERE id=$4`,
+          [reason || leadStatus, leadStatus, JSON.stringify(syncData), existing.rows[0].id]
+        );
+      } else {
+        // New row — insert with billable explicitly false; nothing here is a billing action
+        await pool.query(
+          `INSERT INTO calls
+             (call_date, caller_id, caller_name, publisher_sub, campaign, buyer_name,
+              disposition, call_status_label, billable, source_system, raw)
+           VALUES ($1,$2,$3,$4,'ssdi','Lissa (SSDI buyer)',$5,$6,false,'sheet_import',$7)`,
+          [createDate || null, phone, `${firstName} ${lastName}`.trim(), NEXUS7_PUBLISHER_SUB,
+           reason || leadStatus, leadStatus, JSON.stringify(syncData)]
+        );
+      }
+    }
+    console.log('[Nexus-7 Sheet Poll] Sync complete');
+  } catch (err) {
+    console.log('[Nexus-7 Sheet Poll] Error:', err.message);
+  }
+}
+
+// Schedule: once daily at 12:00 PST (checks every 15 min, fires once per calendar day)
+let nexus7LastRunDate = null;
+setInterval(() => {
+  const pstNow = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+  const pstDate = new Date(pstNow);
+  const hour = pstDate.getHours();
+  const today = pstDate.toISOString().slice(0, 10);
+  if (hour === 12 && nexus7LastRunDate !== today) {
+    nexus7LastRunDate = today;
+    pollNexus7SsdiSheet();
+  }
+}, 15 * 60 * 1000);
+
+// Manual trigger for testing — same pattern as the other sheet pollers
+app.get('/debug-poll-nexus7', requireKey, async (req, res) => {
+  try {
+    await pollNexus7SsdiSheet();
+    res.json({ ok: true, message: 'Nexus-7 sheet poll complete — check logs' });
+  } catch(err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+// ─── END NEXUS-7 SSDI DISPOSITION SHEET POLLER ───────────────────────────────
 
 
 app.listen(PORT, '0.0.0.0', () => {
