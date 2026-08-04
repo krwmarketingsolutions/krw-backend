@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v128)
+// FILE: server.js (v129)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2274,7 +2274,7 @@ const PUBLISHER_ALIAS = {
   'KRW-SHORE-2026-LSD':  'SSDI S',
   'KRW-JOSHUA-2026-76M': 'SSDI J',
   'KRW-MVA-2026-8RT':    'MVA 2',
-  'KRW-KANTHONY-NLD':    'MVA K CPL',
+  'KRW-KANTHONY-CPL':    'MVA K CPL',
 };
 
 function aliasPub(pubId) {
