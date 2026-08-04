@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v127)
+// FILE: server.js (v128)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2274,6 +2274,7 @@ const PUBLISHER_ALIAS = {
   'KRW-SHORE-2026-LSD':  'SSDI S',
   'KRW-JOSHUA-2026-76M': 'SSDI J',
   'KRW-MVA-2026-8RT':    'MVA 2',
+  'KRW-KANTHONY-NLD':    'MVA K CPL',
 };
 
 function aliasPub(pubId) {
@@ -2485,6 +2486,216 @@ app.post('/leads/mva-nld2', (req, res) => {
 });
 
 // ─── END MVA FUNNEL ───────────────────────────────────────────────────────────
+
+// ─── MVA-CPL — NLD (NEXT LEVEL DIRECT) ────────────────────────────────────────
+// Separate, isolated campaign from mva-funnel above — zero shared code.
+// Kevin Anthony's team pre-filters by state on their end: leads matching
+// Email Agency's states go to /leads/mva-funnel as before (unchanged).
+// Everything else (nationwide minus CA) comes here and is always forwarded
+// straight to NLD via LeadProsper. No state-based branching in this endpoint —
+// that decision already happened before the lead arrived here.
+// Payout: $100 flat CPL, billable only when NLD returns status=ACCEPTED.
+
+const NLD_LP_CAMPAIGN_ID = '33958';
+const NLD_LP_SUPPLIER_ID = '122561';
+const NLD_LP_KEY         = 'd02ltknjjh25pn';
+const NLD_LP_URL         = 'https://api.leadprosper.io/direct_post';
+
+const US_STATE_FULL_NAMES = {
+  AL:'Alabama', AK:'Alaska', AZ:'Arizona', AR:'Arkansas', CA:'California', CO:'Colorado',
+  CT:'Connecticut', DE:'Delaware', FL:'Florida', GA:'Georgia', HI:'Hawaii', ID:'Idaho',
+  IL:'Illinois', IN:'Indiana', IA:'Iowa', KS:'Kansas', KY:'Kentucky', LA:'Louisiana',
+  ME:'Maine', MD:'Maryland', MA:'Massachusetts', MI:'Michigan', MN:'Minnesota',
+  MS:'Mississippi', MO:'Missouri', MT:'Montana', NE:'Nebraska', NV:'Nevada',
+  NH:'New Hampshire', NJ:'New Jersey', NM:'New Mexico', NY:'New York', NC:'North Carolina',
+  ND:'North Dakota', OH:'Ohio', OK:'Oklahoma', OR:'Oregon', PA:'Pennsylvania',
+  RI:'Rhode Island', SC:'South Carolina', SD:'South Dakota', TN:'Tennessee', TX:'Texas',
+  UT:'Utah', VT:'Vermont', VA:'Virginia', WA:'Washington', WV:'West Virginia',
+  WI:'Wisconsin', WY:'Wyoming',
+};
+
+function buildNldCaseDescription(b, incidentStateFull) {
+  const parts = [];
+  if (b.incident_date)            parts.push(`Incident date: ${b.incident_date}`);
+  if (b.at_fault)                 parts.push(`At fault: ${b.at_fault}`);
+  if (b.injury)                   parts.push(`Injury: ${b.injury}`);
+  if (b.have_attorney)            parts.push(`Has representation: ${b.have_attorney}`);
+  if (b.has_insurance)            parts.push(`Has insurance: ${b.has_insurance}`);
+  if (incidentStateFull)          parts.push(`Incident state: ${incidentStateFull}`);
+  return parts.join('. ') + (parts.length ? '.' : '');
+}
+
+app.post('/leads/mva-cpl', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Validate required fields — existing MVA fields + NLD's additional required fields
+  const missing = [];
+  if (!b.first_name)                              missing.push('first_name');
+  if (!b.last_name)                                missing.push('last_name');
+  if (!b.phone)                                    missing.push('phone');
+  if (!b.email)                                    missing.push('email');
+  if (!b.state)                                    missing.push('state');
+  if (!b.zip_code && !b.zip)                       missing.push('zip_code');
+  if (!b.have_attorney)                            missing.push('have_attorney');
+  if (!b.at_fault)                                 missing.push('at_fault');
+  if (!b.trustedform_cert_url && !b.trusted_form_cert_url) missing.push('trustedform_cert_url');
+  if (!b.publisher_sub)                            missing.push('publisher_sub');
+  if (!b.incident_date)                            missing.push('incident_date');
+  if (!b.motor_vehicle_accident)                   missing.push('motor_vehicle_accident');
+  if (!b.injury)                                   missing.push('injury');
+  if (!b.settlement)                               missing.push('settlement');
+  if (!b.has_insurance)                            missing.push('has_insurance');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  const publisherSub    = b.publisher_sub;
+  const leadState       = (b.state || '').toUpperCase().trim();
+  const incidentStateFull = US_STATE_FULL_NAMES[leadState] || b.incident_state || null;
+
+  // CA is explicitly excluded from this campaign — reject clearly, never forward
+  if (leadState === 'CA') {
+    const client = await pool.connect();
+    let leadId = null;
+    try {
+      const insert = await client.query(
+        `INSERT INTO leads
+           (campaign, vertical, first_name, last_name, phone, email,
+            publisher_sub, state, status, buyer_error, billable, raw, received_at)
+         VALUES ('mva-cpl','MVA',$1,$2,$3,$4,$5,$6,'rejected',$7,false,$8::jsonb,NOW())
+         RETURNING id`,
+        [b.first_name, b.last_name, b.phone, b.email, publisherSub, leadState,
+         'CA excluded from this campaign', JSON.stringify(b)]
+      );
+      leadId = insert.rows[0].id;
+    } catch(dbErr) {
+      console.error('[MVA-CPL] DB insert error (CA reject):', dbErr.message);
+    } finally {
+      client.release();
+    }
+    console.log(`[MVA-CPL] ✕ ${b.first_name} ${b.last_name} | CA — excluded from this campaign`);
+    return res.json({
+      ok: false, result: 'rejected',
+      message: 'CA is excluded from this campaign.',
+      krw_id: leadId
+    });
+  }
+
+  // Insert lead into DB
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, ip_address, state, status, raw, received_at)
+       VALUES ('mva-cpl','MVA',$1,$2,$3,$4,$5,$6,$7,'pending',$8::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email,
+       publisherSub, b.ip_address || null, leadState,
+       JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[MVA-CPL] DB insert error:', dbErr.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+
+  // Always forwards to NLD — no state branching here, that already happened
+  // before this lead arrived (Kevin's team routes by which URL they post to)
+  const caseDescription = buildNldCaseDescription(b, incidentStateFull);
+
+  const payload = {
+    lp_campaign_id: NLD_LP_CAMPAIGN_ID,
+    lp_supplier_id: NLD_LP_SUPPLIER_ID,
+    lp_key:         NLD_LP_KEY,
+    lp_subid1:      aliasPub(publisherSub) || '',
+    first_name:     b.first_name,
+    last_name:      b.last_name,
+    email:          b.email,
+    phone:          String(b.phone).replace(/\D/g,''),
+    date_of_birth:  b.date_of_birth || undefined,
+    gender:         b.gender || undefined,
+    address:        b.address || undefined,
+    city:           b.city || undefined,
+    state:          leadState,
+    zip_code:       b.zip_code || b.zip,
+    ip_address:     b.ip_address || undefined,
+    user_agent:     b.user_agent || undefined,
+    landing_page_url: b.landing_page_url || 'https://krwmarketingsolutions.github.io/forms',
+    jornaya_leadid: b.jornaya_leadid || undefined,
+    trustedform_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url,
+    tcpa_text:      b.tcpa_text || undefined,
+    case_description: caseDescription,
+    incident_state: incidentStateFull || undefined,
+    incident_date:  b.incident_date,
+    motor_vehicle_accident: b.motor_vehicle_accident,
+    injury:         b.injury,
+    at_fault:       b.at_fault,
+    have_attorney:  b.have_attorney,
+    settlement:     b.settlement,
+    has_insurance:  b.has_insurance,
+  };
+  Object.keys(payload).forEach(k => { if (payload[k] === undefined) delete payload[k]; });
+
+  try {
+    const nldRes = await postJSON(NLD_LP_URL, payload);
+    let result = {};
+    try { result = JSON.parse(nldRes.body); } catch(e) { result = { status: 'ERROR', message: nldRes.body }; }
+
+    const accepted  = result.status === 'ACCEPTED';
+    const duplicate = result.status === 'DUPLICATED';
+    const billable   = accepted; // CPL: pay only on ACCEPTED, never on DUPLICATED/ERROR
+
+    const c2 = await pool.connect();
+    try {
+      await c2.query(
+        `UPDATE leads SET
+           status          = $1,
+           buyer_intake_id = $2,
+           buyer_response  = $3::jsonb,
+           buyer_status    = $4,
+           billable        = $5,
+           revenue         = $6
+         WHERE id = $7`,
+        [accepted ? 'forwarded' : duplicate ? 'duplicate' : 'buyer_rejected',
+         result.lead_id || null, JSON.stringify(result), result.status || 'ERROR',
+         billable, billable ? 100.00 : 0, leadId]
+      );
+    } finally { c2.release(); }
+
+    console.log(`[MVA-CPL] ${accepted ? '✓' : duplicate ? '⊘' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} → NLD | ${result.status}`);
+
+    return res.json({
+      ok: true,
+      result: accepted ? 'success' : duplicate ? 'duplicate' : 'rejected',
+      message: result.message || result.status,
+      krw_id: leadId
+    });
+  } catch (err) {
+    console.error('[MVA-CPL] Forward to NLD failed:', err.message);
+    if (leadId) {
+      const c3 = await pool.connect();
+      try {
+        await c3.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2", [err.message, leadId]);
+      } finally { c3.release(); }
+    }
+    return res.status(502).json({ ok: false, error: 'Failed to forward to buyer', krw_id: leadId });
+  }
+});
+// ─── END MVA-CPL — NLD ─────────────────────────────────────────────────────────
 
 // ─── MVA FUNNEL POSTBACK — EMAIL AGENCY STATUS UPDATES ───────────────────────
 // Receives lead status postbacks from Email Agency.
