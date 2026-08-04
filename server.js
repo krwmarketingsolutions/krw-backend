@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v126)
+// FILE: server.js (v127)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -4274,18 +4274,59 @@ async function pollNexus7SsdiSheet() {
   }
 }
 
-// Schedule: once daily at 12:00 PST (checks every 15 min, fires once per calendar day)
-let nexus7LastRunDate = null;
-setInterval(() => {
-  const pstNow = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
-  const pstDate = new Date(pstNow);
-  const hour = pstDate.getHours();
-  const today = pstDate.toISOString().slice(0, 10);
-  if (hour === 12 && nexus7LastRunDate !== today) {
-    nexus7LastRunDate = today;
-    pollNexus7SsdiSheet();
+// Schedule: once daily at 12:00 PST, resilient to server restarts.
+// Uses the database itself (not an in-memory variable) as the source of truth
+// for "did today's sync already run" — an in-memory flag resets on every
+// Railway restart/deploy, which was silently causing missed days.
+function todayPSTDateString() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })).toISOString().slice(0, 10);
+}
+
+async function nexus7LastSyncDatePST() {
+  const result = await pool.query(
+    `SELECT MAX((raw->'nexus7_sheet_sync'->>'synced_at')::timestamptz) as last_sync
+     FROM calls WHERE publisher_sub=$1 AND raw ? 'nexus7_sheet_sync'`,
+    [NEXUS7_PUBLISHER_SUB]
+  );
+  const lastSync = result.rows[0].last_sync;
+  if (!lastSync) return null;
+  return new Date(new Date(lastSync).toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })).toISOString().slice(0, 10);
+}
+
+// Regular check every 15 min — fires at the intended 12:00 PST window if not yet synced today
+setInterval(async () => {
+  try {
+    const pstHour = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })).getHours();
+    if (pstHour !== 12) return;
+    const lastSync = await nexus7LastSyncDatePST();
+    if (lastSync !== todayPSTDateString()) {
+      console.log('[Nexus-7 Sheet Poll] 12:00 PST check — not yet synced today, running now');
+      await pollNexus7SsdiSheet();
+    }
+  } catch (err) {
+    console.log('[Nexus-7 Sheet Poll] Scheduled check error:', err.message);
   }
 }, 15 * 60 * 1000);
+
+// Startup catch-up — runs immediately if today's sync is missing, regardless of
+// current time. This is what actually fixes missed days: if the server was
+// restarted (deploy, crash, etc.) and the 12:00 PST window passed unattended,
+// this catches it up the moment the server comes back online instead of
+// silently waiting up to 24h for the next scheduled window.
+(async () => {
+  try {
+    const lastSync = await nexus7LastSyncDatePST();
+    const today = todayPSTDateString();
+    if (lastSync !== today) {
+      console.log(`[Nexus-7 Sheet Poll] Startup check — last synced ${lastSync || 'never'}, today is ${today} — catching up now`);
+      await pollNexus7SsdiSheet();
+    } else {
+      console.log('[Nexus-7 Sheet Poll] Startup check — already synced today, skipping');
+    }
+  } catch (err) {
+    console.log('[Nexus-7 Sheet Poll] Startup check error:', err.message);
+  }
+})();
 
 // Manual trigger for testing — same pattern as the other sheet pollers
 app.get('/debug-poll-nexus7', requireKey, async (req, res) => {
