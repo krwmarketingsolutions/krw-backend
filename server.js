@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v131)
+// FILE: server.js (v132)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -830,6 +830,15 @@ async function initPublishersDB() {
       active        BOOLEAN DEFAULT true,
       created_at    TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS campaign_settings (
+      campaign      TEXT PRIMARY KEY,
+      mode          TEXT NOT NULL DEFAULT 'default',
+      updated_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+    INSERT INTO campaign_settings (campaign, mode)
+      VALUES ('mva-routing', 'default')
+      ON CONFLICT (campaign) DO NOTHING;
   `);
   console.log('Publishers table ready');
 }
@@ -2353,6 +2362,138 @@ const MVA_BUYERS = [
 
 ];
 
+// ─── NLD PING/POST — SHARED FAILOVER LAYER FOR MVA-FUNNEL + MVA-CPL ──────────
+// Global switch: when ON, BOTH /leads/mva-funnel and /leads/mva-cpl silently
+// route new leads through NLD's Ping/Post bidding campaign instead of their
+// normal destination. Publishers never see a new URL — nothing changes on
+// their end. Default OFF — zero behavior change until explicitly toggled.
+// Publisher payout stays flat $100 regardless of NLD's actual bid amount.
+// Safety: if a lead is missing fields this campaign requires, or NLD's ping
+// itself comes back rejected, this silently falls back to the lead's normal
+// existing destination rather than losing it — matches the whole point of
+// this feature (never lose a lead), and is safe to enable even before every
+// publisher is sending the expanded field set this campaign needs.
+
+const NLD_PING_LP_CAMPAIGN_ID = '30934';
+const NLD_PING_LP_SUPPLIER_ID = '115312';
+const NLD_PING_LP_KEY         = 'om2pazrexa00g3';
+const NLD_PING_URL            = 'https://api.leadprosper.io/ping';
+const NLD_POST_URL            = 'https://api.leadprosper.io/post';
+
+async function getMvaRoutingMode() {
+  try {
+    const r = await pool.query(`SELECT mode FROM campaign_settings WHERE campaign='mva-routing'`);
+    return (r.rows[0] && r.rows[0].mode) || 'default';
+  } catch (err) {
+    console.log('[NLD Ping] Failed to read routing mode, defaulting to normal routing:', err.message);
+    return 'default';
+  }
+}
+
+// Fields this campaign requires at minimum to attempt a ping. If any are
+// missing, we skip ping mode entirely and let the caller use normal routing.
+const NLD_PING_REQUIRED_FIELDS = [
+  'zip_code', 'ip_address', 'user_agent', 'landing_page_url',
+  'trustedform_cert_url', 'tcpa_text', 'have_attorney', 'at_fault',
+  'injury_type', 'incident_date', 'police_report', 'has_insurance',
+  'medical_treatment', 'accident_type', 'compensated_before', 'case_description',
+];
+
+function hasRequiredNldPingFields(b) {
+  return NLD_PING_REQUIRED_FIELDS.every(f => {
+    const v = b[f] !== undefined ? b[f] : (f === 'zip_code' ? b.zip : undefined);
+    return v !== undefined && v !== null && String(v).trim() !== '';
+  });
+}
+
+// Attempts the full ping-then-post flow. Returns:
+//   { routed: true,  billable, buyerStatus, buyerResponse, bidAmount }  — succeeded via NLD Ping
+//   { routed: false, reason }                                          — caller should fall back to normal routing
+async function forwardToNldPing(b, publisherSub) {
+  if (!hasRequiredNldPingFields(b)) {
+    return { routed: false, reason: 'missing_required_fields' };
+  }
+
+  const zip = b.zip_code || b.zip;
+
+  const basePayload = {
+    lp_campaign_id: NLD_PING_LP_CAMPAIGN_ID,
+    lp_supplier_id: NLD_PING_LP_SUPPLIER_ID,
+    lp_key:         NLD_PING_LP_KEY,
+    lp_subid1:      aliasPub(publisherSub) || '',
+    zip_code:       zip,
+    ip_address:     b.ip_address,
+    user_agent:     b.user_agent,
+    landing_page_url: b.landing_page_url,
+    trustedform_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url,
+    tcpa_text:      b.tcpa_text,
+    have_attorney:  b.have_attorney,
+    at_fault:       b.at_fault,
+    injury_type:    b.injury_type,
+    incident_date:  b.incident_date,
+    police_report:  b.police_report,
+    has_insurance:  b.has_insurance,
+    medical_treatment: b.medical_treatment,
+    accident_type:  b.accident_type,
+    compensated_before: b.compensated_before,
+    case_description: b.case_description,
+  };
+
+  let pingResult;
+  try {
+    const pingRes = await postJSON(NLD_PING_URL, basePayload);
+    pingResult = JSON.parse(pingRes.body);
+  } catch (err) {
+    console.log('[NLD Ping] Ping request failed:', err.message);
+    return { routed: false, reason: 'ping_request_error' };
+  }
+
+  if (pingResult.status !== 'ACCEPTED' || !pingResult.bids || !pingResult.bids.length) {
+    console.log(`[NLD Ping] ✕ Ping rejected for ${b.first_name} ${b.last_name} — falling back to normal routing`);
+    return { routed: false, reason: 'ping_rejected' };
+  }
+
+  const bidAmount = pingResult.bids[0].payout;
+
+  const postPayload = {
+    ...basePayload,
+    lp_ping_id: pingResult.ping_id,
+    first_name: b.first_name,
+    last_name:  b.last_name,
+    email:      b.email,
+    phone:      String(b.phone).replace(/\D/g, ''),
+    state:      (b.state || '').toUpperCase().trim(),
+    date_of_birth: b.date_of_birth || undefined,
+    gender:     b.gender || undefined,
+    address:    b.address || undefined,
+    city:       b.city || undefined,
+    jornaya_leadid: b.jornaya_leadid || undefined,
+    injured:    b.injured || undefined,
+  };
+  Object.keys(postPayload).forEach(k => { if (postPayload[k] === undefined) delete postPayload[k]; });
+
+  let postResult;
+  try {
+    const postRes = await postJSON(NLD_POST_URL, postPayload);
+    postResult = JSON.parse(postRes.body);
+  } catch (err) {
+    console.log('[NLD Ping] Post request failed:', err.message);
+    return { routed: false, reason: 'post_request_error' };
+  }
+
+  const accepted = postResult.status === 'ACCEPTED';
+  console.log(`[NLD Ping] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | bid $${bidAmount} | ${postResult.status}`);
+
+  return {
+    routed: true,
+    billable: accepted,
+    buyerStatus: postResult.status || 'ERROR',
+    buyerResponse: postResult,
+    bidAmount,
+  };
+}
+// ─── END NLD PING/POST SHARED LAYER ───────────────────────────────────────────
+
 app.post('/leads/mva-funnel', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
   const validKeys = [
@@ -2404,6 +2545,42 @@ app.post('/leads/mva-funnel', async (req, res) => {
     console.error('[MVA Funnel] DB insert error:', dbErr.message);
   } finally {
     client.release();
+  }
+
+  // Check NLD Ping failover mode — if ON, attempt to route through it first.
+  // Falls through to normal routing below if mode is off, or this specific
+  // lead is missing fields the ping campaign requires, or NLD's ping rejects it.
+  const routingMode = await getMvaRoutingMode();
+  if (routingMode === 'nld_ping') {
+    const pingAttempt = await forwardToNldPing(b, publisherSub);
+    if (pingAttempt.routed) {
+      if (leadId) {
+        const cPing = await pool.connect();
+        try {
+          await cPing.query(
+            `UPDATE leads SET
+               status         = $1,
+               buyer_response = $2::jsonb,
+               buyer_status   = $3,
+               billable       = $4,
+               revenue        = $5,
+               raw            = COALESCE(raw,'{}'::jsonb) || $6::jsonb
+             WHERE id = $7`,
+            [pingAttempt.billable ? 'forwarded' : 'buyer_rejected',
+             JSON.stringify(pingAttempt.buyerResponse), pingAttempt.buyerStatus,
+             pingAttempt.billable, pingAttempt.billable ? 100.00 : 0,
+             JSON.stringify({ nld_ping_bid: pingAttempt.bidAmount }), leadId]
+          );
+        } finally { cPing.release(); }
+      }
+      return res.json({
+        ok: pingAttempt.billable,
+        result: pingAttempt.billable ? 'success' : 'rejected',
+        message: pingAttempt.buyerStatus,
+        krw_id: leadId
+      });
+    }
+    // pingAttempt.routed === false → fall through to normal routing below
   }
 
   // Find matching buyer for this state
@@ -2611,6 +2788,41 @@ app.post('/leads/mva-cpl', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Database error' });
   } finally {
     client.release();
+  }
+
+  // Check NLD Ping failover mode — if ON, attempt to route through it first.
+  // Falls through to the existing direct-post NLD flow below if mode is off,
+  // or this specific lead is missing fields the ping campaign requires, or
+  // NLD's ping rejects it.
+  const routingMode = await getMvaRoutingMode();
+  if (routingMode === 'nld_ping') {
+    const pingAttempt = await forwardToNldPing(b, publisherSub);
+    if (pingAttempt.routed) {
+      const cPing = await pool.connect();
+      try {
+        await cPing.query(
+          `UPDATE leads SET
+             status         = $1,
+             buyer_response = $2::jsonb,
+             buyer_status   = $3,
+             billable       = $4,
+             revenue        = $5,
+             raw            = COALESCE(raw,'{}'::jsonb) || $6::jsonb
+           WHERE id = $7`,
+          [pingAttempt.billable ? 'forwarded' : 'buyer_rejected',
+           JSON.stringify(pingAttempt.buyerResponse), pingAttempt.buyerStatus,
+           pingAttempt.billable, pingAttempt.billable ? 100.00 : 0,
+           JSON.stringify({ nld_ping_bid: pingAttempt.bidAmount }), leadId]
+        );
+      } finally { cPing.release(); }
+      return res.json({
+        ok: pingAttempt.billable,
+        result: pingAttempt.billable ? 'success' : 'rejected',
+        message: pingAttempt.buyerStatus,
+        krw_id: leadId
+      });
+    }
+    // pingAttempt.routed === false → fall through to existing NLD direct-post flow below
   }
 
   // Always forwards to NLD — no state branching here, that already happened
