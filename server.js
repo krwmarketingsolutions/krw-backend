@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v130)
+// FILE: server.js (v131)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3580,11 +3580,13 @@ const KA_SHEETS = [
   {
     name:     'MVA',
     campaign: 'mva-funnel',
+    pubSubs:  ['KRW-KANTHONY-RS'],
     url:      `https://docs.google.com/spreadsheets/d/${KA_SHEET_ID}/export?format=csv&gid=1713913985`,
   },
   {
     name:     'Rideshare',
     campaign: 'rideshare-tb',
+    pubSubs:  ['KRW-PUB-2026-7QJ', 'KRW-KEVIN-2026-SMG'],
     url:      `https://docs.google.com/spreadsheets/d/${KA_SHEET_ID}/export?format=csv&gid=968537461`,
   },
 ];
@@ -3677,18 +3679,20 @@ async function pollKALeadsSheet() {
           }
 
           // Look up lead — by CID for Rideshare, by phone for MVA
+          // CRITICAL: always scoped to this sheet's own pubSubs — never match
+          // another publisher's lead even if phone/CID happens to coincide
           let lookup;
           if (isMVA) {
             lookup = await client.query(
               `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
-               FROM leads WHERE phone = $1 AND campaign = $2 LIMIT 1`,
-              [phone, sheet.campaign]
+               FROM leads WHERE phone = $1 AND campaign = $2 AND publisher_sub = ANY($3) LIMIT 1`,
+              [phone, sheet.campaign, sheet.pubSubs]
             );
           } else {
             lookup = await client.query(
               `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
-               FROM leads WHERE buyer_intake_id = $1 AND campaign = $2 LIMIT 1`,
-              [cid, sheet.campaign]
+               FROM leads WHERE buyer_intake_id = $1 AND campaign = $2 AND publisher_sub = ANY($3) LIMIT 1`,
+              [cid, sheet.campaign, sheet.pubSubs]
             );
           }
 
