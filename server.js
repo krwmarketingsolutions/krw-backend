@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v129)
+// FILE: server.js (v130)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -4504,14 +4504,16 @@ async function nexus7LastSyncDatePST() {
   return new Date(new Date(lastSync).toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })).toISOString().slice(0, 10);
 }
 
-// Regular check every 15 min — fires at the intended 12:00 PST window if not yet synced today
+// Regular check every 15 min — checks any time of day, not just at noon.
+// Previously this only checked during the 12:00-12:15 PST window, which meant
+// any gap (Railway sleep/wake, missed window, etc.) could go undetected for
+// up to 24h. Checking constantly is more robust: it self-heals within 15
+// minutes of any gap, regardless of what caused it.
 setInterval(async () => {
   try {
-    const pstHour = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })).getHours();
-    if (pstHour !== 12) return;
     const lastSync = await nexus7LastSyncDatePST();
     if (lastSync !== todayPSTDateString()) {
-      console.log('[Nexus-7 Sheet Poll] 12:00 PST check — not yet synced today, running now');
+      console.log('[Nexus-7 Sheet Poll] Periodic check — not yet synced today, running now');
       await pollNexus7SsdiSheet();
     }
   } catch (err) {
