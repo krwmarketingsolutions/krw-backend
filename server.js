@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v134)
+// FILE: server.js (v135)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2281,7 +2281,7 @@ const PUBLISHER_ALIAS = {
   'KRW-LAIRD-2026-X23':  'MVA L',
   'KRW-LAIRD-2026-1L2':  'MVA L',
   'KRW-SHORE-2026-LSD':  'SSDI S',
-  'KRW-JOSHUA-2026-76M': 'SSDI J',
+  'KRW-JOSHUA-2026-76M': 'KRW-SSD-01',
   'KRW-MVA-2026-8RT':    'MVA 2',
   'KRW-KANTHONY-CPL':    'MVA K CPL',
 };
@@ -3052,7 +3052,6 @@ app.post('/leads/ssdi-cpq', async (req, res) => {
 const FIELDSLAW_API_KEY = '4f78906c';
 const FIELDSLAW_FORM_URL = 'https://fieldslaw.leaddocket.com/opportunities/form/125?apikey=' + FIELDSLAW_API_KEY;
 const FIELDSLAW_MKTG_CAMPAIGN   = 'KRW SSDI CPA';
-const FIELDSLAW_MKTG_SUBSOURCE  = 'KRW-SSD-01';
 
 app.post('/leads/ssdi-fieldslaw', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
@@ -3113,7 +3112,7 @@ app.post('/leads/ssdi-fieldslaw', async (req, res) => {
   if (b.zip || b.postal_code) payload.append('Postal_Code', b.zip || b.postal_code);
   payload.append('CaseLeadID', String(leadId));
   payload.append('Mktg_Campaign', FIELDSLAW_MKTG_CAMPAIGN);
-  payload.append('Mktg_SubSource', FIELDSLAW_MKTG_SUBSOURCE);
+  payload.append('Mktg_SubSource', aliasPub(publisherSub) || FIELDSLAW_MKTG_CAMPAIGN);
   if (b.jornaya_leadid || b.trustedform_cert_url) {
     payload.append('Jornaya_or_Trusted_Form', b.jornaya_leadid || b.trustedform_cert_url);
   }
