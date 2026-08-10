@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v135)
+// FILE: server.js (v136)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3111,7 +3111,8 @@ app.post('/leads/ssdi-fieldslaw', async (req, res) => {
   payload.append('State', b.state);
   if (b.zip || b.postal_code) payload.append('Postal_Code', b.zip || b.postal_code);
   payload.append('CaseLeadID', String(leadId));
-  payload.append('Mktg_Campaign', FIELDSLAW_MKTG_CAMPAIGN);
+  // Mktg_Campaign intentionally omitted — buyer confirmed the value we were
+  // sending was incorrect and asked for it to be removed entirely (Aug 2026)
   payload.append('Mktg_SubSource', aliasPub(publisherSub) || FIELDSLAW_MKTG_CAMPAIGN);
   if (b.jornaya_leadid || b.trustedform_cert_url) {
     payload.append('Jornaya_or_Trusted_Form', b.jornaya_leadid || b.trustedform_cert_url);
