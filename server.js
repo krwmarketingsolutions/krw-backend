@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v133)
+// FILE: server.js (v134)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3035,6 +3035,152 @@ app.post('/leads/ssdi-cpq', async (req, res) => {
   }
 });
 // ─── END SSDI-CPQ ──────────────────────────────────────────────────────────────
+
+// ─── SSDI FIELDS LAW — JOSHUA DURAN ────────────────────────────────────────────
+// Same publisher_sub as Joshua's existing Lead Tree SSDI line (KRW-JOSHUA-2026-76M)
+// — his login and portal stay identical. This line is distinguished internally
+// by campaign='ssdi-fieldslaw' instead of a separate publisher identity.
+// Forwards via form-encoded POST to Fields Law's LeadDocket API (MediaRite Warm
+// Transfer - SSD integration). Mktg_Campaign and Mktg_SubSource are injected
+// server-side — generic, non-identifying values, never expose the publisher
+// name to the buyer, matching the same principle used for every other buyer
+// integration in this system.
+// Payout: $200 — NOT auto-billed on submission. This only confirms an
+// "opportunity" was created in Fields Law's system, not that the case signed.
+// Billable gets set manually later, same as every other CPA-model line here.
+
+const FIELDSLAW_API_KEY = '4f78906c';
+const FIELDSLAW_FORM_URL = 'https://fieldslaw.leaddocket.com/opportunities/form/125?apikey=' + FIELDSLAW_API_KEY;
+const FIELDSLAW_MKTG_CAMPAIGN   = 'KRW SSDI CPA';
+const FIELDSLAW_MKTG_SUBSOURCE  = 'KRW-SSD-01';
+
+app.post('/leads/ssdi-fieldslaw', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  const missing = [];
+  if (!b.first_name)  missing.push('first_name');
+  if (!b.last_name)   missing.push('last_name');
+  if (!b.phone)        missing.push('phone');
+  if (!b.email)        missing.push('email');
+  if (!b.state)        missing.push('state');
+  if (!b.publisher_sub) missing.push('publisher_sub');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  const publisherSub = b.publisher_sub;
+
+  // Insert lead into DB first, for our own tracking regardless of Fields Law's response
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, state, status, billable, raw, received_at)
+       VALUES ('ssdi-fieldslaw','SSDI',$1,$2,$3,$4,$5,$6,'pending',false,$7::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email,
+       publisherSub, (b.state || '').toUpperCase().trim(), JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[SSDI Fields Law] DB insert error:', dbErr.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+
+  // Build Fields Law form-urlencoded payload — their exact field names
+  const payload = new URLSearchParams();
+  payload.append('First',   b.first_name);
+  payload.append('Last',    b.last_name);
+  payload.append('Phone',   b.phone);
+  payload.append('Email',   b.email);
+  payload.append('Summary', b.summary || 'SSDI Signed lead');
+  if (b.city) payload.append('City', b.city);
+  payload.append('State', b.state);
+  if (b.zip || b.postal_code) payload.append('Postal_Code', b.zip || b.postal_code);
+  payload.append('CaseLeadID', String(leadId));
+  payload.append('Mktg_Campaign', FIELDSLAW_MKTG_CAMPAIGN);
+  payload.append('Mktg_SubSource', FIELDSLAW_MKTG_SUBSOURCE);
+  if (b.jornaya_leadid || b.trustedform_cert_url) {
+    payload.append('Jornaya_or_Trusted_Form', b.jornaya_leadid || b.trustedform_cert_url);
+  }
+
+  try {
+    const https = require('https');
+    const postData = payload.toString();
+
+    const flRes = await new Promise((resolve, reject) => {
+      const url = new URL(FIELDSLAW_FORM_URL);
+      const options = {
+        hostname: url.hostname,
+        path:     url.pathname + url.search,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(postData),
+        }
+      };
+      const req2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: data }));
+      });
+      req2.on('error', reject);
+      req2.write(postData);
+      req2.end();
+    });
+
+    let result = {};
+    try { result = JSON.parse(flRes.body); } catch(e) { result = { success: false, message: flRes.body }; }
+
+    const c2 = await pool.connect();
+    try {
+      await c2.query(
+        `UPDATE leads SET
+           status         = $1,
+           buyer_status   = $2,
+           buyer_intake_id = $3,
+           buyer_response = $4::jsonb
+         WHERE id = $5`,
+        [result.success ? 'forwarded' : 'buyer_rejected',
+         result.success ? 'Opportunity Created' : 'Rejected',
+         result.opportunityId ? String(result.opportunityId) : null,
+         JSON.stringify(result), leadId]
+      );
+    } finally { c2.release(); }
+
+    console.log(`[SSDI Fields Law] ${result.success ? '✓' : '✕'} ${b.first_name} ${b.last_name} | opportunityId: ${result.opportunityId || 'n/a'}`);
+
+    return res.json({
+      ok: !!result.success,
+      result: result.success ? 'success' : 'rejected',
+      message: result.message || (result.success ? 'Opportunity created' : 'Rejected'),
+      opportunity_id: result.opportunityId || null,
+      krw_id: leadId
+    });
+  } catch (err) {
+    console.error('[SSDI Fields Law] Forward failed:', err.message);
+    const c3 = await pool.connect();
+    try {
+      await c3.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2", [err.message, leadId]);
+    } finally { c3.release(); }
+    return res.status(502).json({ ok: false, error: 'Failed to forward to buyer', krw_id: leadId });
+  }
+});
+// ─── END SSDI FIELDS LAW ────────────────────────────────────────────────────────
 
 // ─── MVA FUNNEL POSTBACK — EMAIL AGENCY STATUS UPDATES ───────────────────────
 // Receives lead status postbacks from Email Agency.
