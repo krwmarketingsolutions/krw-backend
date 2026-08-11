@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v136)
+// FILE: server.js (v137)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -443,10 +443,10 @@ app.get('/leads/summary', requireKey, async (req, res) => {
     const weekAgo    = new Date(Date.now()-7*86400000).toISOString().split('T')[0];
     const monthStart = new Date().toISOString().slice(0,7)+'-01';
     const [todayQ,weekQ,monthQ,statusQ] = await Promise.all([
-      pool.query(`SELECT campaign, COUNT(*) as count FROM leads WHERE received_at::date=CURRENT_DATE AND campaign NOT IN ('Lssdi-shore') GROUP BY campaign`),
-      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND campaign NOT IN ('Lssdi-shore')`,[weekAgo]),
-      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND campaign NOT IN ('Lssdi-shore')`,[monthStart]),
-      pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE campaign NOT IN ('Lssdi-shore') GROUP BY status ORDER BY count DESC`),
+      pool.query(`SELECT campaign, COUNT(*) as count FROM leads WHERE received_at::date=CURRENT_DATE AND COALESCE(vertical,'') != 'SSDI' GROUP BY campaign`),
+      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND COALESCE(vertical,'') != 'SSDI'`,[weekAgo]),
+      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND COALESCE(vertical,'') != 'SSDI'`,[monthStart]),
+      pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE COALESCE(vertical,'') != 'SSDI' GROUP BY status ORDER BY count DESC`),
     ]);
     res.json({ ok:true, today:todayQ.rows, week:parseInt(weekQ.rows[0]?.count||0), month:parseInt(monthQ.rows[0]?.count||0), by_status:statusQ.rows });
   } catch(err) { res.status(500).json({ error:err.message }); }
@@ -461,8 +461,11 @@ app.get('/leads/feed', requireKey, async (req, res) => {
       where.push(`campaign=$${i++}`);
       params.push(campaign);
     } else if (!portal_id && !pub) {
-      // Exclude SSDI lead campaigns from the general feed — they show on the SSDI tab only
-      where.push(`campaign NOT IN ('Lssdi-shore')`);
+      // Exclude ALL SSDI lead campaigns from the general feed — they show on
+      // the SSDI tab only. Filtered by vertical, not campaign name, so any
+      // future SSDI campaign is automatically covered without needing a
+      // separate code change each time one is added.
+      where.push(`COALESCE(vertical,'') != 'SSDI'`);
     }
     if (status)   { where.push(`status=$${i++}`);   params.push(status); }
 
