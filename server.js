@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v138)
+// FILE: server.js (v139)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2412,12 +2412,37 @@ function hasRequiredNldPingFields(b) {
 // Attempts the full ping-then-post flow. Returns:
 //   { routed: true,  billable, buyerStatus, buyerResponse, bidAmount }  — succeeded via NLD Ping
 //   { routed: false, reason }                                          — caller should fall back to normal routing
+function convertDateToISO(dateStr) {
+  if (!dateStr) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr; // already ISO
+  const match = String(dateStr).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/); // mm/dd/yyyy or mm-dd-yyyy
+  if (match) {
+    const [, mm, dd, yyyy] = match;
+    return `${yyyy}-${mm.padStart(2,'0')}-${dd.padStart(2,'0')}`;
+  }
+  return dateStr; // unrecognized format, pass through unchanged rather than silently drop it
+}
+
 async function forwardToNldPing(b, publisherSub) {
-  if (!hasRequiredNldPingFields(b)) {
+  const zip = b.zip_code || b.zip;
+  const stateCode = (b.state || '').toUpperCase().trim();
+  // These two are resolved server-side regardless of caller — NLD_LP_URL's
+  // US_STATE_FULL_NAMES and buildNldCaseDescription are defined later in this
+  // file but safe to reference here since this function only ever runs in
+  // response to a request, long after the whole file has finished loading.
+  const incidentStateFull = US_STATE_FULL_NAMES[stateCode] || b.incident_state || null;
+  const isoIncidentDate = convertDateToISO(b.incident_date);
+  const caseDescription = b.case_description || buildNldCaseDescription(b, incidentStateFull);
+
+  // Validate against the EFFECTIVE fields (post auto-build/conversion), not
+  // the raw publisher payload — case_description and a correctly-formatted
+  // incident_date are now always present as long as incident_date itself was
+  // originally provided, regardless of what the publisher actually sent.
+  const effectiveFields = Object.assign({}, b, { incident_date: isoIncidentDate, case_description: caseDescription });
+
+  if (!hasRequiredNldPingFields(effectiveFields)) {
     return { routed: false, reason: 'missing_required_fields' };
   }
-
-  const zip = b.zip_code || b.zip;
 
   const basePayload = {
     lp_campaign_id: NLD_PING_LP_CAMPAIGN_ID,
@@ -2433,13 +2458,13 @@ async function forwardToNldPing(b, publisherSub) {
     have_attorney:  b.have_attorney,
     at_fault:       b.at_fault,
     injury_type:    b.injury_type,
-    incident_date:  b.incident_date,
+    incident_date:  isoIncidentDate,
     police_report:  b.police_report,
     has_insurance:  b.has_insurance,
     medical_treatment: b.medical_treatment,
     accident_type:  b.accident_type,
     compensated_before: b.compensated_before,
-    case_description: b.case_description,
+    case_description: caseDescription,
   };
 
   let pingResult;
