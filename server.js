@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v137)
+// FILE: server.js (v138)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -1820,7 +1820,7 @@ app.get('/calls/feed', requireKey, async (req, res) => {
     const params = [];
     let query = `SELECT * FROM calls WHERE source_system IN ('partner','sheet_import')`;
     if (daysInt < 9999) {
-      query += ` AND (source_system='sheet_import' OR received_at::timestamptz >= NOW() - INTERVAL '${daysInt} days')`;
+      query += ` AND received_at::timestamptz >= NOW() - INTERVAL '${daysInt} days'`;
     }
     if (pub) {
       params.push(pub);
