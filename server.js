@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v141)
+// FILE: server.js (v142)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2448,6 +2448,7 @@ async function forwardToNldPing(b, publisherSub) {
     lp_campaign_id: NLD_PING_LP_CAMPAIGN_ID,
     lp_supplier_id: NLD_PING_LP_SUPPLIER_ID,
     lp_key:         NLD_PING_LP_KEY,
+    lp_action:      b.lp_test_mode === true ? 'test' : '',
     lp_subid1:      aliasPub(publisherSub) || '',
     zip_code:       zip,
     ip_address:     b.ip_address,
