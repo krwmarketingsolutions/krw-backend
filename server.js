@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v139)
+// FILE: server.js (v140)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3209,6 +3209,122 @@ app.post('/leads/ssdi-fieldslaw', async (req, res) => {
   }
 });
 // ─── END SSDI FIELDS LAW ────────────────────────────────────────────────────────
+
+// ─── MVA PING/POST — DEDICATED ENDPOINT (NLD Dynamic Ping/Post, campaign 30934) ─
+// Separate, standalone URL from /leads/mva-funnel (CPA) and /leads/mva-cpl
+// (direct-post CPL). This endpoint ALWAYS routes through NLD's Ping/Post flow —
+// no dependency on the campaign_settings toggle, no ambiguity about which
+// campaign a lead hits. Publishers who want Ping/Post specifically post HERE;
+// existing CPA and CPL posting instructions are completely unaffected.
+// Reuses the already-verified forwardToNldPing() helper (auto-builds
+// case_description, auto-converts incident_date to the ISO format this
+// specific campaign requires) — same logic already proven working today.
+
+app.post('/leads/mva-ping-post', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  const missing = [];
+  if (!b.first_name)                              missing.push('first_name');
+  if (!b.last_name)                                missing.push('last_name');
+  if (!b.phone)                                    missing.push('phone');
+  if (!b.email)                                    missing.push('email');
+  if (!b.state)                                    missing.push('state');
+  if (!b.zip_code && !b.zip)                       missing.push('zip_code');
+  if (!b.publisher_sub)                            missing.push('publisher_sub');
+  if (!b.ip_address)                               missing.push('ip_address');
+  if (!b.user_agent)                               missing.push('user_agent');
+  if (!b.landing_page_url)                         missing.push('landing_page_url');
+  if (!b.trustedform_cert_url && !b.trusted_form_cert_url) missing.push('trustedform_cert_url');
+  if (!b.tcpa_text)                                missing.push('tcpa_text');
+  if (!b.have_attorney)                            missing.push('have_attorney');
+  if (!b.at_fault)                                 missing.push('at_fault');
+  if (!b.injury_type)                              missing.push('injury_type');
+  if (!b.incident_date)                            missing.push('incident_date');
+  if (!b.police_report)                            missing.push('police_report');
+  if (!b.has_insurance)                            missing.push('has_insurance');
+  if (!b.medical_treatment)                        missing.push('medical_treatment');
+  if (!b.accident_type)                            missing.push('accident_type');
+  if (!b.compensated_before)                       missing.push('compensated_before');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  const publisherSub = b.publisher_sub;
+  const leadState = (b.state || '').toUpperCase().trim();
+
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, state, status, raw, received_at)
+       VALUES ('mva-ping-post','MVA',$1,$2,$3,$4,$5,$6,'pending',$7::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email,
+       publisherSub, leadState, JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[MVA Ping/Post] DB insert error:', dbErr.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+
+  const pingAttempt = await forwardToNldPing(b, publisherSub);
+
+  if (!pingAttempt.routed) {
+    // Should not normally happen given the required-field check above, but
+    // fail loudly here rather than silently — this endpoint's whole purpose
+    // is guaranteed Ping/Post routing, so a fallback would defeat the point.
+    const cErr = await pool.connect();
+    try {
+      await cErr.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
+        [pingAttempt.reason || 'ping_not_routed', leadId]);
+    } finally { cErr.release(); }
+    console.error(`[MVA Ping/Post] ✕ Failed to route ${b.first_name} ${b.last_name} — reason: ${pingAttempt.reason}`);
+    return res.status(502).json({ ok: false, error: 'Failed to route through Ping/Post', reason: pingAttempt.reason, krw_id: leadId });
+  }
+
+  const c2 = await pool.connect();
+  try {
+    await c2.query(
+      `UPDATE leads SET
+         status         = $1,
+         buyer_response = $2::jsonb,
+         buyer_status   = $3,
+         billable       = $4,
+         revenue        = $5,
+         raw            = COALESCE(raw,'{}'::jsonb) || $6::jsonb
+       WHERE id = $7`,
+      [pingAttempt.billable ? 'forwarded' : 'buyer_rejected',
+       JSON.stringify(pingAttempt.buyerResponse), pingAttempt.buyerStatus,
+       pingAttempt.billable, pingAttempt.billable ? 100.00 : 0,
+       JSON.stringify({ nld_ping_bid: pingAttempt.bidAmount }), leadId]
+    );
+  } finally { c2.release(); }
+
+  console.log(`[MVA Ping/Post] ${pingAttempt.billable ? '✓' : '✕'} ${b.first_name} ${b.last_name} | bid $${pingAttempt.bidAmount} | ${pingAttempt.buyerStatus}`);
+
+  return res.json({
+    ok: pingAttempt.billable,
+    result: pingAttempt.billable ? 'success' : 'rejected',
+    message: pingAttempt.buyerStatus,
+    krw_id: leadId
+  });
+});
+// ─── END MVA PING/POST ─────────────────────────────────────────────────────────
 
 // ─── MVA FUNNEL POSTBACK — EMAIL AGENCY STATUS UPDATES ───────────────────────
 // Receives lead status postbacks from Email Agency.
