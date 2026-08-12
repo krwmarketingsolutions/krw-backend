@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v140)
+// FILE: server.js (v141)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2477,8 +2477,8 @@ async function forwardToNldPing(b, publisherSub) {
   }
 
   if (pingResult.status !== 'ACCEPTED' || !pingResult.bids || !pingResult.bids.length) {
-    console.log(`[NLD Ping] ✕ Ping rejected for ${b.first_name} ${b.last_name} — falling back to normal routing`);
-    return { routed: false, reason: 'ping_rejected' };
+    console.log(`[NLD Ping] ✕ Ping rejected for ${b.first_name} ${b.last_name} — ${pingResult.message || 'no message'} — falling back to normal routing`);
+    return { routed: false, reason: 'ping_rejected', nldMessage: pingResult.message || null, nldResponse: pingResult };
   }
 
   const bidAmount = pingResult.bids[0].payout;
@@ -3288,13 +3288,16 @@ app.post('/leads/mva-ping-post', async (req, res) => {
     // Should not normally happen given the required-field check above, but
     // fail loudly here rather than silently — this endpoint's whole purpose
     // is guaranteed Ping/Post routing, so a fallback would defeat the point.
+    const errorDetail = pingAttempt.nldMessage || pingAttempt.reason || 'ping_not_routed';
     const cErr = await pool.connect();
     try {
-      await cErr.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
-        [pingAttempt.reason || 'ping_not_routed', leadId]);
+      await cErr.query(
+        "UPDATE leads SET status='error', buyer_error=$1, buyer_response=$2::jsonb WHERE id=$3",
+        [errorDetail, JSON.stringify(pingAttempt.nldResponse || {}), leadId]
+      );
     } finally { cErr.release(); }
-    console.error(`[MVA Ping/Post] ✕ Failed to route ${b.first_name} ${b.last_name} — reason: ${pingAttempt.reason}`);
-    return res.status(502).json({ ok: false, error: 'Failed to route through Ping/Post', reason: pingAttempt.reason, krw_id: leadId });
+    console.error(`[MVA Ping/Post] ✕ Failed to route ${b.first_name} ${b.last_name} — ${errorDetail}`);
+    return res.status(502).json({ ok: false, error: 'Failed to route through Ping/Post', reason: pingAttempt.reason, nld_message: pingAttempt.nldMessage || null, krw_id: leadId });
   }
 
   const c2 = await pool.connect();
