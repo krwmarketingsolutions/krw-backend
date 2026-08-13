@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v142)
+// FILE: server.js (v143)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2298,40 +2298,60 @@ function aliasPub(pubId) {
 // Add new buyers here. Order = priority (Tier 1 first).
 const MVA_BUYERS = [
 
-  // ── Tier 1: Email Agency ─────────────────────────────────────────────────
+  // ── Tier 1: NLD CPA (campaign 31080) ──────────────────────────────────────
+  // Replaced Email Agency per Kyler's explicit instruction — all CPA leads,
+  // every state, route here now. Confirmed: lp_subid1 uses aliasPub(), so
+  // this buyer never sees a publisher's real pub_id or name — same identity
+  // protection already used everywhere else in this system.
   {
-    name:   'Email Agency',
-    states: ['AZ','CO','IL','IN','MS','NM','NV','NY','OR','TN','UT','WA','WI'],
+    name:   'NLD CPA',
+    states: ['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA',
+              'ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK',
+              'OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'], // every US state
     async post(b, publisherSub) {
-      const payload = {
-        key:          EA_MVA_KEY,
-        code:         EA_MVA_CODE,
-        first_name:   b.first_name,
-        last_name:    b.last_name,
-        phone:        b.phone,
-        email:        b.email,
-        ip_address:   b.ip_address,
-        attorney:     b.have_attorney,
-        accident_fault: b.at_fault,
-        channel:      (['Facebook','Google','Email','SMS','Display','Native','Other'].includes(b.channel) ? b.channel : 'Facebook'),
-        trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url,
-        sub_id2:      aliasPub(publisherSub),
-      };
-      if (b.address)                    payload.address    = b.address;
-      if (b.city)                       payload.city       = b.city;
-      if (b.state || b.incident_state)  payload.state      = b.state || b.incident_state;
-      if (b.zip_code || b.zip)          payload.zip        = b.zip_code || b.zip;
-      if (b.date_of_birth)              payload.dob        = b.date_of_birth;
-      if (b.user_agent)                 payload.user_agent = b.user_agent;
+      const stateCode = (b.state || b.incident_state || '').toUpperCase().trim();
+      const incidentStateFull = US_STATE_FULL_NAMES[stateCode] || b.incident_state || null;
 
-      const res  = await postJSON(EA_MVA_URL, payload);
+      const payload = {
+        lp_campaign_id: '31080',
+        lp_supplier_id: '110928',
+        lp_key:         'ke21sx0koi7dld',
+        lp_subid1:      aliasPub(publisherSub) || '',
+        first_name:     b.first_name,
+        last_name:      b.last_name,
+        email:          b.email,
+        phone:          String(b.phone).replace(/\D/g, ''),
+        date_of_birth:  b.date_of_birth,
+        gender:         b.gender || undefined,
+        address:        b.address,
+        city:           b.city,
+        state:          stateCode,
+        zip_code:       b.zip_code || b.zip,
+        ip_address:     b.ip_address,
+        user_agent:     b.user_agent || undefined,
+        landing_page_url: b.landing_page_url,
+        jornaya_leadid: b.jornaya_leadid || undefined,
+        trustedform_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url || undefined,
+        tcpa_text:      b.tcpa_text || undefined,
+        incident_state: incidentStateFull,
+        incident_date:  b.incident_date,
+        have_attorney:  b.have_attorney,
+        at_fault:       b.at_fault,
+        settlement:     b.settlement,
+        cited:          b.cited,
+        doctor_treatment: b.doctor_treatment,
+        physical_injury:  b.physical_injury,
+      };
+      Object.keys(payload).forEach(k => { if (payload[k] === undefined) delete payload[k]; });
+
+      const res  = await postJSON('https://api.leadprosper.io/direct_post', payload);
       let   result = {};
-      try { result = JSON.parse(res.body); } catch(e) { result = { status: false, message: res.body }; }
+      try { result = JSON.parse(res.body); } catch(e) { result = { status: 'ERROR', message: res.body }; }
       return {
-        accepted:  result.status === true,
-        duplicate: (result.message || '').toLowerCase().includes('duplicate'),
+        accepted:  result.status === 'ACCEPTED',
+        duplicate: result.status === 'DUPLICATED',
         lead_id:   result.lead_id || null,
-        message:   result.message || null,
+        message:   result.message || result.status || null,
         raw:       result,
       };
     }
@@ -2545,8 +2565,20 @@ app.post('/leads/mva-funnel', async (req, res) => {
   if (!b.have_attorney && !b.attorney) missing.push('have_attorney');
   if (!b.at_fault && !b.accident_fault) missing.push('at_fault');
   // channel is optional — defaults to 'Facebook' if missing or invalid
-  if (!b.trustedform_cert_url && !b.trusted_form_cert_url) missing.push('trustedform_cert_url');
+  if (!b.trustedform_cert_url && !b.trusted_form_cert_url && !b.jornaya_leadid) missing.push('trustedform_cert_url or jornaya_leadid');
   if (!b.publisher_sub) missing.push('publisher_sub');
+  // Required by the current MVA CPA buyer (NLD, campaign 31080)
+  if (!b.date_of_birth) missing.push('date_of_birth');
+  if (!b.address)       missing.push('address');
+  if (!b.city)          missing.push('city');
+  if (!b.state && !b.incident_state) missing.push('state');
+  if (!b.zip_code && !b.zip) missing.push('zip_code');
+  if (!b.landing_page_url) missing.push('landing_page_url');
+  if (!b.incident_date) missing.push('incident_date');
+  if (!b.settlement)    missing.push('settlement');
+  if (!b.cited)         missing.push('cited');
+  if (!b.doctor_treatment) missing.push('doctor_treatment');
+  if (!b.physical_injury)  missing.push('physical_injury');
 
   if (missing.length) {
     return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
