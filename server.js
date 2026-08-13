@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v145)
+// FILE: server.js (v146)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2316,9 +2316,7 @@ const MVA_BUYERS = [
   // protection already used everywhere else in this system.
   {
     name:   'NLD CPA',
-    states: ['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA',
-              'ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK',
-              'OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'], // every US state
+    states: ['UT','MT','WY','AZ','NV','OK','NE','IA','ND','PA','NM'], // NLD only accepts these states
     async post(b, publisherSub) {
       const stateCode = (b.state || b.incident_state || '').toUpperCase().trim();
       const incidentStateFull = US_STATE_FULL_NAMES[stateCode] || b.incident_state || null;
@@ -2369,7 +2367,53 @@ const MVA_BUYERS = [
     }
   },
 
-  // ── Tier 2: Placeholder — add CPL buyer here when ready ──────────────────
+  // ── Tier 2: Email Agency — catch-all for states NLD doesn't accept ───────
+  // Reactivated per Kyler's instruction (Aug 13) — NLD only accepts a
+  // specific 11-state list (Tier 1 above); everything else falls through to
+  // Email Agency. Uses the exact same payload logic and constants proven
+  // working before today's NLD migration. Identity fully aliased, same as
+  // every other buyer in this system.
+  {
+    name:   'Email Agency',
+    states: ['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA',
+              'ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK',
+              'OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'], // catch-all — Tier 1 always intercepts its 11 states first
+    async post(b, publisherSub) {
+      const payload = {
+        key:          EA_MVA_KEY,
+        code:         EA_MVA_CODE,
+        first_name:   b.first_name,
+        last_name:    b.last_name,
+        phone:        b.phone,
+        email:        b.email,
+        ip_address:   b.ip_address,
+        attorney:     b.have_attorney,
+        accident_fault: b.at_fault,
+        channel:      (['Facebook','Google','Email','SMS','Display','Native','Other'].includes(b.channel) ? b.channel : 'Facebook'),
+        trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url,
+        sub_id2:      aliasPub(publisherSub),
+      };
+      if (b.address)                    payload.address    = b.address;
+      if (b.city)                       payload.city       = b.city;
+      if (b.state || b.incident_state)  payload.state      = b.state || b.incident_state;
+      if (b.zip_code || b.zip)          payload.zip        = b.zip_code || b.zip;
+      if (b.date_of_birth)              payload.dob        = b.date_of_birth;
+      if (b.user_agent)                 payload.user_agent = b.user_agent;
+
+      const res  = await postJSON(EA_MVA_URL, payload);
+      let   result = {};
+      try { result = JSON.parse(res.body); } catch(e) { result = { status: false, message: res.body }; }
+      return {
+        accepted:  result.status === true,
+        duplicate: (result.message || '').toLowerCase().includes('duplicate'),
+        lead_id:   result.lead_id || null,
+        message:   result.message || null,
+        raw:       result,
+      };
+    }
+  },
+
+  // ── Tier 3: Placeholder — add CPL buyer here when ready ──────────────────
   // {
   //   name:   'CPL Buyer',
   //   states: ['CA','TX','FL', ...],
