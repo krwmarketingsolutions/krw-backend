@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v146)
+// FILE: server.js (v147)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2623,18 +2623,26 @@ app.post('/leads/mva-funnel', async (req, res) => {
   // channel is optional — defaults to 'Facebook' if missing or invalid
   if (!b.trustedform_cert_url && !b.trusted_form_cert_url && !b.jornaya_leadid) missing.push('trustedform_cert_url or jornaya_leadid');
   if (!b.publisher_sub) missing.push('publisher_sub');
-  // Required by the current MVA CPA buyer (NLD, campaign 31080)
-  if (!b.date_of_birth) missing.push('date_of_birth');
-  if (!b.address)       missing.push('address');
-  if (!b.city)          missing.push('city');
   if (!b.state && !b.incident_state) missing.push('state');
-  if (!b.zip_code && !b.zip) missing.push('zip_code');
-  if (!b.landing_page_url) missing.push('landing_page_url');
-  if (!b.incident_date) missing.push('incident_date');
-  if (!b.settlement)    missing.push('settlement');
-  if (!b.cited)         missing.push('cited');
-  if (!b.doctor_treatment) missing.push('doctor_treatment');
-  if (!b.physical_injury)  missing.push('physical_injury');
+
+  // The fields below are only required for NLD's accepted states — Email
+  // Agency (the fallback for every other state) doesn't use them, so a lead
+  // missing them shouldn't be blocked here if it's actually headed there.
+  // Checked only after we know which state this lead is in.
+  const NLD_ONLY_STATES = ['UT','MT','WY','AZ','NV','OK','NE','IA','ND','PA','NM'];
+  const stateForValidation = (b.state || b.incident_state || '').toUpperCase().trim();
+  if (NLD_ONLY_STATES.includes(stateForValidation)) {
+    if (!b.date_of_birth) missing.push('date_of_birth');
+    if (!b.address)       missing.push('address');
+    if (!b.city)          missing.push('city');
+    if (!b.zip_code && !b.zip) missing.push('zip_code');
+    if (!b.landing_page_url) missing.push('landing_page_url');
+    if (!b.incident_date) missing.push('incident_date');
+    if (!b.settlement)    missing.push('settlement');
+    if (!b.cited)         missing.push('cited');
+    if (!b.doctor_treatment) missing.push('doctor_treatment');
+    if (!b.physical_injury)  missing.push('physical_injury');
+  }
 
   if (missing.length) {
     return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
