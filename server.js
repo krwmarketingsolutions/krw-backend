@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v144)
+// FILE: server.js (v145)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2046,6 +2046,17 @@ const EMAIL_AGENCY_CODE = 'MVALEADS';
 const EMAIL_AGENCY_STATES = ['AZ','CO','IL','IN','MS','NM','NV','NY','OR','TN','UT','WA','WI'];
 
 app.post('/leads/mva-email-agency', async (req, res) => {
+  // DEPRECATED as of 2026-08-13 — Email Agency replaced by NLD as the MVA CPA
+  // buyer (see /leads/mva-funnel). This endpoint is hard-blocked, not just
+  // unused, so nothing can ever silently reach Email Agency through it again.
+  // If something is actually depending on this URL, it needs to be pointed
+  // at /leads/mva-funnel instead.
+  console.error('[MVA Email Agency] ✕ BLOCKED — this endpoint is deprecated. Use /leads/mva-funnel instead.');
+  return res.status(410).json({
+    ok: false,
+    error: 'This endpoint is deprecated and no longer forwards to Email Agency. Use /leads/mva-funnel instead.',
+  });
+
   const key = req.headers['x-api-key'] || req.query.api_key || '';
   const validKeys = [
     process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
@@ -4174,6 +4185,7 @@ app.get('/debug-trueblue', requireKey, async (req, res) => {
 
 // ── Email Agency debug endpoint — remove after testing ───────────────────────
 app.get('/debug-emailagency', requireKey, async (req, res) => {
+  return res.status(410).json({ ok: false, error: 'Deprecated — Email Agency is no longer the MVA CPA buyer. This debug tool has been disabled.' });
   try {
     const testPayload = {
       key:          EA_MVA_KEY,
