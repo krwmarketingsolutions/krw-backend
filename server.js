@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v143)
+// FILE: server.js (v144)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2316,6 +2316,7 @@ const MVA_BUYERS = [
         lp_campaign_id: '31080',
         lp_supplier_id: '110928',
         lp_key:         'ke21sx0koi7dld',
+        lp_action:      b.lp_test_mode === true ? 'test' : '',
         lp_subid1:      aliasPub(publisherSub) || '',
         first_name:     b.first_name,
         last_name:      b.last_name,
