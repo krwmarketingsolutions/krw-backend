@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v147)
+// FILE: server.js (v148)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2375,9 +2375,7 @@ const MVA_BUYERS = [
   // every other buyer in this system.
   {
     name:   'Email Agency',
-    states: ['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA',
-              'ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK',
-              'OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'], // catch-all — Tier 1 always intercepts its 11 states first
+    states: ['AZ','CO','IL','IN','MS','NM','NV','NY','OR','TN','UT','WA','WI'], // Email Agency's actual agreed state list
     async post(b, publisherSub) {
       const payload = {
         key:          EA_MVA_KEY,
