@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v148)
+// FILE: server.js (v149)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2367,7 +2367,63 @@ const MVA_BUYERS = [
     }
   },
 
-  // ── Tier 2: Email Agency — catch-all for states NLD doesn't accept ───────
+  // ── Tier 2: MVA-003-LT — nationwide (CA/CO hard-blocked upstream) ────────
+  // Added Aug 18 per Kyler's instruction — new primary buyer for everything
+  // NLD doesn't accept. Delivered via Zapier catch webhook, flexible JSON
+  // matching the buyer's own landing page field set (motorinjurycenter.com).
+  // CA and CO never reach this far — blocked earlier in the endpoint — but
+  // are excluded here too for clarity in case that upstream block ever moves.
+  {
+    name:   'MVA-003-LT',
+    states: ['AL','AK','AZ','AR','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA',
+              'ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK',
+              'OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'], // all states except CA, CO
+    async post(b, publisherSub) {
+      const stateCode = (b.state || b.incident_state || '').toUpperCase().trim();
+      const incidentStateFull = US_STATE_FULL_NAMES[stateCode] || b.incident_state || null;
+
+      const payload = {
+        lp_subid1:       aliasPub(publisherSub) || '',
+        first_name:      b.first_name,
+        last_name:       b.last_name,
+        email:           b.email,
+        phone:           String(b.phone).replace(/\D/g, ''),
+        at_fault:        b.at_fault,
+        have_attorney:   b.have_attorney,
+        has_insurance:   b.has_insurance,
+        physical_injury: b.physical_injury,
+        doctor_treatment: b.doctor_treatment,
+        state:           incidentStateFull || stateCode,
+        zip_code:        b.zip_code || b.zip,
+        incident_date:   b.incident_date,
+        case_description: b.case_description || `At fault: ${b.at_fault || ''}. Has attorney: ${b.have_attorney || ''}. Physical injury: ${b.physical_injury || ''}. Treatment: ${b.doctor_treatment || ''}.`,
+        trustedform_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url || undefined,
+        ip_address:      b.ip_address || undefined,
+      };
+      Object.keys(payload).forEach(k => { if (payload[k] === undefined) delete payload[k]; });
+
+      let result = {};
+      try {
+        const res = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4tdo5z8/', payload);
+        try { result = JSON.parse(res.body); } catch(e) { result = { status: res.status, raw: res.body }; }
+      } catch (err) {
+        result = { status: 'ERROR', message: err.message };
+      }
+
+      // Zapier catch hooks always return 200/"success" on receipt — this
+      // confirms delivery, not buyer acceptance. Treated as accepted since
+      // there's no buyer-side accept/reject response defined yet.
+      return {
+        accepted:  true,
+        duplicate: false,
+        lead_id:   result.id || null,
+        message:   'Delivered to MVA-003-LT',
+        raw:       result,
+      };
+    }
+  },
+
+  // ── Tier 3: Email Agency — catch-all for states NLD/MVA-003-LT don't accept ─
   // Reactivated per Kyler's instruction (Aug 13) — NLD only accepts a
   // specific 11-state list (Tier 1 above); everything else falls through to
   // Email Agency. Uses the exact same payload logic and constants proven
@@ -2375,7 +2431,7 @@ const MVA_BUYERS = [
   // every other buyer in this system.
   {
     name:   'Email Agency',
-    states: ['AZ','CO','IL','IN','MS','NM','NV','NY','OR','TN','UT','WA','WI'], // Email Agency's actual agreed state list
+    states: ['AZ','IL','IN','MS','NM','NV','NY','OR','TN','UT','WA','WI'], // CO removed — CA/CO hard-blocked upstream now
     async post(b, publisherSub) {
       const payload = {
         key:          EA_MVA_KEY,
@@ -2648,6 +2704,37 @@ app.post('/leads/mva-funnel', async (req, res) => {
 
   const publisherSub = b.publisher_sub;
   const leadState    = (b.incident_state || b.state || '').toUpperCase().trim();
+
+  // CA and CO are blocked entirely — never forwarded to any buyer, per
+  // Kyler's explicit instruction (Aug 18). Still logged/visible, not silently
+  // dropped, so it's clear on the dashboard when a publisher sends one anyway.
+  if (leadState === 'CA' || leadState === 'CO') {
+    const clientBlocked = await pool.connect();
+    let blockedLeadId = null;
+    try {
+      const insertBlocked = await clientBlocked.query(
+        `INSERT INTO leads
+           (campaign, vertical, first_name, last_name, phone, email,
+            publisher_sub, ip_address, state, status, buyer_error, billable, raw, received_at)
+         VALUES ('mva-funnel','MVA',$1,$2,$3,$4,$5,$6,$7,'rejected',$8,false,$9::jsonb,NOW())
+         RETURNING id`,
+        [b.first_name, b.last_name, b.phone, b.email,
+         publisherSub, b.ip_address, leadState,
+         `${leadState} is blocked — not accepted for this campaign`, JSON.stringify(b)]
+      );
+      blockedLeadId = insertBlocked.rows[0].id;
+    } catch(dbErr) {
+      console.error('[MVA Funnel] DB insert error (CA/CO block):', dbErr.message);
+    } finally {
+      clientBlocked.release();
+    }
+    console.log(`[MVA Funnel] ✕ ${b.first_name} ${b.last_name} | ${leadState} — blocked, not accepted`);
+    return res.json({
+      ok: false, result: 'rejected',
+      message: `${leadState} is blocked and not accepted for this campaign.`,
+      krw_id: blockedLeadId
+    });
+  }
 
   // Insert lead into DB
   const client = await pool.connect();
