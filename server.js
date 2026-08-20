@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v150)
+// FILE: server.js (v151)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2321,6 +2321,12 @@ const MVA_BUYERS = [
     async post(b, publisherSub) {
       const stateCode = (b.state || b.incident_state || '').toUpperCase().trim();
       const incidentStateFull = US_STATE_FULL_NAMES[stateCode] || b.incident_state || null;
+      // Auto-correct date formats regardless of what the publisher actually
+      // sends (mm/dd/yyyy, already-ISO, etc.) - this buyer requires strict
+      // YYYY-MM-DD on both fields. Same helper already proven working on the
+      // Ping/Post campaign. No publisher instructions need to change.
+      const isoDateOfBirth = convertDateToISO(b.date_of_birth);
+      const isoIncidentDate = convertDateToISO(b.incident_date);
 
       const payload = {
         lp_campaign_id: '31080',
@@ -2332,7 +2338,7 @@ const MVA_BUYERS = [
         last_name:      b.last_name,
         email:          b.email,
         phone:          String(b.phone).replace(/\D/g, ''),
-        date_of_birth:  b.date_of_birth,
+        date_of_birth:  isoDateOfBirth,
         gender:         b.gender || undefined,
         address:        b.address,
         city:           b.city,
@@ -2345,7 +2351,7 @@ const MVA_BUYERS = [
         trustedform_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url || undefined,
         tcpa_text:      b.tcpa_text || undefined,
         incident_state: incidentStateFull,
-        incident_date:  b.incident_date,
+        incident_date:  isoIncidentDate,
         have_attorney:  b.have_attorney,
         at_fault:       b.at_fault,
         settlement:     b.settlement,
