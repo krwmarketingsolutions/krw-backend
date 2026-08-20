@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v151)
+// FILE: server.js (v152)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2321,12 +2321,14 @@ const MVA_BUYERS = [
     async post(b, publisherSub) {
       const stateCode = (b.state || b.incident_state || '').toUpperCase().trim();
       const incidentStateFull = US_STATE_FULL_NAMES[stateCode] || b.incident_state || null;
-      // Auto-correct date formats regardless of what the publisher actually
-      // sends (mm/dd/yyyy, already-ISO, etc.) - this buyer requires strict
-      // YYYY-MM-DD on both fields. Same helper already proven working on the
-      // Ping/Post campaign. No publisher instructions need to change.
+      // Auto-correct date_of_birth format regardless of what the publisher
+      // sends (mm/dd/yyyy, already-ISO, etc.) - confirmed via a real
+      // rejection that this buyer requires strict YYYY-MM-DD on this field.
+      // incident_date is NOT converted here - confirmed via the same real
+      // rejection that this campaign accepts it as-is in mm/dd/yyyy; this is
+      // a different NLD campaign than the Ping/Post one and has different
+      // format requirements, don't assume they match.
       const isoDateOfBirth = convertDateToISO(b.date_of_birth);
-      const isoIncidentDate = convertDateToISO(b.incident_date);
 
       const payload = {
         lp_campaign_id: '31080',
@@ -2351,7 +2353,7 @@ const MVA_BUYERS = [
         trustedform_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url || undefined,
         tcpa_text:      b.tcpa_text || undefined,
         incident_state: incidentStateFull,
-        incident_date:  isoIncidentDate,
+        incident_date:  b.incident_date,
         have_attorney:  b.have_attorney,
         at_fault:       b.at_fault,
         settlement:     b.settlement,
