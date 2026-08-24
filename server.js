@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v156)
+// FILE: server.js (v157)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3535,7 +3535,7 @@ app.post('/leads/ssdi-signed', async (req, res) => {
 // Buyer: R2D2 / Aurion X, campaign key D3JKXH21ZP, pubid "kdmr1" (buyer-assigned,
 // confirmed by Kyler - NOT "r2d2", that was just Kyler's internal nickname).
 
-const R2D2_API_KEY      = 'PLACEHOLDER_NEED_REAL_KEY_FROM_BUYER'; // TODO: replace once provided
+const R2D2_API_KEY      = 'D3JKXH21ZP'; // TESTING ONLY - this is the same value as campaignKey; buyer's own spec lists x-api-key as a separate parameter, so this may not actually authenticate. Replace with the real key if this fails.
 const R2D2_CAMPAIGN_KEY = 'D3JKXH21ZP';
 const R2D2_PUBID        = 'kdmr1';
 const R2D2_INSERT_URL   = 'https://api.aurionx.ai/api/vendors/lead/insert';
