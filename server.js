@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v152)
+// FILE: server.js (v154)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3274,7 +3274,7 @@ const FIELDSLAW_API_KEY = '4f78906c';
 const FIELDSLAW_FORM_URL = 'https://fieldslaw.leaddocket.com/opportunities/form/125?apikey=' + FIELDSLAW_API_KEY;
 const FIELDSLAW_MKTG_CAMPAIGN   = 'KRW SSDI CPA';
 
-app.post('/leads/ssdi-fieldslaw', async (req, res) => {
+app.post('/leads/ssdi-signed', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
   const validKeys = [
     process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
@@ -3402,6 +3402,167 @@ app.post('/leads/ssdi-fieldslaw', async (req, res) => {
   }
 });
 // ─── END SSDI FIELDS LAW ────────────────────────────────────────────────────────
+
+// ─── SSDI R2D2 (AURION X) ──────────────────────────────────────────────────────
+// Simple lead-data forwarding, same pattern as SSDI Fields Law above. Publisher
+// posts to us, we forward to R2D2's lead/insert API. Call transfer (whatever DID
+// gets dialed) happens entirely outside our system on the publisher's side -
+// same as Fields Law, we never touch the actual call.
+// Buyer: R2D2 / Aurion X, campaign key D3JKXH21ZP, pubid "kdmr1" (buyer-assigned,
+// confirmed by Kyler - NOT "r2d2", that was just Kyler's internal nickname).
+
+const R2D2_API_KEY      = 'PLACEHOLDER_NEED_REAL_KEY_FROM_BUYER'; // TODO: replace once provided
+const R2D2_CAMPAIGN_KEY = 'D3JKXH21ZP';
+const R2D2_PUBID        = 'kdmr1';
+const R2D2_INSERT_URL   = 'https://api.aurionx.ai/api/vendors/lead/insert';
+
+function calculateAge(dobStr) {
+  if (!dobStr) return null;
+  const dob = new Date(dobStr);
+  if (isNaN(dob.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - dob.getFullYear();
+  const m = today.getMonth() - dob.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+  return age;
+}
+
+app.post('/leads/ssdi-r2d2', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Required per R2D2's own 400 error spec: pubid, email, phone, first_name, last_name, zip
+  const missing = [];
+  if (!b.first_name)  missing.push('first_name');
+  if (!b.last_name)   missing.push('last_name');
+  if (!b.phone)        missing.push('phone');
+  if (!b.email)        missing.push('email');
+  if (!b.zip && !b.zip_code) missing.push('zip');
+  if (!b.publisher_sub) missing.push('publisher_sub');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  const publisherSub = b.publisher_sub;
+
+  // Insert lead into DB first, for our own tracking regardless of buyer response
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, state, status, billable, raw, received_at)
+       VALUES ('ssdi-r2d2','SSDI',$1,$2,$3,$4,$5,$6,'pending',false,$7::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email,
+       publisherSub, (b.state || '').toUpperCase().trim(), JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[SSDI R2D2] DB insert error:', dbErr.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+
+  // Send both dob and age - R2D2's schema has both fields and it's not fully
+  // clear which is actually required, so cover both rather than guess
+  const calculatedAge = b.age || calculateAge(b.dob || b.date_of_birth);
+
+  const payload = {
+    pubid:      R2D2_PUBID,
+    email:      b.email,
+    phone:      String(b.phone).replace(/\D/g, ''),
+    first_name: b.first_name,
+    last_name:  b.last_name,
+    zip:        b.zip || b.zip_code,
+    ipaddress:  b.ip_address || b.ipaddress || undefined,
+    address:    b.address || undefined,
+    city:       b.city || undefined,
+    state:      (b.state || '').toUpperCase().trim() || undefined,
+    subid:      aliasPub(publisherSub) || '',
+    age:        calculatedAge != null ? String(calculatedAge) : undefined,
+    dob:        b.dob || b.date_of_birth || undefined,
+    gender:     b.gender || undefined,
+    country:    'US',
+    leadtype:   'SSDI',
+    sourcecertificate: b.trustedform_cert_url || b.trusted_form_cert_url || b.sourcecertificate || undefined,
+  };
+  Object.keys(payload).forEach(k => { if (payload[k] === undefined) delete payload[k]; });
+
+  try {
+    const r2d2Res = await new Promise((resolve, reject) => {
+      const https = require('https');
+      const url = new URL(R2D2_INSERT_URL);
+      const postData = JSON.stringify(payload);
+      const options = {
+        hostname: url.hostname,
+        path:     url.pathname + url.search,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/json',
+          'Content-Length': Buffer.byteLength(postData),
+          'x-api-key':      R2D2_API_KEY,
+        }
+      };
+      const req2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => resolve({ status: r.statusCode, body: data }));
+      });
+      req2.on('error', reject);
+      req2.write(postData);
+      req2.end();
+    });
+
+    let result = {};
+    try { result = JSON.parse(r2d2Res.body); } catch(e) { result = { message: r2d2Res.body }; }
+    const accepted = r2d2Res.status === 200 && !!result.leadId;
+
+    const c2 = await pool.connect();
+    try {
+      await c2.query(
+        `UPDATE leads SET
+           status          = $1,
+           buyer_intake_id = $2,
+           buyer_response  = $3::jsonb,
+           buyer_status    = $4
+         WHERE id = $5`,
+        [accepted ? 'forwarded' : 'buyer_rejected',
+         result.leadId || null, JSON.stringify(result),
+         accepted ? 'Accepted' : (result.message || 'Rejected'), leadId]
+      );
+    } finally { c2.release(); }
+
+    console.log(`[SSDI R2D2] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | leadId: ${result.leadId || 'none'} | ${result.message || ''}`);
+
+    return res.json({
+      ok: accepted,
+      result: accepted ? 'success' : 'rejected',
+      message: result.message || (accepted ? 'Lead created' : 'Rejected'),
+      lead_id: result.leadId || null,
+      krw_id: leadId
+    });
+  } catch (err) {
+    console.error('[SSDI R2D2] Forward failed:', err.message);
+    const c3 = await pool.connect();
+    try {
+      await c3.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2", [err.message, leadId]);
+    } finally { c3.release(); }
+    return res.status(502).json({ ok: false, error: 'Failed to forward to buyer', krw_id: leadId });
+  }
+});
+// ─── END SSDI R2D2 ──────────────────────────────────────────────────────────────
 
 // ─── MVA PING/POST — DEDICATED ENDPOINT (NLD Dynamic Ping/Post, campaign 30934) ─
 // Separate, standalone URL from /leads/mva-funnel (CPA) and /leads/mva-cpl
