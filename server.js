@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v155)
+// FILE: server.js (v156)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3355,7 +3355,7 @@ app.post('/leads/ssdi-1696', async (req, res) => {
          WHERE id = $6`,
         [available ? 'forwarded' : 'buyer_rejected',
          available ? 'Ping Accepted' : 'Ping Rejected',
-         JSON.stringify(result), available, available ? 100.00 : 0, leadId]
+         JSON.stringify(result), available, available ? 525.00 : 0, leadId]
       );
     } finally { c2.release(); }
 
