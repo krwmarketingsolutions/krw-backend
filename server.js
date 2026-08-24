@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v154)
+// FILE: server.js (v155)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3256,6 +3256,130 @@ app.post('/leads/ssdi-cpq', async (req, res) => {
   }
 });
 // ─── END SSDI-CPQ ──────────────────────────────────────────────────────────────
+
+// ─── SSDI-1696-NAST — RINGFUEL (JOHN-SSDI-1696) ────────────────────────────────
+// Same Ringfuel Ping mechanism as SSDI-CPQ above, but a genuinely separate
+// campaign with its own credentials, confirmed by Kyler (Aug 24) - not to be
+// confused with or merged with the existing CPQ campaign. Publisher posts lead
+// data here; we ping Ringfuel and get back a dynamic tracking number for them
+// to dial. We never see or handle the actual call itself.
+// Payout: $100 flat, billable = true only when Ping returns available:true.
+
+const RINGFUEL_1696_API_KEY     = 'rfp_77e3ad43bf5e048d7f4566919fa968e3e341c80951bce25f';
+const RINGFUEL_1696_CAMPAIGN_ID = 'c60aaee7-4a24-4a73-b318-8ded54134e15';
+const RINGFUEL_PING_URL_1696    = 'https://app.ringfuel.io/api/publisher/ping';
+
+app.post('/leads/ssdi-1696', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  const missing = [];
+  if (!b.first_name)  missing.push('first_name');
+  if (!b.last_name)   missing.push('last_name');
+  if (!b.phone)        missing.push('phone');
+  if (!b.email)        missing.push('email');
+  if (!b.state)        missing.push('state');
+  if (!b.publisher_sub) missing.push('publisher_sub');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  const publisherSub = b.publisher_sub;
+
+  // Insert lead into DB first, for our own tracking/dashboard regardless of ping outcome
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, state, status, raw, received_at)
+       VALUES ('ssdi-1696','SSDI',$1,$2,$3,$4,$5,$6,'pending',$7::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email,
+       publisherSub, (b.state || '').toUpperCase().trim(), JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[SSDI-1696] DB insert error:', dbErr.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+
+  // Build Ringfuel Ping payload — caller_number is what the lead is held against
+  const pingPayload = {
+    api_key:      RINGFUEL_1696_API_KEY,
+    campaign_id:  RINGFUEL_1696_CAMPAIGN_ID,
+    caller_number: String(b.phone).replace(/\D/g, ''),
+    caller_state: (b.state || '').toUpperCase().trim(),
+    caller_zip:   b.zip || b.zip_code || undefined,
+    first_name:   b.first_name,
+    last_name:    b.last_name,
+    email:        b.email,
+    phone:        String(b.phone).replace(/\D/g, ''),
+    address:      b.address || undefined,
+    city:         b.city || undefined,
+    state:        (b.state || '').toUpperCase().trim(),
+    dob:          b.dob || undefined,
+    ssn_last4:    b.ssn_last4 || undefined,
+    trustedform_url: b.trustedform_url || b.trustedform_cert_url || undefined,
+    jornaya_leadid:  b.jornaya_leadid || undefined,
+  };
+  Object.keys(pingPayload).forEach(k => { if (pingPayload[k] === undefined) delete pingPayload[k]; });
+
+  try {
+    const pingRes = await postJSON(RINGFUEL_PING_URL_1696, pingPayload);
+    const result  = JSON.parse(pingRes.body);
+
+    const available = result.available === true && result.targets && result.targets.count > 0;
+
+    const c2 = await pool.connect();
+    try {
+      await c2.query(
+        `UPDATE leads SET
+           status         = $1,
+           buyer_status   = $2,
+           buyer_response = $3::jsonb,
+           billable       = $4,
+           revenue        = $5
+         WHERE id = $6`,
+        [available ? 'forwarded' : 'buyer_rejected',
+         available ? 'Ping Accepted' : 'Ping Rejected',
+         JSON.stringify(result), available, available ? 100.00 : 0, leadId]
+      );
+    } finally { c2.release(); }
+
+    console.log(`[SSDI-1696] ${available ? '✓' : '✕'} ${b.first_name} ${b.last_name} | available=${result.available} | bid range: ${result.targets ? result.targets.lowBid+'-'+result.targets.highBid : 'n/a'}`);
+
+    return res.json({
+      ok: available,
+      result: available ? 'success' : 'rejected',
+      message: available ? 'Ping accepted — lead held for dial' : 'No targets available',
+      ping_id: result.pingId || null,
+      dial_number: result.dialNumber || null,
+      ttl: result.ttl || null,
+      krw_id: leadId
+    });
+  } catch (err) {
+    console.error('[SSDI-1696] Ping request failed:', err.message);
+    const c3 = await pool.connect();
+    try {
+      await c3.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2", [err.message, leadId]);
+    } finally { c3.release(); }
+    return res.status(502).json({ ok: false, error: 'Failed to ping buyer', krw_id: leadId });
+  }
+});
+// ─── END SSDI-1696 ──────────────────────────────────────────────────────────────
 
 // ─── SSDI FIELDS LAW — JOSHUA DURAN ────────────────────────────────────────────
 // Same publisher_sub as Joshua's existing Lead Tree SSDI line (KRW-JOSHUA-2026-76M)
