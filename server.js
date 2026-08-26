@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v161)
+// FILE: server.js (v162)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -453,6 +453,14 @@ app.get('/leads/summary', requireKey, async (req, res) => {
 });
 
 app.get('/leads/feed', requireKey, async (req, res) => {
+  // This endpoint's data changes constantly (new leads arrive continuously) -
+  // explicitly prevent any caching so publishers always see current data,
+  // never a stale response from before their latest submission. Found via
+  // a real bug (Aug 26): browser was returning 304 Not Modified and showing
+  // a publisher's portal as empty even though the lead was correctly stored.
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
   try {
     const { campaign, status, limit=100, pub, days, portal_id } = req.query;
     const where=[], params=[];
