@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v158)
+// FILE: server.js (v159)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2917,6 +2917,34 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   if (!leadState)      missing.push('state');
   if (!b.trustedform_cert_url && !b.jornaya_leadid) missing.push('trustedform_cert_url or jornaya_leadid');
 
+  // Determine which buyer this lead will route to BEFORE validating, so we
+  // can require NLD's full proven field set only when it's actually headed
+  // there - LAR has its own, different, smaller requirement set. Computed
+  // exactly once here and reused for the actual routing below - never
+  // re-queried, so there's no window for the count to drift between the
+  // validation check and the real routing decision.
+  const NLD_ONLY_STATES = ['UT','MT','WY','AZ','NV','OK','NE','IA','ND','PA','NM'];
+  const countRes = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM leads WHERE campaign='mva-nyc-split' AND status != 'rejected'`
+  );
+  const nextIsNld = (countRes.rows[0].n % 2 === 0); // 0th, 2nd, 4th... -> NLD; 1st, 3rd, 5th... -> LAR
+
+  if (nextIsNld && NLD_ONLY_STATES.includes(leadState)) {
+    if (!b.date_of_birth)    missing.push('date_of_birth');
+    if (!b.address)          missing.push('address');
+    if (!b.city)             missing.push('city');
+    if (!b.zip_code && !b.zip) missing.push('zip_code');
+    if (!b.landing_page_url) missing.push('landing_page_url');
+    if (!b.incident_date)    missing.push('incident_date (mm/dd/yyyy format)');
+    if (!b.settlement)       missing.push('settlement');
+    if (!b.cited)            missing.push('cited');
+    if (!b.doctor_treatment) missing.push('doctor_treatment');
+    if (!b.physical_injury)  missing.push('physical_injury');
+    if (!b.at_fault)         missing.push('at_fault');
+  } else if (!nextIsNld) {
+    if (!b.injury && !b.physical_injury) missing.push('injury (or physical_injury)');
+  }
+
   if (missing.length) {
     return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
   }
@@ -2947,21 +2975,6 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
       message: `${leadState} is blocked and not accepted for this campaign.`,
       krw_id: blockedLeadId
     });
-  }
-
-  // Determine alternation based on a DB count, not in-memory state
-  const countClient = await pool.connect();
-  let nextIsNld = true;
-  try {
-    const countRes = await countClient.query(
-      `SELECT COUNT(*)::int AS n FROM leads WHERE campaign='mva-nyc-split' AND status != 'rejected'`
-    );
-    const n = countRes.rows[0].n;
-    nextIsNld = (n % 2 === 0); // 0th, 2nd, 4th... -> NLD; 1st, 3rd, 5th... -> LAR
-  } catch(dbErr) {
-    console.error('[MVA-NYC-SPLIT] Count query error:', dbErr.message);
-  } finally {
-    countClient.release();
   }
 
   const buyerName = nextIsNld ? 'NLD CPA' : 'LAR-MVA-CPA';
