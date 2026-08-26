@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v159)
+// FILE: server.js (v161)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3488,12 +3488,17 @@ app.post('/leads/ssdi-cpq', async (req, res) => {
 });
 // ─── END SSDI-CPQ ──────────────────────────────────────────────────────────────
 
-// ─── SSDI-1696-NAST — RINGFUEL (JOHN-SSDI-1696) ────────────────────────────────
+// ─── SSDI-1696-NAST — CALLTOFFIC, VIA RINGFUEL PLATFORM (JOHN-SSDI-1696) ────────
+// Buyer is Calltoffic. Ringfuel is just the API/platform they use to receive
+// pings - not to be confused with the buyer name itself.
+// This is a COMPLETELY SEPARATE integration from R2D2/Aurion X below
+// (/leads/ssdi-r2d2) - different buyer, different campaign, different
+// credentials. Never conflate the two.
 // Same Ringfuel Ping mechanism as SSDI-CPQ above, but a genuinely separate
 // campaign with its own credentials, confirmed by Kyler (Aug 24) - not to be
-// confused with or merged with the existing CPQ campaign. Publisher posts lead
-// data here; we ping Ringfuel and get back a dynamic tracking number for them
-// to dial. We never see or handle the actual call itself.
+// confused with or merged with the existing CPQ campaign either. Publisher
+// posts lead data here; we ping Ringfuel and get back a dynamic tracking
+// number for them to dial. We never see or handle the actual call itself.
 // Payout: $100 flat, billable = true only when Ping returns available:true.
 
 const RINGFUEL_1696_API_KEY     = 'rfp_77e3ad43bf5e048d7f4566919fa968e3e341c80951bce25f';
@@ -3605,7 +3610,10 @@ app.post('/leads/ssdi-1696', async (req, res) => {
     console.error('[SSDI-1696] Ping request failed:', err.message);
     const c3 = await pool.connect();
     try {
-      await c3.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2", [err.message, leadId]);
+      // Store a generic, publisher-safe message here, not the raw exception -
+      // this field is visible on the publisher portal, and a raw network
+      // error could reveal the buyer's actual domain/platform name.
+      await c3.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2", ['Unable to reach buyer - technical error', leadId]);
     } finally { c3.release(); }
     return res.status(502).json({ ok: false, error: 'Failed to ping buyer', krw_id: leadId });
   }
