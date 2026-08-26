@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v157)
+// FILE: server.js (v158)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2875,6 +2875,224 @@ app.post('/leads/mva-funnel', async (req, res) => {
     }
     return res.status(502).json({ ok: false, error: `Failed to forward to ${buyer.name}`, detail: fwdErr.message });
   }
+});
+
+// ─── MVA-NYC-SPLIT — NLD / LAR-MVA-CPA ALTERNATION (KRW-NYC-MVA ONLY) ──────────
+// Fully isolated from /leads/mva-funnel above - Kevin's and Inbounds' routing
+// is completely untouched by anything in this section. Built per Kyler's
+// instruction (Aug 25-26): Noah's traffic alternates strictly between NLD and
+// LAR-MVA-CPA, at least 50% each. Alternation is based on a DB count at
+// request time (not in-memory), so it survives restarts/redeploys cleanly.
+// CA/CO hard-blocked here too, matching company-wide policy (Aug 18).
+//
+// NLD: same credentials as the main NLD CPA buyer, $2,000/case revenue to Kyler.
+// LAR-MVA-CPA: real spec confirmed via https://vividvisions.marketing/posting-instructions/mva1
+//   - auth is via publisher_code in the body, no separate API key header
+//   - requires EITHER trusted_form_url OR jornaya_lead_id
+//   - $2,500/case revenue to Kyler
+// Noah's own payout ($1,800/case) is already set on his publisher record,
+// unaffected by which buyer a given lead actually routes to.
+
+const LAR_MVA_ENDPOINT = 'https://vividvisions.marketing/api/v1/mva1';
+const LAR_MVA_PUBLISHER_CODE = 'PUB-KYLER1';
+
+app.post('/leads/mva-nyc-split', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+  const leadState = (b.state || b.incident_state || '').toUpperCase().trim();
+
+  const missing = [];
+  if (!b.first_name)  missing.push('first_name');
+  if (!b.last_name)   missing.push('last_name');
+  if (!b.phone)        missing.push('phone');
+  if (!b.email)        missing.push('email');
+  if (!leadState)      missing.push('state');
+  if (!b.trustedform_cert_url && !b.jornaya_leadid) missing.push('trustedform_cert_url or jornaya_leadid');
+
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  // CA/CO hard-blocked, matching company-wide policy - never forwarded to any buyer
+  if (leadState === 'CA' || leadState === 'CO') {
+    const clientBlocked = await pool.connect();
+    let blockedLeadId = null;
+    try {
+      const insertBlocked = await clientBlocked.query(
+        `INSERT INTO leads
+           (campaign, vertical, first_name, last_name, phone, email,
+            publisher_sub, ip_address, state, status, buyer_error, billable, raw, received_at)
+         VALUES ('mva-nyc-split','MVA',$1,$2,$3,$4,$5,$6,$7,'rejected',$8,false,$9::jsonb,NOW())
+         RETURNING id`,
+        [b.first_name, b.last_name, b.phone, b.email,
+         'KRW-NYC-MVA', b.ip_address, leadState,
+         `${leadState} is blocked — not accepted for this campaign`, JSON.stringify(b)]
+      );
+      blockedLeadId = insertBlocked.rows[0].id;
+    } catch(dbErr) {
+      console.error('[MVA-NYC-SPLIT] DB insert error (CA/CO block):', dbErr.message);
+    } finally {
+      clientBlocked.release();
+    }
+    return res.json({
+      ok: false, result: 'rejected',
+      message: `${leadState} is blocked and not accepted for this campaign.`,
+      krw_id: blockedLeadId
+    });
+  }
+
+  // Determine alternation based on a DB count, not in-memory state
+  const countClient = await pool.connect();
+  let nextIsNld = true;
+  try {
+    const countRes = await countClient.query(
+      `SELECT COUNT(*)::int AS n FROM leads WHERE campaign='mva-nyc-split' AND status != 'rejected'`
+    );
+    const n = countRes.rows[0].n;
+    nextIsNld = (n % 2 === 0); // 0th, 2nd, 4th... -> NLD; 1st, 3rd, 5th... -> LAR
+  } catch(dbErr) {
+    console.error('[MVA-NYC-SPLIT] Count query error:', dbErr.message);
+  } finally {
+    countClient.release();
+  }
+
+  const buyerName = nextIsNld ? 'NLD CPA' : 'LAR-MVA-CPA';
+
+  // Insert lead first, regardless of buyer outcome
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, ip_address, state, status, raw, received_at)
+       VALUES ('mva-nyc-split','MVA',$1,$2,$3,$4,$5,$6,$7,'pending',$8::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email,
+       'KRW-NYC-MVA', b.ip_address, leadState, JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[MVA-NYC-SPLIT] DB insert error:', dbErr.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+
+  let result = {};
+
+  try {
+    if (nextIsNld) {
+      // NLD CPA — same credentials as the main waterfall's NLD buyer, standalone here
+      const incidentStateFull = US_STATE_FULL_NAMES[leadState] || leadState;
+      const nldPayload = {
+        lp_campaign_id: '31080',
+        lp_supplier_id: '110928',
+        lp_key:         'ke21sx0koi7dld',
+        lp_action:      b.lp_test_mode === true ? 'test' : '',
+        lp_subid1:      aliasPub('KRW-NYC-MVA') || '',
+        first_name:     b.first_name,
+        last_name:      b.last_name,
+        email:          b.email,
+        phone:          String(b.phone).replace(/\D/g, ''),
+        date_of_birth:  convertDateToISO(b.date_of_birth),
+        address:        b.address,
+        city:           b.city,
+        state:          leadState,
+        zip_code:       b.zip_code || b.zip,
+        ip_address:     b.ip_address,
+        landing_page_url: b.landing_page_url,
+        trustedform_cert_url: b.trustedform_cert_url || undefined,
+        jornaya_leadid: b.jornaya_leadid || undefined,
+        incident_state: incidentStateFull,
+        incident_date:  b.incident_date,
+        have_attorney:  b.have_attorney,
+        at_fault:       b.at_fault,
+        settlement:     b.settlement,
+        cited:          b.cited,
+        doctor_treatment: b.doctor_treatment,
+        physical_injury:  b.physical_injury,
+      };
+      Object.keys(nldPayload).forEach(k => { if (nldPayload[k] === undefined) delete nldPayload[k]; });
+
+      const nldRes = await postJSON('https://api.leadprosper.io/direct_post', nldPayload);
+      result = JSON.parse(nldRes.body);
+    } else {
+      // LAR-MVA-CPA — exact field mapping per their confirmed spec
+      const larPayload = {
+        publisher_code: LAR_MVA_PUBLISHER_CODE,
+        first_name:     b.first_name,
+        last_name:      b.last_name,
+        phone:          String(b.phone).replace(/\D/g, ''),
+        email:          b.email,
+        zip_code:       b.zip_code || b.zip,
+        injury:         b.injury || b.physical_injury_description ||
+                          [b.physical_injury === 'Yes' ? 'Physical injury reported' : null,
+                           b.doctor_treatment === 'Yes' ? 'Received medical treatment' : null]
+                          .filter(Boolean).join(', ') || 'Injury reported',
+        address:        b.address || undefined,
+        city:            b.city || undefined,
+        state:           leadState || undefined,
+        county:          b.county || undefined,
+        summary:         b.summary || b.case_description || undefined,
+        incident_date:   b.incident_date ? convertDateToISO(b.incident_date) : undefined,
+        trusted_form_url: b.trustedform_cert_url || undefined,
+        jornaya_lead_id:  b.jornaya_leadid || undefined,
+      };
+      Object.keys(larPayload).forEach(k => { if (larPayload[k] === undefined) delete larPayload[k]; });
+
+      const larRes = await postJSON(LAR_MVA_ENDPOINT, larPayload);
+      result = JSON.parse(larRes.body);
+    }
+  } catch (fwdErr) {
+    console.error(`[MVA-NYC-SPLIT] Forward to ${buyerName} failed:`, fwdErr.message);
+    const c4 = await pool.connect();
+    try {
+      await c4.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2", [fwdErr.message, leadId]);
+    } finally { c4.release(); }
+    return res.status(502).json({ ok: false, error: `Failed to forward to ${buyerName}`, detail: fwdErr.message, krw_id: leadId });
+  }
+
+  const accepted = nextIsNld
+    ? (result.status === 'ACCEPTED' || result.success === true)
+    : (result.success === true && result.posted === true);
+  const revenue = nextIsNld ? 2000.00 : 2500.00;
+
+  const c2 = await pool.connect();
+  try {
+    await c2.query(
+      `UPDATE leads SET
+         status          = $1,
+         buyer_status    = $2,
+         buyer_response  = $3::jsonb,
+         billable        = $4,
+         revenue         = $5,
+         raw             = COALESCE(raw,'{}'::jsonb) || $6::jsonb
+       WHERE id = $7`,
+      [accepted ? 'forwarded' : 'buyer_rejected',
+       accepted ? 'Accepted' : 'Rejected',
+       JSON.stringify(result), accepted, accepted ? revenue : 0,
+       JSON.stringify({ buyer_name: buyerName }), leadId]
+    );
+  } finally { c2.release(); }
+
+  console.log(`[MVA-NYC-SPLIT] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} | -> ${buyerName} | ${result.message || ''}`);
+
+  return res.json({
+    ok: accepted,
+    result: accepted ? 'success' : 'rejected',
+    message: result.message || (accepted ? 'Lead accepted' : 'Lead rejected'),
+    buyer: buyerName,
+    krw_id: leadId
+  });
 });
 
 // Also keep old route as alias so any existing integrations don't break
