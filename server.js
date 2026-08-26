@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v162)
+// FILE: server.js (v163)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2916,6 +2916,13 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
 
   const b = req.body || {};
   const leadState = (b.state || b.incident_state || '').toUpperCase().trim();
+
+  // Hardcoded fallback IP for this campaign only, per Kyler's explicit
+  // instruction (Aug 26) - Noah's publisher doesn't reliably capture real
+  // IP data, and NLD requires the field. Applied before any downstream use
+  // (DB records and the actual buyer payload both pick this up) - this
+  // guarantees a missing IP can never hold up or reject a lead.
+  if (!b.ip_address) b.ip_address = '8.8.8.8';
 
   const missing = [];
   if (!b.first_name)  missing.push('first_name');
