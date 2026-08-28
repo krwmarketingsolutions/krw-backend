@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v164)
+// FILE: server.js (v165)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -5955,6 +5955,12 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     for (const pubId of Object.keys(mvaPubs)) {
       mva.publishers[pubId] = { name: mvaPubs[pubId], received: 0, forwarded: 0, accepted: 0, revenue: 0 };
     }
+    // Always show the full known buyer set, even at zero volume - the frontend
+    // needs every buyer node to exist so it can draw the correct structural
+    // connections from each publisher, not just the buyers that happened to
+    // receive traffic this specific period.
+    const mvaKnownBuyers = ['NLD CPA', 'MVA-003-LT', 'Email Agency', 'LAR-MVA-CPA'];
+    for (const b of mvaKnownBuyers) mva.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
     for (const row of mvaRows.rows) {
       const p = mva.publishers[row.publisher_sub];
       if (!p) continue;
@@ -5991,6 +5997,8 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     for (const pubId of Object.keys(ssdiPubs)) {
       ssdi.publishers[pubId] = { name: ssdiPubs[pubId].name, buyer: ssdiPubs[pubId].buyer, received: 0, forwarded: 0, accepted: 0, revenue: 0 };
     }
+    const ssdiKnownBuyers = ['Fields Law', 'Calltoffic'];
+    for (const b of ssdiKnownBuyers) ssdi.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
     for (const row of ssdiRows.rows) {
       const p = ssdi.publishers[row.publisher_sub];
       if (!p) continue;
@@ -6006,7 +6014,23 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       }
     }
 
-    res.json({ ok: true, period, mva, ssdi });
+    res.json({
+      ok: true,
+      period,
+      mva,
+      ssdi,
+      routing: {
+        // Kevin and Inbounds share the full waterfall (NLD -> MVA-003-LT -> Email Agency).
+        // Lumrah LLC (Noah) is isolated - only ever NLD or LAR-MVA-CPA, never the other two.
+        'KRW-KANTHONY-RS':  ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
+        'KRW-MVA-2026-8RT': ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
+        'KRW-NYC-MVA':      ['NLD CPA', 'LAR-MVA-CPA'],
+        // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
+        'SSDI-AZ-1696':      ['Calltoffic'],
+        'KRW-JOSHUA-SIGNED': ['Fields Law'],
+        'SSDI-SLC-1696':     ['Calltoffic'],
+      },
+    });
   } catch (err) {
     console.error('[Funnel Dashboard] Error:', err.message);
     res.status(500).json({ ok: false, error: err.message });
