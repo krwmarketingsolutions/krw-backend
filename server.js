@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v165)
+// FILE: server.js (v167)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3504,7 +3504,7 @@ app.post('/leads/ssdi-cpq', async (req, res) => {
 // ─── END SSDI-CPQ ──────────────────────────────────────────────────────────────
 
 // ─── SSDI-1696-NAST — CALLTOFFIC, VIA RINGFUEL PLATFORM (JOHN-SSDI-1696) ────────
-// Buyer is Calltoffic. Ringfuel is just the API/platform they use to receive
+// Buyer is Calltoffic 1696. Ringfuel is just the API/platform they use to receive
 // pings - not to be confused with the buyer name itself.
 // This is a COMPLETELY SEPARATE integration from R2D2/Aurion X below
 // (/leads/ssdi-r2d2) - different buyer, different campaign, different
@@ -3789,7 +3789,7 @@ app.post('/leads/ssdi-signed', async (req, res) => {
 // Buyer: R2D2 / Aurion X, campaign key D3JKXH21ZP, pubid "kdmr1" (buyer-assigned,
 // confirmed by Kyler - NOT "r2d2", that was just Kyler's internal nickname).
 
-const R2D2_API_KEY      = 'D3JKXH21ZP'; // TESTING ONLY - this is the same value as campaignKey; buyer's own spec lists x-api-key as a separate parameter, so this may not actually authenticate. Replace with the real key if this fails.
+const R2D2_API_KEY      = 'c2cc5f885d2a3790c85b9c1bde3fa2c3'; // Real key provided by R2D2 (Aug 28), labeled "KEY FOR KIRK Ping" on their end
 const R2D2_CAMPAIGN_KEY = 'D3JKXH21ZP';
 const R2D2_PUBID        = 'kdmr1';
 const R2D2_INSERT_URL   = 'https://api.aurionx.ai/api/vendors/lead/insert';
@@ -5981,9 +5981,9 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     // buyer is known directly from which campaign the lead came through,
     // no buyer_name lookup needed.
     const ssdiPubs = {
-      'SSDI-AZ-1696':      { name: 'Joshua Duran (AZ-1696)',    buyer: 'Calltoffic' },
+      'SSDI-AZ-1696':      { name: 'Joshua Duran (AZ-1696)',    buyer: 'Calltoffic 1696' },
       'KRW-JOSHUA-SIGNED': { name: 'Joshua Duran (Signed)',      buyer: 'Fields Law' },
-      'SSDI-SLC-1696':     { name: 'Grow My Firm Online (SLC)',  buyer: 'Calltoffic' },
+      'SSDI-SLC-1696':     { name: 'Grow My Firm Online (SLC)',  buyer: 'Calltoffic 1696' },
     };
     const ssdiRows = await pool.query(
       `SELECT publisher_sub, status, billable, revenue
@@ -5997,7 +5997,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     for (const pubId of Object.keys(ssdiPubs)) {
       ssdi.publishers[pubId] = { name: ssdiPubs[pubId].name, buyer: ssdiPubs[pubId].buyer, received: 0, forwarded: 0, accepted: 0, revenue: 0 };
     }
-    const ssdiKnownBuyers = ['Fields Law', 'Calltoffic'];
+    const ssdiKnownBuyers = ['Fields Law', 'Calltoffic 1696'];
     for (const b of ssdiKnownBuyers) ssdi.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
     for (const row of ssdiRows.rows) {
       const p = ssdi.publishers[row.publisher_sub];
@@ -6026,9 +6026,9 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         'KRW-MVA-2026-8RT': ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
         'KRW-NYC-MVA':      ['NLD CPA', 'LAR-MVA-CPA'],
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
-        'SSDI-AZ-1696':      ['Calltoffic'],
+        'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Fields Law'],
-        'SSDI-SLC-1696':     ['Calltoffic'],
+        'SSDI-SLC-1696':     ['Calltoffic 1696'],
       },
     });
   } catch (err) {
