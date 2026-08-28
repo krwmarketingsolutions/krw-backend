@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v163)
+// FILE: server.js (v164)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -5921,6 +5921,98 @@ app.get('/debug-poll-nexus7', requireKey, async (req, res) => {
 });
 // ─── END NEXUS-7 SSDI DISPOSITION SHEET POLLER ───────────────────────────────
 
+
+// ─── FUNNEL DASHBOARD DATA ──────────────────────────────────────────────────
+// Powers the new "Funnel" visualization page. Aggregates real lead counts by
+// publisher and buyer for MVA and SSDI separately. Admin-only (own dashboard
+// use), so real publisher/buyer names are fine here - this is not a
+// publisher-facing surface.
+app.get('/dashboard/funnel', requireKey, async (req, res) => {
+  const period = req.query.period || 'week';
+  let sinceClause;
+  if (period === 'today')      sinceClause = "received_at >= CURRENT_DATE";
+  else if (period === 'month') sinceClause = "received_at >= date_trunc('month', CURRENT_DATE)";
+  else                         sinceClause = "received_at >= date_trunc('week', CURRENT_DATE)"; // default: this week
+
+  try {
+    // ── MVA ──────────────────────────────────────────────────────────────
+    const mvaPubs = {
+      'KRW-KANTHONY-RS': 'Kevin Anthony (CPA)',
+      'KRW-MVA-2026-8RT': 'Inbounds.com (CPA)',
+      'KRW-NYC-MVA': 'Lumrah LLC',
+    };
+    const mvaRows = await pool.query(
+      `SELECT publisher_sub, status, billable, revenue,
+              raw->>'buyer_name' as buyer_name
+       FROM leads
+       WHERE campaign IN ('mva-funnel','mva-nyc-split')
+         AND publisher_sub = ANY($1::text[])
+         AND ${sinceClause}`,
+      [Object.keys(mvaPubs)]
+    );
+
+    const mva = { publishers: {}, buyers: {} };
+    for (const pubId of Object.keys(mvaPubs)) {
+      mva.publishers[pubId] = { name: mvaPubs[pubId], received: 0, forwarded: 0, accepted: 0, revenue: 0 };
+    }
+    for (const row of mvaRows.rows) {
+      const p = mva.publishers[row.publisher_sub];
+      if (!p) continue;
+      p.received++;
+      if (row.status !== 'rejected') p.forwarded++; // 'rejected' = blocked before reaching any buyer (e.g. CA/CO)
+      if (row.billable) { p.accepted++; p.revenue += parseFloat(row.revenue || 0); }
+
+      const buyerName = row.buyer_name || 'Unknown';
+      if (row.status !== 'rejected') {
+        if (!mva.buyers[buyerName]) mva.buyers[buyerName] = { received: 0, accepted: 0, revenue: 0 };
+        mva.buyers[buyerName].received++;
+        if (row.billable) { mva.buyers[buyerName].accepted++; mva.buyers[buyerName].revenue += parseFloat(row.revenue || 0); }
+      }
+    }
+
+    // ── SSDI ─────────────────────────────────────────────────────────────
+    // These are dedicated 1:1 endpoints (publisher -> single buyer), so the
+    // buyer is known directly from which campaign the lead came through,
+    // no buyer_name lookup needed.
+    const ssdiPubs = {
+      'SSDI-AZ-1696':      { name: 'Joshua Duran (AZ-1696)',    buyer: 'Calltoffic' },
+      'KRW-JOSHUA-SIGNED': { name: 'Joshua Duran (Signed)',      buyer: 'Fields Law' },
+      'SSDI-SLC-1696':     { name: 'Grow My Firm Online (SLC)',  buyer: 'Calltoffic' },
+    };
+    const ssdiRows = await pool.query(
+      `SELECT publisher_sub, status, billable, revenue
+       FROM leads
+       WHERE publisher_sub = ANY($1::text[])
+         AND ${sinceClause}`,
+      [Object.keys(ssdiPubs)]
+    );
+
+    const ssdi = { publishers: {}, buyers: {} };
+    for (const pubId of Object.keys(ssdiPubs)) {
+      ssdi.publishers[pubId] = { name: ssdiPubs[pubId].name, buyer: ssdiPubs[pubId].buyer, received: 0, forwarded: 0, accepted: 0, revenue: 0 };
+    }
+    for (const row of ssdiRows.rows) {
+      const p = ssdi.publishers[row.publisher_sub];
+      if (!p) continue;
+      p.received++;
+      if (row.status !== 'rejected' && row.status !== 'error') p.forwarded++;
+      if (row.billable) { p.accepted++; p.revenue += parseFloat(row.revenue || 0); }
+
+      const buyerName = ssdiPubs[row.publisher_sub].buyer;
+      if (row.status !== 'rejected' && row.status !== 'error') {
+        if (!ssdi.buyers[buyerName]) ssdi.buyers[buyerName] = { received: 0, accepted: 0, revenue: 0 };
+        ssdi.buyers[buyerName].received++;
+        if (row.billable) { ssdi.buyers[buyerName].accepted++; ssdi.buyers[buyerName].revenue += parseFloat(row.revenue || 0); }
+      }
+    }
+
+    res.json({ ok: true, period, mva, ssdi });
+  } catch (err) {
+    console.error('[Funnel Dashboard] Error:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+// ─── END FUNNEL DASHBOARD DATA ──────────────────────────────────────────────
 
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
