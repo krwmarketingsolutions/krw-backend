@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v168)
+// FILE: server.js (v169)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -6028,7 +6028,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // Lumrah LLC (Noah) is isolated - only ever NLD or LAR-MVA-CPA, never the other two.
         'KRW-KANTHONY-RS':  ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
         'KRW-MVA-2026-8RT': ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
-        'KRW-NYC-MVA':      ['NLD CPA', 'LAR-MVA-CPA'],
+        'KRW-NYC-MVA':      ['LAR-MVA-CPA'], // NLD paused (Aug 28) pending approval - was ['NLD CPA', 'LAR-MVA-CPA']
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Fields Law'],
