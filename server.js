@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v167)
+// FILE: server.js (v168)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2942,7 +2942,11 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const countRes = await pool.query(
     `SELECT COUNT(*)::int AS n FROM leads WHERE campaign='mva-nyc-split' AND status != 'rejected'`
   );
-  const nextIsNld = (countRes.rows[0].n % 2 === 0); // 0th, 2nd, 4th... -> NLD; 1st, 3rd, 5th... -> LAR
+  // NLD paused for this publisher (Aug 28) - Kyler needs separate NLD
+  // approval before this specific publisher can send them traffic. All
+  // leads go to LAR only for now. Original alternation logic preserved
+  // below (commented) so this is easy to restore once approved.
+  const nextIsNld = false; // was: (countRes.rows[0].n % 2 === 0);
 
   if (nextIsNld && NLD_ONLY_STATES.includes(leadState)) {
     if (!b.date_of_birth)    missing.push('date_of_birth');
