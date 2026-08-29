@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v169)
+// FILE: server.js (v170)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2789,13 +2789,12 @@ app.post('/leads/mva-funnel', async (req, res) => {
                status         = $1,
                buyer_response = $2::jsonb,
                buyer_status   = $3,
-               billable       = $4,
-               revenue        = $5,
-               raw            = COALESCE(raw,'{}'::jsonb) || $6::jsonb
-             WHERE id = $7`,
+               billable       = false,
+               revenue        = 0,
+               raw            = COALESCE(raw,'{}'::jsonb) || $4::jsonb
+             WHERE id = $5`,
             [pingAttempt.billable ? 'forwarded' : 'buyer_rejected',
              JSON.stringify(pingAttempt.buyerResponse), pingAttempt.buyerStatus,
-             pingAttempt.billable, pingAttempt.billable ? 100.00 : 0,
              JSON.stringify({ nld_ping_bid: pingAttempt.bidAmount }), leadId]
           );
         } finally { cPing.release(); }
@@ -3096,7 +3095,8 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const accepted = nextIsNld
     ? (result.status === 'ACCEPTED' || result.success === true)
     : (result.success === true && result.posted === true);
-  const revenue = nextIsNld ? 2000.00 : 2500.00;
+  // Never auto-billable on acceptance - buyer confirmation always comes
+  // later (manual or postback), per Kyler (Aug 28).
 
   const c2 = await pool.connect();
   try {
@@ -3105,13 +3105,13 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
          status          = $1,
          buyer_status    = $2,
          buyer_response  = $3::jsonb,
-         billable        = $4,
-         revenue         = $5,
-         raw             = COALESCE(raw,'{}'::jsonb) || $6::jsonb
-       WHERE id = $7`,
+         billable        = false,
+         revenue         = 0,
+         raw             = COALESCE(raw,'{}'::jsonb) || $4::jsonb
+       WHERE id = $5`,
       [accepted ? 'forwarded' : 'buyer_rejected',
        accepted ? 'Accepted' : 'Rejected',
-       JSON.stringify(result), accepted, accepted ? revenue : 0,
+       JSON.stringify(result),
        JSON.stringify({ buyer_name: buyerName }), leadId]
     );
   } finally { c2.release(); }
@@ -3276,13 +3276,12 @@ app.post('/leads/mva-cpl', async (req, res) => {
              status         = $1,
              buyer_response = $2::jsonb,
              buyer_status   = $3,
-             billable       = $4,
-             revenue        = $5,
-             raw            = COALESCE(raw,'{}'::jsonb) || $6::jsonb
-           WHERE id = $7`,
+             billable       = false,
+             revenue        = 0,
+             raw            = COALESCE(raw,'{}'::jsonb) || $4::jsonb
+           WHERE id = $5`,
           [pingAttempt.billable ? 'forwarded' : 'buyer_rejected',
            JSON.stringify(pingAttempt.buyerResponse), pingAttempt.buyerStatus,
-           pingAttempt.billable, pingAttempt.billable ? 100.00 : 0,
            JSON.stringify({ nld_ping_bid: pingAttempt.bidAmount }), leadId]
         );
       } finally { cPing.release(); }
@@ -3340,7 +3339,9 @@ app.post('/leads/mva-cpl', async (req, res) => {
 
     const accepted  = result.status === 'ACCEPTED';
     const duplicate = result.status === 'DUPLICATED';
-    const billable   = accepted; // CPL: pay only on ACCEPTED, never on DUPLICATED/ERROR
+    // Never auto-billable on acceptance - buyer confirmation (manual or
+    // postback) always comes later, per Kyler (Aug 28). Status still
+    // correctly reflects the lead was sent and accepted into intake.
 
     const c2 = await pool.connect();
     try {
@@ -3350,12 +3351,12 @@ app.post('/leads/mva-cpl', async (req, res) => {
            buyer_intake_id = $2,
            buyer_response  = $3::jsonb,
            buyer_status    = $4,
-           billable        = $5,
-           revenue         = $6
-         WHERE id = $7`,
+           billable        = false,
+           revenue         = 0
+         WHERE id = $5`,
         [accepted ? 'forwarded' : duplicate ? 'duplicate' : 'buyer_rejected',
          result.lead_id || null, JSON.stringify(result), result.status || 'ERROR',
-         billable, billable ? 100.00 : 0, leadId]
+         leadId]
       );
     } finally { c2.release(); }
 
@@ -3387,9 +3388,8 @@ app.post('/leads/mva-cpl', async (req, res) => {
 // the actual delivery to the buyer happens automatically when John-G's team
 // dials the DID and the call connects — entirely outside our system. We never
 // see the call itself, only the Ping result.
-// Payout: $100 flat to John-G, billable = true only when Ping returns
-// available:true (the only signal we can technically detect — see conversation
-// notes on why true call-qualification isn't visible to us here).
+// Payout: $100 flat to John-G. Never auto-billable - billing is confirmed
+// later, manually or via postback (Kyler, Aug 28), not at ping-accept time.
 
 const RINGFUEL_API_KEY     = 'rfp_9f87c1b9d23d26ab28f9726cc28e2825ccff8dac98feb313';
 const RINGFUEL_CAMPAIGN_ID = '790dfb68-1dfc-41b4-9ea3-e955f5fddb1e';
@@ -3476,12 +3476,12 @@ app.post('/leads/ssdi-cpq', async (req, res) => {
            status         = $1,
            buyer_status   = $2,
            buyer_response = $3::jsonb,
-           billable       = $4,
-           revenue        = $5
-         WHERE id = $6`,
+           billable       = false,
+           revenue        = 0
+         WHERE id = $4`,
         [available ? 'forwarded' : 'buyer_rejected',
          available ? 'Ping Accepted' : 'Ping Rejected',
-         JSON.stringify(result), available, available ? 100.00 : 0, leadId]
+         JSON.stringify(result), leadId]
       );
     } finally { c2.release(); }
 
@@ -3518,7 +3518,8 @@ app.post('/leads/ssdi-cpq', async (req, res) => {
 // confused with or merged with the existing CPQ campaign either. Publisher
 // posts lead data here; we ping Ringfuel and get back a dynamic tracking
 // number for them to dial. We never see or handle the actual call itself.
-// Payout: $100 flat, billable = true only when Ping returns available:true.
+// Payout: $500 flat. Never auto-billable - billing is confirmed later,
+// manually or via postback (Kyler, Aug 28), not at ping-accept time.
 
 const RINGFUEL_1696_API_KEY     = 'rfp_77e3ad43bf5e048d7f4566919fa968e3e341c80951bce25f';
 const RINGFUEL_1696_CAMPAIGN_ID = 'c60aaee7-4a24-4a73-b318-8ded54134e15';
@@ -3605,12 +3606,12 @@ app.post('/leads/ssdi-1696', async (req, res) => {
            status         = $1,
            buyer_status   = $2,
            buyer_response = $3::jsonb,
-           billable       = $4,
-           revenue        = $5
-         WHERE id = $6`,
+           billable       = false,
+           revenue        = 0
+         WHERE id = $4`,
         [available ? 'forwarded' : 'buyer_rejected',
          available ? 'Ping Accepted' : 'Ping Rejected',
-         JSON.stringify(result), available, available ? 525.00 : 0, leadId]
+         JSON.stringify(result), leadId]
       );
     } finally { c2.release(); }
 
@@ -4043,13 +4044,12 @@ app.post('/leads/mva-ping-post', async (req, res) => {
          status         = $1,
          buyer_response = $2::jsonb,
          buyer_status   = $3,
-         billable       = $4,
-         revenue        = $5,
-         raw            = COALESCE(raw,'{}'::jsonb) || $6::jsonb
-       WHERE id = $7`,
+         billable       = false,
+         revenue        = 0,
+         raw            = COALESCE(raw,'{}'::jsonb) || $4::jsonb
+       WHERE id = $5`,
       [pingAttempt.billable ? 'forwarded' : 'buyer_rejected',
        JSON.stringify(pingAttempt.buyerResponse), pingAttempt.buyerStatus,
-       pingAttempt.billable, pingAttempt.billable ? 100.00 : 0,
        JSON.stringify({ nld_ping_bid: pingAttempt.bidAmount }), leadId]
     );
   } finally { c2.release(); }
