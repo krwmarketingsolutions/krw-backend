@@ -6042,6 +6042,69 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
 });
 // ─── END FUNNEL DASHBOARD DATA ──────────────────────────────────────────────
 
+// ─── TRACKDRIVE CALL WEBHOOK — JOSHUA DURAN SIGNED (TD-ROUTED) ────────────────
+// This line no longer posts lead data to us at all - a DID is dialed directly,
+// routed through the buyer's own Trackdrive account. This webhook is how we
+// find out a call happened at all: Trackdrive notifies us once the call
+// completes. Creates a new call record from scratch (nothing exists to
+// update beforehand, since we never saw the lead). Never auto-billable -
+// same policy as everywhere else (Kyler, Aug 28/31) - billing confirmation
+// always comes later, manually or via a separate postback.
+const TRACKDRIVE_WEBHOOK_KEY = 'td_wh_9f3ac7e21b8d4f0a9c6e2b1d7a4f8e35';
+
+app.post('/calls/trackdrive-webhook/joshua-signed', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  if (key !== TRACKDRIVE_WEBHOOK_KEY) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+  const cid = b.caller_id || b.cid || b.phone || b.ani;
+  const durationRaw = b.duration || b.call_duration || b.length;
+  const timestampRaw = b.timestamp || b.call_datetime || b.datetime || b.date;
+
+  if (!cid) {
+    return res.status(400).json({ ok: false, error: 'Missing required field: caller_id (or cid/phone/ani)' });
+  }
+
+  const duration = parseInt(durationRaw, 10) || 0;
+  let callDatetime;
+  try {
+    callDatetime = timestampRaw ? new Date(timestampRaw) : new Date();
+    if (isNaN(callDatetime.getTime())) callDatetime = new Date();
+  } catch(e) {
+    callDatetime = new Date();
+  }
+  const callDateText = callDatetime.toISOString().slice(0, 10);
+
+  const client = await pool.connect();
+  try {
+    const insert = await client.query(
+      `INSERT INTO calls
+         (call_datetime, call_date, caller_id, duration, call_duration,
+          publisher_sub, vertical, campaign, campaign_name, buyer_name,
+          disposition, call_status, call_status_label, billable,
+          source_system, recording_url, raw, received_at)
+       VALUES ($1, $2, $3, $4, $4,
+               'KRW-JOSHUA-SIGNED', 'SSDI', 'ssdi-signed-td', 'SSDI Signed (TD)', 'TD Signed Buyer',
+               'Received', 'Completed', 'pending', false,
+               'trackdrive_webhook', $5, $6::jsonb, NOW())
+       RETURNING id`,
+      [callDatetime.toISOString(), callDateText, cid, duration,
+       b.recording_url || null, JSON.stringify(b)]
+    );
+    const callId = insert.rows[0].id;
+    console.log(`[Trackdrive Webhook] ✓ Call logged | CID: ${cid} | Duration: ${duration}s | krw_id: ${callId}`);
+    return res.json({ ok: true, result: 'success', message: 'Call logged', krw_id: callId });
+  } catch (err) {
+    console.error('[Trackdrive Webhook] DB insert error:', err.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+});
+// ─── END TRACKDRIVE CALL WEBHOOK ──────────────────────────────────────────────
+
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
       console.log(`API_KEY set: ${!!process.env.API_KEY}`);
