@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v173)
+// FILE: server.js (v174)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2941,11 +2941,9 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const countRes = await pool.query(
     `SELECT COUNT(*)::int AS n FROM leads WHERE campaign='mva-nyc-split' AND status != 'rejected'`
   );
-  // NLD paused for this publisher (Aug 28) - Kyler needs separate NLD
-  // approval before this specific publisher can send them traffic. All
-  // leads go to LAR only for now. Original alternation logic preserved
-  // below (commented) so this is easy to restore once approved.
-  const nextIsNld = false; // was: (countRes.rows[0].n % 2 === 0);
+  // NLD approved for this publisher (Sep 1) - restored to original 50/50
+  // count-based alternation.
+  const nextIsNld = (countRes.rows[0].n % 2 === 0);
 
   if (nextIsNld && NLD_ONLY_STATES.includes(leadState)) {
     if (!b.date_of_birth)    missing.push('date_of_birth');
@@ -6028,7 +6026,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // Lumrah LLC (Noah) is isolated - only ever NLD or LAR-MVA-CPA, never the other two.
         'KRW-KANTHONY-RS':  ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
         'KRW-MVA-2026-8RT': ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
-        'KRW-NYC-MVA':      ['LAR-MVA-CPA'], // NLD paused (Aug 28) pending approval - was ['NLD CPA', 'LAR-MVA-CPA']
+        'KRW-NYC-MVA':      ['NLD CPA', 'LAR-MVA-CPA'], // NLD restored (Sep 1) - approved for this publisher
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Fields Law'],
