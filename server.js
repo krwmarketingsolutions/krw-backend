@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v176)
+// FILE: server.js (v177)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -5932,7 +5932,24 @@ app.get('/debug-poll-nexus7', requireKey, async (req, res) => {
 app.get('/dashboard/funnel', requireKey, async (req, res) => {
   const period = req.query.period || 'week';
   let sinceClause;
-  if (period === 'today')      sinceClause = "received_at >= CURRENT_DATE";
+
+  // Custom range takes priority when both from/to are given and valid.
+  // Dates are parsed and validated before ever touching the query string,
+  // rather than interpolating req.query values directly.
+  const fromRaw = req.query.from;
+  const toRaw   = req.query.to;
+  let customFrom = fromRaw ? new Date(fromRaw + 'T00:00:00Z') : null;
+  let customTo   = toRaw   ? new Date(toRaw + 'T23:59:59Z')   : null;
+  if (customFrom && isNaN(customFrom.getTime())) customFrom = null;
+  if (customTo && isNaN(customTo.getTime())) customTo = null;
+
+  if (customFrom || customTo) {
+    const parts = [];
+    if (customFrom) parts.push(`received_at >= '${customFrom.toISOString()}'`);
+    if (customTo)   parts.push(`received_at <= '${customTo.toISOString()}'`);
+    sinceClause = parts.join(' AND ');
+  }
+  else if (period === 'today')      sinceClause = "received_at >= CURRENT_DATE";
   else if (period === 'month') sinceClause = "received_at >= date_trunc('month', CURRENT_DATE)";
   else                         sinceClause = "received_at >= date_trunc('week', CURRENT_DATE)"; // default: this week
 
