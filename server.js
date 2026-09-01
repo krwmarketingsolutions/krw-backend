@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v170)
+// FILE: server.js (v172)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -6104,6 +6104,127 @@ app.post('/calls/trackdrive-webhook/joshua-signed', async (req, res) => {
   }
 });
 // ─── END TRACKDRIVE CALL WEBHOOK ──────────────────────────────────────────────
+
+// ─── BILLABLE APPROVAL QUEUE — RINGFUEL/1696 ────────────────────────────────
+// Ringfuel marks a call billable on their end and posts here. Nothing is
+// ever auto-marked billable in our own leads table from this - it lands in
+// a holding queue first. Kyler must explicitly Approve before the billable
+// mark (and payout) ever reaches a publisher's portal. "Hold" items never
+// touch the leads table at all - fully private, KRW-internal only, never
+// exposed to any publisher (Kyler, Sep 1).
+const RINGFUEL_BILLABLE_WEBHOOK_KEY = 'rfb_wh_3d8c1a9f42e7b6059ac3d1e4b7f92a68';
+const NLD_1696_PUBLISHERS = ['SSDI-AZ-1696', 'SSDI-SLC-1696'];
+
+app.post('/billable-webhook/ringfuel', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  if (key !== RINGFUEL_BILLABLE_WEBHOOK_KEY) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+  const cid = b.cid || b.caller_id || b.phone;
+  const amount = parseFloat(b.amount || b.payout || 0) || 0;
+
+  if (!cid) {
+    return res.status(400).json({ ok: false, error: 'Missing required field: cid (or caller_id/phone)' });
+  }
+
+  const client = await pool.connect();
+  try {
+    // Match the CID to the most recent 1696 lead, to determine publisher
+    const match = await client.query(
+      `SELECT id, publisher_sub FROM leads
+       WHERE phone = $1 AND publisher_sub = ANY($2::text[])
+       ORDER BY received_at DESC LIMIT 1`,
+      [String(cid).replace(/\D/g, ''), NLD_1696_PUBLISHERS]
+    );
+    const leadId = match.rows[0] ? match.rows[0].id : null;
+    const publisherSub = match.rows[0] ? match.rows[0].publisher_sub : null;
+
+    const insert = await client.query(
+      `INSERT INTO billable_queue (cid, amount, publisher_sub, lead_id, status, raw)
+       VALUES ($1, $2, $3, $4, 'pending', $5::jsonb)
+       RETURNING id`,
+      [cid, amount, publisherSub, leadId, JSON.stringify(b)]
+    );
+    const queueId = insert.rows[0].id;
+    console.log(`[Ringfuel Billable] ✓ Queued for approval | CID: ${cid} | $${amount} | ${publisherSub || 'UNMATCHED'} | queue_id: ${queueId}`);
+    return res.json({ ok: true, result: 'success', message: 'Queued for approval', krw_id: queueId });
+  } catch (err) {
+    console.error('[Ringfuel Billable] DB error:', err.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+});
+
+// Admin-only: list current queue (pending/approved/held) with counts
+app.get('/billable-queue', requireKey, async (req, res) => {
+  try {
+    const rows = await pool.query(
+      `SELECT bq.id, bq.cid, bq.amount, bq.publisher_sub, bq.lead_id, bq.status,
+              bq.received_at, bq.resolved_at,
+              l.first_name, l.last_name, l.state
+       FROM billable_queue bq
+       LEFT JOIN leads l ON l.id = bq.lead_id
+       ORDER BY bq.received_at DESC`
+    );
+    const counts = { pending: 0, approved: 0, held: 0 };
+    rows.rows.forEach(r => { if (counts[r.status] !== undefined) counts[r.status]++; });
+    res.json({ ok: true, counts, items: rows.rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Admin-only: Approve - marks billable_queue approved AND updates the real
+// lead record (billable=true, revenue=amount), which is what the publisher
+// portal actually reads from.
+app.post('/billable-queue/:id/approve', requireKey, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const q = await client.query('SELECT * FROM billable_queue WHERE id=$1', [req.params.id]);
+    if (!q.rows[0]) return res.status(404).json({ ok: false, error: 'Not found' });
+    const item = q.rows[0];
+    if (item.status !== 'pending') {
+      return res.status(400).json({ ok: false, error: `Already ${item.status}` });
+    }
+
+    await client.query(
+      "UPDATE billable_queue SET status='approved', resolved_at=NOW() WHERE id=$1",
+      [item.id]
+    );
+    if (item.lead_id) {
+      await client.query(
+        'UPDATE leads SET billable=true, revenue=$1 WHERE id=$2',
+        [item.amount, item.lead_id]
+      );
+    }
+    console.log(`[Billable Queue] ✓ Approved | queue_id: ${item.id} | CID: ${item.cid} | $${item.amount}`);
+    return res.json({ ok: true, result: 'success', message: 'Approved' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Admin-only: Hold - marked internally only, never touches the leads table,
+// never visible to any publisher.
+app.post('/billable-queue/:id/hold', requireKey, async (req, res) => {
+  try {
+    const upd = await pool.query(
+      "UPDATE billable_queue SET status='held', resolved_at=NOW() WHERE id=$1 AND status='pending' RETURNING id",
+      [req.params.id]
+    );
+    if (!upd.rows[0]) return res.status(400).json({ ok: false, error: 'Not found or already resolved' });
+    console.log(`[Billable Queue] Held | queue_id: ${req.params.id}`);
+    return res.json({ ok: true, result: 'success', message: 'Held' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+// ─── END BILLABLE APPROVAL QUEUE ────────────────────────────────────────────
 
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
