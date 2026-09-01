@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v174)
+// FILE: server.js (v175)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -5984,7 +5984,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     // no buyer_name lookup needed.
     const ssdiPubs = {
       'SSDI-AZ-1696':      { name: 'Joshua Duran (AZ-1696)',    buyer: 'Calltoffic 1696' },
-      'KRW-JOSHUA-SIGNED': { name: 'Joshua Duran (Signed)',      buyer: 'Fields Law' },
+      'KRW-JOSHUA-SIGNED': { name: 'Joshua Duran (Signed)',      buyer: 'Signed (TD)' },
       'SSDI-SLC-1696':     { name: 'Grow My Firm Online (SLC)',  buyer: 'Calltoffic 1696' },
     };
     const ssdiRows = await pool.query(
@@ -5995,11 +5995,22 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       [Object.keys(ssdiPubs)]
     );
 
+    // KRW-JOSHUA-SIGNED's real activity lives in the calls table (Trackdrive
+    // postback), not leads - unlike the other SSDI publishers, which post
+    // lead data directly. Queried separately and merged into the same
+    // aggregation below, so the Funnel page actually reflects it.
+    const ssdiCallsRows = await pool.query(
+      `SELECT publisher_sub, billable, payout_amount AS revenue
+       FROM calls
+       WHERE publisher_sub = 'KRW-JOSHUA-SIGNED'
+         AND ${sinceClause}`
+    );
+
     const ssdi = { publishers: {}, buyers: {} };
     for (const pubId of Object.keys(ssdiPubs)) {
       ssdi.publishers[pubId] = { name: ssdiPubs[pubId].name, buyer: ssdiPubs[pubId].buyer, received: 0, forwarded: 0, accepted: 0, revenue: 0 };
     }
-    const ssdiKnownBuyers = ['Fields Law', 'Calltoffic 1696'];
+    const ssdiKnownBuyers = ['Signed (TD)', 'Calltoffic 1696'];
     for (const b of ssdiKnownBuyers) ssdi.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
     for (const row of ssdiRows.rows) {
       const p = ssdi.publishers[row.publisher_sub];
@@ -6015,6 +6026,21 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         if (row.billable) { ssdi.buyers[buyerName].accepted++; ssdi.buyers[buyerName].revenue += parseFloat(row.revenue || 0); }
       }
     }
+    // Merge in the calls-table rows for Josh's Signed line - every call that
+    // was logged at all counts as received+forwarded (no intake-rejection
+    // concept for calls the way there is for leads).
+    for (const row of ssdiCallsRows.rows) {
+      const p = ssdi.publishers[row.publisher_sub];
+      if (!p) continue;
+      p.received++;
+      p.forwarded++;
+      if (row.billable) { p.accepted++; p.revenue += parseFloat(row.revenue || 0); }
+
+      const buyerName = ssdiPubs[row.publisher_sub].buyer;
+      if (!ssdi.buyers[buyerName]) ssdi.buyers[buyerName] = { received: 0, accepted: 0, revenue: 0 };
+      ssdi.buyers[buyerName].received++;
+      if (row.billable) { ssdi.buyers[buyerName].accepted++; ssdi.buyers[buyerName].revenue += parseFloat(row.revenue || 0); }
+    }
 
     res.json({
       ok: true,
@@ -6029,7 +6055,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         'KRW-NYC-MVA':      ['NLD CPA', 'LAR-MVA-CPA'], // NLD restored (Sep 1) - approved for this publisher
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
-        'KRW-JOSHUA-SIGNED': ['Fields Law'],
+        'KRW-JOSHUA-SIGNED': ['Signed (TD)'], // Fields Law paused - this line now routes via Trackdrive
         'SSDI-SLC-1696':     ['Calltoffic 1696'],
       },
     });
