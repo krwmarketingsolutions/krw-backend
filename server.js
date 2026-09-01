@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v172)
+// FILE: server.js (v173)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -6149,6 +6149,14 @@ app.post('/billable-webhook/ringfuel', async (req, res) => {
     );
     const queueId = insert.rows[0].id;
     console.log(`[Ringfuel Billable] ✓ Queued for approval | CID: ${cid} | $${amount} | ${publisherSub || 'UNMATCHED'} | queue_id: ${queueId}`);
+    sendEmailNotification(
+      `New SSDI Billable — $${amount.toFixed(2)} — Needs Approval`,
+      `<p>A new 1696 call was marked billable by Ringfuel and is waiting in your approval queue.</p>
+       <p><b>CID:</b> ${cid}<br>
+       <b>Amount:</b> $${amount.toFixed(2)}<br>
+       <b>Publisher:</b> ${publisherSub || 'Unmatched — needs manual review'}</p>
+       <p>Nothing is sent to any publisher until you approve it on the dashboard.</p>`
+    );
     return res.json({ ok: true, result: 'success', message: 'Queued for approval', krw_id: queueId });
   } catch (err) {
     console.error('[Ringfuel Billable] DB error:', err.message);
