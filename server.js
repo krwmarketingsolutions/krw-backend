@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v175)
+// FILE: server.js (v176)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -5944,7 +5944,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       'KRW-NYC-MVA': 'Lumrah LLC',
     };
     const mvaRows = await pool.query(
-      `SELECT publisher_sub, status, billable, revenue,
+      `SELECT publisher_sub, status, billable, revenue, phone,
               raw->>'buyer_name' as buyer_name
        FROM leads
        WHERE campaign IN ('mva-funnel','mva-nyc-split')
@@ -5963,9 +5963,19 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     // receive traffic this specific period.
     const mvaKnownBuyers = ['NLD CPA', 'MVA-003-LT', 'Email Agency', 'LAR-MVA-CPA'];
     for (const b of mvaKnownBuyers) mva.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
+    // De-dupe by phone per publisher for display purposes only (Kyler, Sep 1)
+    // - a real duplicate-dial issue was found inflating raw counts. This
+    // never touches the leads table or intake - purely how this dashboard
+    // endpoint counts for display, so the numbers Kyler looks at are accurate.
+    const mvaSeenPhones = {};
     for (const row of mvaRows.rows) {
       const p = mva.publishers[row.publisher_sub];
       if (!p) continue;
+      if (!mvaSeenPhones[row.publisher_sub]) mvaSeenPhones[row.publisher_sub] = new Set();
+      const seen = mvaSeenPhones[row.publisher_sub];
+      if (row.phone && seen.has(row.phone)) continue; // duplicate - skip entirely
+      if (row.phone) seen.add(row.phone);
+
       p.received++;
       if (row.status !== 'rejected') p.forwarded++; // 'rejected' = blocked before reaching any buyer (e.g. CA/CO)
       if (row.billable) { p.accepted++; p.revenue += parseFloat(row.revenue || 0); }
@@ -5988,7 +5998,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       'SSDI-SLC-1696':     { name: 'Grow My Firm Online (SLC)',  buyer: 'Calltoffic 1696' },
     };
     const ssdiRows = await pool.query(
-      `SELECT publisher_sub, status, billable, revenue
+      `SELECT publisher_sub, status, billable, revenue, phone
        FROM leads
        WHERE publisher_sub = ANY($1::text[])
          AND ${sinceClause}`,
@@ -6000,7 +6010,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     // lead data directly. Queried separately and merged into the same
     // aggregation below, so the Funnel page actually reflects it.
     const ssdiCallsRows = await pool.query(
-      `SELECT publisher_sub, billable, payout_amount AS revenue
+      `SELECT publisher_sub, billable, payout_amount AS revenue, caller_id
        FROM calls
        WHERE publisher_sub = 'KRW-JOSHUA-SIGNED'
          AND ${sinceClause}`
@@ -6012,9 +6022,17 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     }
     const ssdiKnownBuyers = ['Signed (TD)', 'Calltoffic 1696'];
     for (const b of ssdiKnownBuyers) ssdi.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
+    // De-dupe by phone per publisher, display only - same fix and same
+    // reasoning as the MVA section above (Kyler, Sep 1).
+    const ssdiSeenPhones = {};
     for (const row of ssdiRows.rows) {
       const p = ssdi.publishers[row.publisher_sub];
       if (!p) continue;
+      if (!ssdiSeenPhones[row.publisher_sub]) ssdiSeenPhones[row.publisher_sub] = new Set();
+      const seen = ssdiSeenPhones[row.publisher_sub];
+      if (row.phone && seen.has(row.phone)) continue;
+      if (row.phone) seen.add(row.phone);
+
       p.received++;
       if (row.status !== 'rejected' && row.status !== 'error') p.forwarded++;
       if (row.billable) { p.accepted++; p.revenue += parseFloat(row.revenue || 0); }
@@ -6028,10 +6046,16 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     }
     // Merge in the calls-table rows for Josh's Signed line - every call that
     // was logged at all counts as received+forwarded (no intake-rejection
-    // concept for calls the way there is for leads).
+    // concept for calls the way there is for leads). Same phone-based
+    // de-dupe, using caller_id as the equivalent field for calls.
     for (const row of ssdiCallsRows.rows) {
       const p = ssdi.publishers[row.publisher_sub];
       if (!p) continue;
+      if (!ssdiSeenPhones[row.publisher_sub]) ssdiSeenPhones[row.publisher_sub] = new Set();
+      const seen = ssdiSeenPhones[row.publisher_sub];
+      if (row.caller_id && seen.has(row.caller_id)) continue;
+      if (row.caller_id) seen.add(row.caller_id);
+
       p.received++;
       p.forwarded++;
       if (row.billable) { p.accepted++; p.revenue += parseFloat(row.revenue || 0); }
