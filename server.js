@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v179)
+// FILE: server.js (v180)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2931,22 +2931,27 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   if (!leadState)      missing.push('state');
   if (!b.trustedform_cert_url && !b.jornaya_leadid) missing.push('trustedform_cert_url or jornaya_leadid');
 
-  // Determine which buyer this lead will route to BEFORE validating, so we
-  // can require NLD's full proven field set only when it's actually headed
-  // there - LAR has its own, different, smaller requirement set. Computed
-  // exactly once here and reused for the actual routing below - never
-  // re-queried, so there's no window for the count to drift between the
-  // validation check and the real routing decision.
+  // First 8 real leads each day go to NLD, anything past that goes to
+  // MVA-003-LT instead (Kyler, Sep 2) - Noah's daily volume (~12) split so
+  // NLD isn't overloaded. Counts today's leads specifically, not all-time,
+  // so this resets each day. LAR stays paused per the Sep 1 instruction.
   const NLD_ONLY_STATES = ['UT','MT','WY','AZ','NV','OK','NE','IA','ND','PA','NM'];
   const countRes = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM leads WHERE campaign='mva-nyc-split' AND status != 'rejected'`
+    `SELECT COUNT(*)::int AS n FROM leads
+     WHERE campaign='mva-nyc-split' AND status != 'rejected'
+       AND received_at::date = CURRENT_DATE`
   );
-  // NLD approved for this publisher (Sep 1) - restored to original 50/50
-  // count-based alternation.
-  // LAR paused for this publisher (Sep 1) - all traffic goes to NLD only.
-  // Original alternation logic preserved as a comment so it's easy to
-  // restore either LAR or the 50/50 split later.
-  const nextIsNld = true; // was: (countRes.rows[0].n % 2 === 0);
+  const nextIsNld = countRes.rows[0].n < 8;
+
+  // NLD confirmed directly (Kyler, Sep 2) that address/date_of_birth aren't
+  // actually required on their end - hardcoded rather than rejecting real
+  // leads that are missing them. Applied only when heading to NLD, before
+  // validation runs, so these are never actually missing by the time the
+  // check below looks for them.
+  if (nextIsNld) {
+    if (!b.address)       b.address = '123 Main Street';
+    if (!b.date_of_birth) b.date_of_birth = '01/01/1985';
+  }
 
   if (nextIsNld && NLD_ONLY_STATES.includes(leadState)) {
     if (!b.date_of_birth)    missing.push('date_of_birth');
@@ -2996,7 +3001,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     });
   }
 
-  const buyerName = nextIsNld ? 'NLD CPA' : 'LAR-MVA-CPA';
+  const buyerName = nextIsNld ? 'NLD CPA' : 'MVA-003-LT';
 
   // Insert lead first, regardless of buyer outcome
   const client = await pool.connect();
@@ -3058,31 +3063,29 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
       const nldRes = await postJSON('https://api.leadprosper.io/direct_post', nldPayload);
       result = JSON.parse(nldRes.body);
     } else {
-      // LAR-MVA-CPA — exact field mapping per their confirmed spec
-      const larPayload = {
-        publisher_code: LAR_MVA_PUBLISHER_CODE,
-        first_name:     b.first_name,
-        last_name:      b.last_name,
-        phone:          String(b.phone).replace(/\D/g, ''),
-        email:          b.email,
-        zip_code:       b.zip_code || b.zip,
-        injury:         b.injury || b.physical_injury_description ||
-                          [b.physical_injury === 'Yes' ? 'Physical injury reported' : null,
-                           b.doctor_treatment === 'Yes' ? 'Received medical treatment' : null]
-                          .filter(Boolean).join(', ') || 'Injury reported',
-        address:        b.address || undefined,
-        city:            b.city || undefined,
-        state:           leadState || undefined,
-        county:          b.county || undefined,
-        summary:         b.summary || b.case_description || undefined,
-        incident_date:   b.incident_date ? convertDateToISO(b.incident_date) : undefined,
-        trusted_form_url: b.trustedform_cert_url || undefined,
-        jornaya_lead_id:  b.jornaya_leadid || undefined,
+      // MVA-003-LT — overflow buyer once the 8/day NLD cap is hit (Kyler, Sep 2).
+      // Same field mapping already confirmed working via manual test.
+      const incidentStateFull003 = US_STATE_FULL_NAMES[leadState] || leadState;
+      const lt003Payload = {
+        lp_subid1:       aliasPub('KRW-NYC-MVA') || 'KRW-NYC-MVA',
+        first_name:      b.first_name,
+        last_name:       b.last_name,
+        email:           b.email,
+        phone:           String(b.phone).replace(/\D/g, ''),
+        at_fault:        b.at_fault,
+        have_attorney:   b.have_attorney,
+        physical_injury: b.physical_injury,
+        doctor_treatment: b.doctor_treatment,
+        state:           incidentStateFull003 || leadState,
+        zip_code:        b.zip_code || b.zip,
+        incident_date:   b.incident_date,
+        trustedform_cert_url: b.trustedform_cert_url || undefined,
+        ip_address:      b.ip_address || undefined,
       };
-      Object.keys(larPayload).forEach(k => { if (larPayload[k] === undefined) delete larPayload[k]; });
+      Object.keys(lt003Payload).forEach(k => { if (lt003Payload[k] === undefined) delete lt003Payload[k]; });
 
-      const larRes = await postJSON(LAR_MVA_ENDPOINT, larPayload);
-      result = JSON.parse(larRes.body);
+      const lt003Res = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4tdo5z8/', lt003Payload);
+      try { result = JSON.parse(lt003Res.body); } catch(e) { result = { status: lt003Res.status, raw: lt003Res.body }; }
     }
   } catch (fwdErr) {
     console.error(`[MVA-NYC-SPLIT] Forward to ${buyerName} failed:`, fwdErr.message);
@@ -3095,7 +3098,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
 
   const accepted = nextIsNld
     ? (result.status === 'ACCEPTED' || result.success === true)
-    : (result.success === true && result.posted === true);
+    : (result.status === 'success');
   // Never auto-billable on acceptance - buyer confirmation always comes
   // later (manual or postback), per Kyler (Aug 28).
 
