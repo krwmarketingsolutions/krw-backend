@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v182)
+// FILE: server.js (v183)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -6122,6 +6122,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
 // same policy as everywhere else (Kyler, Aug 28/31) - billing confirmation
 // always comes later, manually or via a separate postback.
 const TRACKDRIVE_WEBHOOK_KEY = 'td_wh_9f3ac7e21b8d4f0a9c6e2b1d7a4f8e35';
+const RINGFUEL_CALL_WEBHOOK_KEY = 'rfc_wh_49157237ba620b79118b1ecb63c1f078';
 
 app.post('/calls/trackdrive-webhook/joshua-signed', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
@@ -6175,6 +6176,76 @@ app.post('/calls/trackdrive-webhook/joshua-signed', async (req, res) => {
   }
 });
 // ─── END TRACKDRIVE CALL WEBHOOK ──────────────────────────────────────────────
+
+// ─── RINGFUEL CALL-COMPLETION WEBHOOK — SSDI 1696 (Filed) ──────────────────
+// Fires once a real call hangs up, sending CID/duration/timestamp. This is
+// separate from the ping data already flowing through /leads/ssdi-1696 -
+// pings measure lead submissions, this measures actual phone calls, which
+// were being conflated before and throwing off conversion % (Kyler, Sep 2).
+// Ringfuel's DID is shared between AZ-1696 and SLC-1696, so publisher_sub
+// is looked up dynamically by matching the caller ID against our own leads
+// table - same approach used for the manual historical import.
+app.post('/calls/ringfuel-call-webhook', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  if (key !== RINGFUEL_CALL_WEBHOOK_KEY) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+  const cidRaw = b.caller_id || b.cid || b.phone || b.ani;
+  const durationRaw = b.duration || b.call_duration || b.length;
+  const timestampRaw = b.timestamp || b.call_datetime || b.datetime || b.date;
+
+  if (!cidRaw) {
+    return res.status(400).json({ ok: false, error: 'Missing required field: caller_id (or cid/phone/ani)' });
+  }
+  const cid = String(cidRaw).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+
+  const duration = parseInt(durationRaw, 10) || 0;
+  let callDatetime;
+  try {
+    callDatetime = timestampRaw ? new Date(timestampRaw) : new Date();
+    if (isNaN(callDatetime.getTime())) callDatetime = new Date();
+  } catch(e) {
+    callDatetime = new Date();
+  }
+  const callDateText = callDatetime.toISOString().slice(0, 10);
+
+  const client = await pool.connect();
+  try {
+    const matchRes = await client.query(
+      `SELECT publisher_sub FROM leads
+       WHERE phone = $1 AND publisher_sub IN ('SSDI-AZ-1696','SSDI-SLC-1696')
+       LIMIT 1`,
+      [cid]
+    );
+    const publisherSub = matchRes.rows[0] ? matchRes.rows[0].publisher_sub : 'SSDI-1696-UNATTRIBUTED';
+
+    const insert = await client.query(
+      `INSERT INTO calls
+         (call_datetime, call_date, caller_id, duration, call_duration,
+          publisher_sub, vertical, campaign, campaign_name, buyer_name,
+          disposition, call_status, call_status_label, billable,
+          source_system, recording_url, raw, received_at)
+       VALUES ($1, $2, $3, $4, $4,
+               $5, 'SSDI', 'ssdi-1696', 'SSDI 1696 (Filed)', 'Calltoffic 1696',
+               'Received', 'Completed', 'pending', false,
+               'ringfuel_webhook', $6, $7::jsonb, NOW())
+       RETURNING id`,
+      [callDatetime.toISOString(), callDateText, cid, duration,
+       publisherSub, b.recording_url || null, JSON.stringify(b)]
+    );
+    const callId = insert.rows[0].id;
+    console.log(`[Ringfuel Call Webhook] ✓ Call logged | CID: ${cid} | Duration: ${duration}s | Publisher: ${publisherSub} | krw_id: ${callId}`);
+    return res.json({ ok: true, result: 'success', message: 'Call logged', publisher: publisherSub, krw_id: callId });
+  } catch (err) {
+    console.error('[Ringfuel Call Webhook] DB insert error:', err.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+});
+// ─── END RINGFUEL CALL-COMPLETION WEBHOOK ───────────────────────────────────
 
 // ─── BILLABLE APPROVAL QUEUE — RINGFUEL/1696 ────────────────────────────────
 // Ringfuel marks a call billable on their end and posts here. Nothing is
