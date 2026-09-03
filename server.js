@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v181)
+// FILE: server.js (v182)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -443,7 +443,7 @@ app.get('/leads/summary', requireKey, async (req, res) => {
     const weekAgo    = new Date(Date.now()-7*86400000).toISOString().split('T')[0];
     const monthStart = new Date().toISOString().slice(0,7)+'-01';
     const [todayQ,weekQ,monthQ,statusQ] = await Promise.all([
-      pool.query(`SELECT campaign, COUNT(*) as count FROM leads WHERE received_at::date=CURRENT_DATE AND COALESCE(vertical,'') != 'SSDI' GROUP BY campaign`),
+      pool.query(`SELECT campaign, COUNT(*) as count FROM leads WHERE (received_at AT TIME ZONE 'America/New_York')::date=(NOW() AT TIME ZONE 'America/New_York')::date AND COALESCE(vertical,'') != 'SSDI' GROUP BY campaign`),
       pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND COALESCE(vertical,'') != 'SSDI'`,[weekAgo]),
       pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND COALESCE(vertical,'') != 'SSDI'`,[monthStart]),
       pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE COALESCE(vertical,'') != 'SSDI' GROUP BY status ORDER BY count DESC`),
@@ -1848,7 +1848,7 @@ app.get('/calls/summary', requireKey, async (req, res) => {
       SELECT
         COUNT(*)                                                                        AS total,
         COUNT(*) FILTER(WHERE billable=true)                                            AS billable,
-        COUNT(*) FILTER(WHERE call_date=CURRENT_DATE OR DATE(received_at)=CURRENT_DATE) AS today,
+        COUNT(*) FILTER(WHERE call_date=(NOW() AT TIME ZONE 'America/New_York')::date::text OR (DATE(received_at AT TIME ZONE 'America/New_York'))=(NOW() AT TIME ZONE 'America/New_York')::date) AS today,
         COALESCE(SUM(payout_amount) FILTER(WHERE billable=true),0)                     AS total_payout
       FROM calls
       WHERE source_system IN ('partner','sheet_import','trackdrive_webhook')
@@ -2939,7 +2939,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const countRes = await pool.query(
     `SELECT COUNT(*)::int AS n FROM leads
      WHERE campaign='mva-nyc-split' AND status != 'rejected'
-       AND received_at::date = CURRENT_DATE`
+       AND (received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date`
   );
   const nextIsNld = countRes.rows[0].n < 8;
 
@@ -5955,9 +5955,9 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     if (customTo)   parts.push(`received_at <= '${customTo.toISOString()}'`);
     sinceClause = parts.join(' AND ');
   }
-  else if (period === 'today')      sinceClause = "received_at >= CURRENT_DATE";
-  else if (period === 'month') sinceClause = "received_at >= date_trunc('month', CURRENT_DATE)";
-  else                         sinceClause = "received_at >= date_trunc('week', CURRENT_DATE)"; // default: this week
+  else if (period === 'today')      sinceClause = "(received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date";
+  else if (period === 'month') sinceClause = "received_at >= (date_trunc('month', (NOW() AT TIME ZONE 'America/New_York')) AT TIME ZONE 'America/New_York')";
+  else                         sinceClause = "received_at >= (date_trunc('week', (NOW() AT TIME ZONE 'America/New_York')) AT TIME ZONE 'America/New_York')"; // default: this week
 
   try {
     // ── MVA ──────────────────────────────────────────────────────────────
