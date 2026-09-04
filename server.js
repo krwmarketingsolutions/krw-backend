@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v183)
+// FILE: server.js (v184)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3462,7 +3462,7 @@ app.post('/leads/ssdi-cpq', async (req, res) => {
     state:        (b.state || '').toUpperCase().trim(),
     dob:          b.dob || undefined,
     ssn_last4:    b.ssn_last4 || undefined,
-    trustedform_url: b.trustedform_url || b.trustedform_cert_url || undefined,
+    trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url || b.trustedform_url || undefined,
     jornaya_leadid:  b.jornaya_leadid || undefined,
   };
   Object.keys(pingPayload).forEach(k => { if (pingPayload[k] === undefined) delete pingPayload[k]; });
@@ -3592,7 +3592,7 @@ app.post('/leads/ssdi-1696', async (req, res) => {
     state:        (b.state || '').toUpperCase().trim(),
     dob:          b.dob || undefined,
     ssn_last4:    b.ssn_last4 || undefined,
-    trustedform_url: b.trustedform_url || b.trustedform_cert_url || undefined,
+    trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url || b.trustedform_url || undefined,
     jornaya_leadid:  b.jornaya_leadid || undefined,
   };
   Object.keys(pingPayload).forEach(k => { if (pingPayload[k] === undefined) delete pingPayload[k]; });
