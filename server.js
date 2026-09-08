@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v184)
+// FILE: server.js (v185)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2700,7 +2700,7 @@ app.post('/leads/mva-funnel', async (req, res) => {
   // Agency (the fallback for every other state) doesn't use them, so a lead
   // missing them shouldn't be blocked here if it's actually headed there.
   // Checked only after we know which state this lead is in.
-  const NLD_ONLY_STATES = ['UT','MT','WY','AZ','NV','OK','NE','IA','ND','PA','NM'];
+  const NLD_ONLY_STATES = ['UT','MT','WY','AZ','CA','NV','OK','NE','ND','IA','NM']; // PA removed, CA added (Kyler, Sep 8)
   const stateForValidation = (b.state || b.incident_state || '').toUpperCase().trim();
   if (NLD_ONLY_STATES.includes(stateForValidation)) {
     if (!b.date_of_birth) missing.push('date_of_birth');
@@ -2935,13 +2935,19 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // MVA-003-LT instead (Kyler, Sep 2) - Noah's daily volume (~12) split so
   // NLD isn't overloaded. Counts today's leads specifically, not all-time,
   // so this resets each day. LAR stays paused per the Sep 1 instruction.
-  const NLD_ONLY_STATES = ['UT','MT','WY','AZ','NV','OK','NE','IA','ND','PA','NM'];
+  const NLD_ONLY_STATES = ['UT','MT','WY','AZ','CA','NV','OK','NE','ND','IA','NM']; // PA removed, CA added (Kyler, Sep 8)
   const countRes = await pool.query(
     `SELECT COUNT(*)::int AS n FROM leads
      WHERE campaign='mva-nyc-split' AND status != 'rejected'
        AND (received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date`
   );
-  const nextIsNld = countRes.rows[0].n < 8;
+  // A lead only goes to NLD if BOTH today's 8/day cap hasn't been hit AND
+  // the lead's state is one NLD actually accepts - state alone was
+  // previously only gating which fields got validated, not which buyer
+  // actually received the lead, so an out-of-state lead could still be
+  // routed to NLD as long as today's count was under 8. Fixed so state is
+  // a real routing gate, not just a validation gate (Kyler, Sep 8).
+  const nextIsNld = countRes.rows[0].n < 8 && NLD_ONLY_STATES.includes(leadState);
 
   // NLD confirmed directly (Kyler, Sep 2) that address/date_of_birth aren't
   // actually required on their end - hardcoded rather than rejecting real
