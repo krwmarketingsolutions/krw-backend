@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v185)
+// FILE: server.js (v186)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -6354,6 +6354,16 @@ app.post('/billable-queue/:id/approve', requireKey, async (req, res) => {
       await client.query(
         'UPDATE leads SET billable=true, revenue=$1 WHERE id=$2',
         [item.amount, item.lead_id]
+      );
+    } else {
+      // No lead_id means this is a calls-based item (1696 or Signed line) -
+      // update the matching calls record directly by cid + publisher_sub,
+      // which is what the publisher portal actually reads from. Previously
+      // this branch didn't exist at all, so approving a calls-based item
+      // never touched the real record the portal shows (Kyler, Sep 8).
+      await client.query(
+        "UPDATE calls SET billable=true, payout_amount=$1, call_status_label='cpa' WHERE caller_id=$2 AND publisher_sub=$3",
+        [item.amount, item.cid, item.publisher_sub]
       );
     }
     console.log(`[Billable Queue] ✓ Approved | queue_id: ${item.id} | CID: ${item.cid} | $${item.amount}`);
