@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v188)
+// FILE: server.js (v189)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2133,7 +2133,7 @@ app.post('/leads/roblox-chad', async (req, res) => {
       const c2 = await pool.connect();
       try {
         await c2.query(
-          "UPDATE leads SET status='forwarded', buyer_name='CH-AD' WHERE id=$1",
+          "UPDATE leads SET status='forwarded' WHERE id=$1",
           [leadId]
         );
       } finally { c2.release(); }
@@ -2249,7 +2249,7 @@ app.post('/leads/rideshare-chad', async (req, res) => {
       const c2 = await pool.connect();
       try {
         await c2.query(
-          "UPDATE leads SET status='forwarded', buyer_name='CH-AD' WHERE id=$1",
+          "UPDATE leads SET status='forwarded' WHERE id=$1",
           [leadId]
         );
       } finally { c2.release(); }
