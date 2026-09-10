@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v187)
+// FILE: server.js (v188)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2039,6 +2039,238 @@ app.post('/leads/roblox', async (req, res) => {
   }
 });
 // ─── END ROBLOX MASS TORT ────────────────────────────────────────────────────
+
+
+// ─── ROBLOX — CH-AD (LA-HI) ──────────────────────────────────────────────────
+// New, separate campaign - distinct from the (dead) True Blue Roblox campaign
+// above. Publisher: LA-HI | Buyer: CH-AD | CPA: $2,100 | Straight post to
+// Zapier, no real-time bid/response to parse (Kyler, Sep 10).
+const CHAD_WEBHOOK_URL = 'https://hooks.zapier.com/hooks/catch/23024319/4d3yhob/';
+
+app.post('/leads/roblox-chad', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Core identifying fields only - everything else from the qualification
+  // criteria is optional and passes through blank if not provided, per
+  // Kyler's instruction (Sep 10). have_attorney is checked separately below
+  // since it's an explicit qualification gate, not just an optional field.
+  const missing = [];
+  if (!b.first_name) missing.push('first_name');
+  if (!b.last_name)  missing.push('last_name');
+  if (!b.phone)      missing.push('phone');
+  if (!b.email)      missing.push('email');
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  // Qualification gate: "Already signed with an attorney (Must be NO)".
+  // Only rejects when explicitly Yes - a blank/missing value still pushes
+  // through, matching Kyler's instruction that unanswered fields shouldn't
+  // block the lead.
+  if (String(b.have_attorney || '').toLowerCase() === 'yes') {
+    return res.status(400).json({ ok: false, error: 'Lead already represented by an attorney' });
+  }
+
+  const publisherSub = 'LA-HI-ROBLOX';
+
+  const payload = {
+    pub_id: 'LA-HI',
+    buyer: 'CH-AD',
+    campaign: 'roblox-chad',
+    first_name: b.first_name,
+    last_name: b.last_name,
+    phone: b.phone,
+    email: b.email,
+    have_attorney: b.have_attorney || '',
+    trustedform_cert_url: b.trustedform_cert_url || '',
+    roblox_username: b.roblox_username || '',
+    filing_for: b.filing_for || '',
+    victim_name: b.victim_name || '',
+    age_at_abuse: b.age_at_abuse || '',
+    abuser_name: b.abuser_name || '',
+    address: b.address || '',
+    best_time_to_contact: b.best_time_to_contact || '',
+  };
+
+  // Log the lead attempt
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, status, raw, received_at)
+       VALUES ('roblox-chad','Mass Tort - Roblox',$1,$2,$3,$4,$5,'pending',$6::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email, publisherSub, JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[Roblox CH-AD] DB insert error:', dbErr.message);
+  } finally {
+    client.release();
+  }
+
+  // Forward to Zapier - straight post, no bid/response to parse
+  try {
+    const zapRes = await fetch(CHAD_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const zapData = await zapRes.json().catch(() => ({}));
+
+    if (leadId) {
+      const c2 = await pool.connect();
+      try {
+        await c2.query(
+          "UPDATE leads SET status='forwarded', buyer_name='CH-AD' WHERE id=$1",
+          [leadId]
+        );
+      } finally { c2.release(); }
+    }
+
+    return res.json({ ok: true, result: 'success', message: 'Lead forwarded to CH-AD', krw_id: leadId, zapier: zapData });
+  } catch (fwdErr) {
+    console.error('[Roblox CH-AD] Forward error:', fwdErr.message);
+    if (leadId) {
+      const c3 = await pool.connect();
+      try {
+        await c3.query(
+          "UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
+          [fwdErr.message, leadId]
+        );
+      } finally { c3.release(); }
+    }
+    return res.status(502).json({ ok: false, error: 'Failed to forward to buyer', detail: fwdErr.message });
+  }
+});
+// ─── END ROBLOX — CH-AD ──────────────────────────────────────────────────────
+
+
+// ─── RIDESHARE — CH-AD (LA-HI) ───────────────────────────────────────────────
+// New, separate campaign - distinct from the (dead) True Blue Rideshare
+// campaign. Publisher: LA-HI | Buyer: CH-AD | CPA: $2,100 | Straight post to
+// Zapier, no real-time bid/response to parse (Kyler, Sep 10).
+app.post('/leads/rideshare-chad', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+
+  // Core identifying fields only - everything else from the qualification
+  // criteria is optional and passes through blank if not provided, per
+  // Kyler's instruction (Sep 10). have_attorney is checked separately below
+  // since it's an explicit qualification gate, not just an optional field.
+  const missing = [];
+  if (!b.first_name) missing.push('first_name');
+  if (!b.last_name)  missing.push('last_name');
+  if (!b.phone)      missing.push('phone');
+  if (!b.email)      missing.push('email');
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  }
+
+  // Qualification gate: "Confirmation lead is not already represented by an
+  // attorney". Only rejects when explicitly Yes - matching the same pattern
+  // as Roblox above.
+  if (String(b.have_attorney || '').toLowerCase() === 'yes') {
+    return res.status(400).json({ ok: false, error: 'Lead already represented by an attorney' });
+  }
+
+  const publisherSub = 'LA-HI-RIDESHARE';
+
+  const payload = {
+    pub_id: 'LA-HI',
+    buyer: 'CH-AD',
+    campaign: 'rideshare-chad',
+    first_name: b.first_name,
+    last_name: b.last_name,
+    phone: b.phone,
+    email: b.email,
+    have_attorney: b.have_attorney || '',
+    trustedform_cert_url: b.trustedform_cert_url || '',
+    active_ride_confirmed: b.active_ride_confirmed || '',
+    incident_date: b.incident_date || '',
+    incident_city: b.incident_city || '',
+    incident_state: b.incident_state || '',
+    driver_assault_confirmed: b.driver_assault_confirmed || '',
+    description: b.description || '',
+    police_report_filed: b.police_report_filed || '',
+    medical_treatment: b.medical_treatment || '',
+    address: b.address || '',
+    best_time_to_contact: b.best_time_to_contact || '',
+  };
+
+  // Log the lead attempt
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const insert = await client.query(
+      `INSERT INTO leads
+         (campaign, vertical, first_name, last_name, phone, email,
+          publisher_sub, state, status, raw, received_at)
+       VALUES ('rideshare-chad','Rideshare Assault',$1,$2,$3,$4,$5,$6,'pending',$7::jsonb,NOW())
+       RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email, publisherSub, b.incident_state || null, JSON.stringify(b)]
+    );
+    leadId = insert.rows[0].id;
+  } catch(dbErr) {
+    console.error('[Rideshare CH-AD] DB insert error:', dbErr.message);
+  } finally {
+    client.release();
+  }
+
+  // Forward to Zapier - straight post, no bid/response to parse
+  try {
+    const zapRes = await fetch(CHAD_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const zapData = await zapRes.json().catch(() => ({}));
+
+    if (leadId) {
+      const c2 = await pool.connect();
+      try {
+        await c2.query(
+          "UPDATE leads SET status='forwarded', buyer_name='CH-AD' WHERE id=$1",
+          [leadId]
+        );
+      } finally { c2.release(); }
+    }
+
+    return res.json({ ok: true, result: 'success', message: 'Lead forwarded to CH-AD', krw_id: leadId, zapier: zapData });
+  } catch (fwdErr) {
+    console.error('[Rideshare CH-AD] Forward error:', fwdErr.message);
+    if (leadId) {
+      const c3 = await pool.connect();
+      try {
+        await c3.query(
+          "UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2",
+          [fwdErr.message, leadId]
+        );
+      } finally { c3.release(); }
+    }
+    return res.status(502).json({ ok: false, error: 'Failed to forward to buyer', detail: fwdErr.message });
+  }
+});
+// ─── END RIDESHARE — CH-AD ───────────────────────────────────────────────────
 
 
 // ─── MVA — EMAIL AGENCY ROUTING ──────────────────────────────────────────────
@@ -6095,11 +6327,55 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       if (row.billable) { ssdi.buyers[buyerName].accepted++; ssdi.buyers[buyerName].revenue += parseFloat(row.revenue || 0); }
     }
 
+    // ── MASS TORT (Roblox / Rideshare) ──────────────────────────────────────
+    // New campaigns, both dedicated 1:1 (publisher -> single buyer CH-AD),
+    // same structure as the SSDI section above. Two publisher entries under
+    // one LA-HI relationship so the Funnel page shows a Roblox tab and a
+    // Rideshare tab side by side (Kyler, Sep 10).
+    const massTortPubs = {
+      'LA-HI-ROBLOX':    { name: 'LA-HI — Roblox',    buyer: 'CH-AD' },
+      'LA-HI-RIDESHARE': { name: 'LA-HI — Rideshare', buyer: 'CH-AD' },
+    };
+    const massTortRows = await pool.query(
+      `SELECT publisher_sub, status, billable, revenue, phone
+       FROM leads
+       WHERE publisher_sub = ANY($1::text[])
+         AND ${sinceClause}`,
+      [Object.keys(massTortPubs)]
+    );
+
+    const mass_tort = { publishers: {}, buyers: {} };
+    for (const pubId of Object.keys(massTortPubs)) {
+      mass_tort.publishers[pubId] = { name: massTortPubs[pubId].name, buyer: massTortPubs[pubId].buyer, received: 0, forwarded: 0, accepted: 0, revenue: 0 };
+    }
+    mass_tort.buyers['CH-AD'] = { received: 0, accepted: 0, revenue: 0 };
+    // De-dupe by phone per publisher, display only - same fix and same
+    // reasoning as the MVA/SSDI sections above.
+    const massTortSeenPhones = {};
+    for (const row of massTortRows.rows) {
+      const p = mass_tort.publishers[row.publisher_sub];
+      if (!p) continue;
+      if (!massTortSeenPhones[row.publisher_sub]) massTortSeenPhones[row.publisher_sub] = new Set();
+      const seen = massTortSeenPhones[row.publisher_sub];
+      if (row.phone && seen.has(row.phone)) continue;
+      if (row.phone) seen.add(row.phone);
+
+      p.received++;
+      if (row.status !== 'rejected' && row.status !== 'error') p.forwarded++;
+      if (row.billable) { p.accepted++; p.revenue += parseFloat(row.revenue || 0); }
+
+      if (row.status !== 'rejected' && row.status !== 'error') {
+        mass_tort.buyers['CH-AD'].received++;
+        if (row.billable) { mass_tort.buyers['CH-AD'].accepted++; mass_tort.buyers['CH-AD'].revenue += parseFloat(row.revenue || 0); }
+      }
+    }
+
     res.json({
       ok: true,
       period,
       mva,
       ssdi,
+      mass_tort,
       routing: {
         // Kevin and Inbounds share the full waterfall (NLD -> MVA-003-LT -> Email Agency).
         // Lumrah LLC (Noah) is isolated - only ever NLD or LAR-MVA-CPA, never the other two.
@@ -6110,6 +6386,9 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Signed (TD)'], // Fields Law paused - this line now routes via Trackdrive
         'SSDI-SLC-1696':     ['Calltoffic 1696'],
+        // Mass tort lines are also dedicated 1:1, single buyer CH-AD (Sep 10).
+        'LA-HI-ROBLOX':      ['CH-AD'],
+        'LA-HI-RIDESHARE':   ['CH-AD'],
       },
     });
   } catch (err) {
