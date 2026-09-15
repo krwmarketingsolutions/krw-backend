@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v190)
+// FILE: server.js (v191)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3239,7 +3239,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     });
   }
 
-  const buyerName = nextIsNld ? 'NLD CPA' : 'MVA-003-LT';
+  let buyerName = nextIsNld ? 'NLD CPA' : 'MVA-003-LT';
 
   // Insert lead first, regardless of buyer outcome
   const client = await pool.connect();
@@ -3334,11 +3334,56 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     return res.status(502).json({ ok: false, error: `Failed to forward to ${buyerName}`, detail: fwdErr.message, krw_id: leadId });
   }
 
-  const accepted = nextIsNld
+  let accepted = nextIsNld
     ? (result.status === 'ACCEPTED' || result.success === true)
     : (result.status === 'success');
   // Never auto-billable on acceptance - buyer confirmation always comes
   // later (manual or postback), per Kyler (Aug 28).
+
+  // Auto-fallback to 003: if NLD rejects for any reason (state, filter,
+  // whatever) instead of leaving the lead sitting as buyer_rejected for
+  // someone to manually resubmit later (as we've done by hand all night),
+  // retry it to 003 immediately, within this same request. Only applies
+  // when NLD was actually tried - never touches the 8/day cap logic itself
+  // (Kyler, Sep 15).
+  if (nextIsNld && !accepted) {
+    console.log(`[MVA-NYC-SPLIT] NLD rejected ${b.first_name} ${b.last_name}, auto-forwarding to 003`);
+    try {
+      const incidentStateFull003 = US_STATE_FULL_NAMES[leadState] || leadState;
+      const lt003Payload = {
+        lp_subid1:       aliasPub('KRW-NYC-MVA') || 'KRW-NYC-MVA',
+        first_name:      b.first_name,
+        last_name:       b.last_name,
+        email:           b.email,
+        phone:           String(b.phone).replace(/\D/g, ''),
+        at_fault:        b.at_fault,
+        have_attorney:   b.have_attorney,
+        physical_injury: b.physical_injury,
+        doctor_treatment: b.doctor_treatment,
+        state:           incidentStateFull003 || leadState,
+        zip_code:        b.zip_code || b.zip,
+        incident_date:   b.incident_date,
+        trustedform_cert_url: b.trustedform_cert_url || undefined,
+        ip_address:      b.ip_address || undefined,
+      };
+      Object.keys(lt003Payload).forEach(k => { if (lt003Payload[k] === undefined) delete lt003Payload[k]; });
+
+      const lt003Res = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4tdo5z8/', lt003Payload);
+      let fallbackResult;
+      try { fallbackResult = JSON.parse(lt003Res.body); } catch(e) { fallbackResult = { status: lt003Res.status, raw: lt003Res.body }; }
+
+      // Switch the outcome over to the 003 attempt - this is now what the
+      // DB update and response below reflect, not the original NLD rejection.
+      buyerName = 'MVA-003-LT';
+      result = fallbackResult;
+      accepted = (result.status === 'success');
+    } catch (fallbackErr) {
+      console.error('[MVA-NYC-SPLIT] Auto-fallback to 003 failed:', fallbackErr.message);
+      // Fall through with the original NLD rejection - fallback attempt
+      // itself failing shouldn't crash the request, just leaves the lead
+      // as a normal NLD rejection for manual follow-up.
+    }
+  }
 
   const c2 = await pool.connect();
   try {
