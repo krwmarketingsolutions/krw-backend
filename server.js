@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v192)
+// FILE: server.js (v195)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -2557,7 +2557,7 @@ const MVA_BUYERS = [
   // protection already used everywhere else in this system.
   {
     name:   'NLD CPA',
-    states: ['UT','MT','WY','AZ','NV','OK','NE','IA','ND','PA','NM'], // NLD only accepts these states
+    states: ['UT','MT','WY','AZ','CA','NV','OK','NE','ND','IA','NM'], // NLD only accepts these states (PA removed, CA added - Kyler, Sep 15; this is the array MVA_BUYERS.find() actually uses, previous fix to a different unused variable never touched this)
     async post(b, publisherSub) {
       const stateCode = (b.state || b.incident_state || '').toUpperCase().trim();
       const incidentStateFull = US_STATE_FULL_NAMES[stateCode] || b.incident_state || null;
@@ -3340,6 +3340,15 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // Never auto-billable on acceptance - buyer confirmation always comes
   // later (manual or postback), per Kyler (Aug 28).
 
+  // Track whether NLD was genuinely tried and what it said, separately from
+  // whatever the final outcome ends up being - previously this got silently
+  // discarded the moment the fallback fired, so there was no way afterward
+  // to tell "NLD was tried and rejected this" apart from "NLD was never
+  // reached at all". Both are now stored so that question never has to be
+  // answered by guessing again (Kyler, Sep 15).
+  const nldAttempted = nextIsNld;
+  const nldResult = nextIsNld ? result : null;
+
   // Auto-fallback to 003: if NLD rejects for any reason (state, filter,
   // whatever) instead of leaving the lead sitting as buyer_rejected for
   // someone to manually resubmit later (as we've done by hand all night),
@@ -3374,6 +3383,8 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
 
       // Switch the outcome over to the 003 attempt - this is now what the
       // DB update and response below reflect, not the original NLD rejection.
+      // nldResult (captured above, before this reassignment) still holds
+      // the original NLD response for the DB update further down.
       buyerName = 'MVA-003-LT';
       result = fallbackResult;
       accepted = (result.status === 'success');
@@ -3398,7 +3409,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
        WHERE id = $5`,
       [accepted ? 'forwarded' : 'buyer_rejected',
        accepted ? 'Accepted' : 'Rejected',
-       JSON.stringify(result),
+       JSON.stringify({ final: result, nld_attempted: nldAttempted, nld_response: nldResult }),
        JSON.stringify({ buyer_name: buyerName }), leadId]
     );
   } finally { c2.release(); }
