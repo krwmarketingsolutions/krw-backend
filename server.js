@@ -3173,13 +3173,13 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
      WHERE campaign='mva-nyc-split' AND status != 'rejected'
        AND (received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date`
   );
-  // A lead only goes to NLD if BOTH today's 15/day cap hasn't been hit AND
+  // A lead only goes to NLD if BOTH today's 12/day cap hasn't been hit AND
   // the lead's state is one NLD actually accepts - state alone was
   // previously only gating which fields got validated, not which buyer
   // actually received the lead, so an out-of-state lead could still be
   // routed to NLD as long as today's count was under 8. Fixed so state is
   // a real routing gate, not just a validation gate (Kyler, Sep 8).
-  const nextIsNld = countRes.rows[0].n < 15 && NLD_ONLY_STATES.includes(leadState); // raised from 8 to 15 (Kyler, Sep 15)
+  const nextIsNld = countRes.rows[0].n < 12 && NLD_ONLY_STATES.includes(leadState); // 8->15->12 (Kyler, Sep 15)
 
   // NLD confirmed directly (Kyler, Sep 2) that address/date_of_birth aren't
   // actually required on their end - hardcoded rather than rejecting real
@@ -3301,7 +3301,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
       const nldRes = await postJSON('https://api.leadprosper.io/direct_post', nldPayload);
       result = JSON.parse(nldRes.body);
     } else {
-      // MVA-003-LT — overflow buyer once the 15/day NLD cap is hit (Kyler, Sep 2; raised from 8 on Sep 15).
+      // MVA-003-LT — overflow buyer once the 12/day NLD cap is hit (Kyler, Sep 2; 8->15->12 on Sep 15).
       // Same field mapping already confirmed working via manual test.
       const incidentStateFull003 = US_STATE_FULL_NAMES[leadState] || leadState;
       const lt003Payload = {
@@ -3344,7 +3344,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // whatever) instead of leaving the lead sitting as buyer_rejected for
   // someone to manually resubmit later (as we've done by hand all night),
   // retry it to 003 immediately, within this same request. Only applies
-  // when NLD was actually tried - never touches the 15/day cap logic itself
+  // when NLD was actually tried - never touches the 12/day cap logic itself
   // (Kyler, Sep 15).
   if (nextIsNld && !accepted) {
     console.log(`[MVA-NYC-SPLIT] NLD rejected ${b.first_name} ${b.last_name}, auto-forwarding to 003`);
@@ -6426,7 +6426,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // Lumrah LLC (Noah) is isolated - only ever NLD or LAR-MVA-CPA, never the other two.
         'KRW-KANTHONY-RS':  ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
         'KRW-MVA-2026-8RT': ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
-        'KRW-NYC-MVA':      ['NLD CPA', 'MVA-003-LT'], // 15/day NLD cap, overflow to 003 (Sep 2, raised Sep 15) - LAR still paused
+        'KRW-NYC-MVA':      ['NLD CPA', 'MVA-003-LT'], // 12/day NLD cap, overflow to 003 (Sep 2, 8->15->12 Sep 15) - LAR still paused
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Signed (TD)'], // Fields Law paused - this line now routes via Trackdrive
