@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v195)
+// FILE: server.js (v196)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -6517,6 +6517,86 @@ app.post('/calls/trackdrive-webhook/joshua-signed', async (req, res) => {
   }
 });
 // ─── END TRACKDRIVE CALL WEBHOOK ──────────────────────────────────────────────
+
+// ─── J-SIGNED POSTBACK RECEIVER (R2D3) ────────────────────────────────────────
+// New buyer for the Signed line, replacing the paused original one. Unlike
+// every other buyer integration, there is no outbound posting step here -
+// we never send them anything up front, so there's no front-end lead data
+// on our side to match against. This endpoint exists purely to receive
+// their postback and create the call record directly from it. Named
+// "j-signed" rather than anything buyer- or publisher-identifying, per
+// Kyler (Sep 15). Always inserted as billable=false regardless of whatever
+// disposition they send - same policy as every other endpoint tonight;
+// nothing auto-bills, it lands in the approval queue like everything else.
+const J_SIGNED_POSTBACK_KEY = 'jsg_pb_0253fc381d78f9049c521724abb10eab';
+
+app.post('/calls/postback/j-signed', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  if (key !== J_SIGNED_POSTBACK_KEY) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const b = req.body || {};
+  const cid = b.caller_id || b.cid || b.phone || b.ani;
+  // Explicit undefined/null checks rather than || chaining - a genuine
+  // duration of 0 is falsy in JS, so `b.duration || b.call_duration || ...`
+  // would incorrectly treat a real "0" as missing and fall through to the
+  // next field, wrongly rejecting a valid (if unusual) 0-second call.
+  const durationRaw = (b.duration !== undefined && b.duration !== null) ? b.duration
+    : (b.call_duration !== undefined && b.call_duration !== null) ? b.call_duration
+    : (b.length !== undefined && b.length !== null) ? b.length
+    : undefined;
+  const timestampRaw = b.timestamp || b.call_datetime || b.datetime || b.date;
+
+  // Duration is required for this integration - per Kyler (Sep 15), unlike
+  // the Trackdrive endpoint above where it's optional and defaults to 0.
+  const missing = [];
+  if (!cid) missing.push('caller_id');
+  if (durationRaw === undefined || durationRaw === null || durationRaw === '') missing.push('duration');
+  if (missing.length) {
+    return res.status(400).json({ ok: false, error: `Missing required field(s): ${missing.join(', ')}` });
+  }
+  const duration = parseInt(durationRaw, 10);
+  if (isNaN(duration) || duration < 0) {
+    return res.status(400).json({ ok: false, error: 'duration must be a non-negative integer (seconds)' });
+  }
+
+  let callDatetime;
+  try {
+    callDatetime = timestampRaw ? new Date(timestampRaw) : new Date();
+    if (isNaN(callDatetime.getTime())) callDatetime = new Date();
+  } catch(e) {
+    callDatetime = new Date();
+  }
+  const callDateText = callDatetime.toISOString().slice(0, 10);
+
+  const client = await pool.connect();
+  try {
+    const insert = await client.query(
+      `INSERT INTO calls
+         (call_datetime, call_date, caller_id, duration, call_duration,
+          publisher_sub, vertical, campaign, campaign_name, buyer_name,
+          disposition, call_status, call_status_label, billable,
+          source_system, recording_url, raw, received_at)
+       VALUES ($1, $2, $3, $4, $4,
+               'KRW-JOSHUA-SIGNED', 'SSDI', 'ssdi-signed-td', 'SSDI Signed (TD)', 'J-Signed Buyer',
+               'Received', 'Completed', 'pending', false,
+               'j_signed_postback', $5, $6::jsonb, NOW())
+       RETURNING id`,
+      [callDatetime.toISOString(), callDateText, cid, duration,
+       b.recording_url || null, JSON.stringify(b)]
+    );
+    const callId = insert.rows[0].id;
+    console.log(`[J-Signed Postback] ✓ Call logged | CID: ${cid} | Duration: ${duration}s | krw_id: ${callId}`);
+    return res.json({ ok: true, result: 'success', message: 'Call logged', krw_id: callId });
+  } catch (err) {
+    console.error('[J-Signed Postback] DB insert error:', err.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+});
+// ─── END J-SIGNED POSTBACK RECEIVER ───────────────────────────────────────────
 
 // ─── RINGFUEL CALL-COMPLETION WEBHOOK — SSDI 1696 (Filed) ──────────────────
 // Fires once a real call hangs up, sending CID/duration/timestamp. This is
