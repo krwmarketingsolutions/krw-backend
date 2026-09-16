@@ -6828,6 +6828,7 @@ app.get('/billable-queue', requireKey, async (req, res) => {
     const rows = await pool.query(
       `SELECT bq.id, bq.cid, bq.amount, bq.publisher_sub, bq.lead_id, bq.status,
               bq.received_at, bq.resolved_at,
+              bq.raw->>'source' AS source, bq.raw->>'sheet_date' AS sheet_date,
               l.first_name, l.last_name, l.state
        FROM billable_queue bq
        LEFT JOIN leads l ON l.id = bq.lead_id
@@ -6858,7 +6859,20 @@ app.post('/billable-queue/:id/approve', requireKey, async (req, res) => {
       "UPDATE billable_queue SET status='approved', resolved_at=NOW() WHERE id=$1",
       [item.id]
     );
-    if (item.lead_id) {
+    const itemSource = item.raw && typeof item.raw === 'object' ? item.raw.source : null;
+    if (item.lead_id && itemSource === 'az_signed_sheet') {
+      // Signed is a second payable event on a lead that may already carry a
+      // Filed payout from Ringfuel - add to revenue, never overwrite it, and
+      // stamp the signed details on the lead's raw JSON (Kyler, Sep 15).
+      await client.query(
+        `UPDATE leads
+         SET billable = true,
+             revenue  = COALESCE(revenue, 0) + $1,
+             raw      = COALESCE(raw, '{}'::jsonb) || $3::jsonb
+         WHERE id = $2`,
+        [item.amount, item.lead_id, JSON.stringify({ signed: true, signed_amount: item.amount, signed_date: item.raw.sheet_date || null, signed_approved_at: new Date().toISOString() })]
+      );
+    } else if (item.lead_id) {
       await client.query(
         'UPDATE leads SET billable=true, revenue=$1 WHERE id=$2',
         [item.amount, item.lead_id]
@@ -6899,6 +6913,175 @@ app.post('/billable-queue/:id/hold', requireKey, async (req, res) => {
   }
 });
 // ─── END BILLABLE APPROVAL QUEUE ────────────────────────────────────────────
+
+
+// ─── AZ-1696 SIGNED SHEET SCANNER — KRW DEALS Google Sheet ──────────────────
+// SSDI-AZ-1696 (Joshua Duran) runs both Filed and Signed. Filed billables
+// arrive from Ringfuel (/billable-webhook/ringfuel above). Signed dispos are
+// written to the "KRW DEALS" Google Sheet at the end of each day instead:
+// monthly tabs (SEPTEMBER, OCTOBER, ...), "WEEK SET mm-dd-yyyy" banner rows,
+// then Date / CID / Status / Pub. A "Retained" row is a signed case.
+//
+// This scans that sheet twice a day, 10:00 and 15:00 Pacific, and drops any
+// Retained row it hasn't seen before into billable_queue as PENDING - same
+// approval box, same Approve/Hold buttons. Nothing is marked billable or
+// reaches a publisher portal until Kyler approves it (Kyler, Sep 15).
+const AZ_SIGNED_SHEET_ID   = '1XdryadYJw36zE6mctD5vtL5FQeKJXywfvmVqwuc0pN8';
+const AZ_SIGNED_PUBLISHER  = 'SSDI-AZ-1696';
+const AZ_SIGNED_PAYOUT     = parseFloat(process.env.AZ_SIGNED_PAYOUT || '400') || 400;  // per signed case - CONFIRM with Kyler; 400 mirrors the TD signed line
+const AZ_SIGNED_STATUSES   = ['retained', 'signed'];   // Filed rows on this sheet are ignored - Ringfuel owns Filed
+const AZ_SIGNED_SINCE      = process.env.AZ_SIGNED_SINCE || '2026-09-01';  // rows dated before this are never queued
+const AZ_SIGNED_SCAN_TIMES = ['10:00', '15:00'];       // America/Los_Angeles
+const AZ_SIGNED_SOURCE     = 'az_signed_sheet';
+const AZ_SIGNED_MONTHS     = ['JANUARY','FEBRUARY','MARCH','APRIL','MAY','JUNE','JULY','AUGUST','SEPTEMBER','OCTOBER','NOVEMBER','DECEMBER'];
+let   azSignedLastScan     = null;   // { at, tabs, rows, retained, queued, skipped, unmatched, errors }
+const azSignedRanSlots     = new Set();
+
+// Full CSV parser (quotes, embedded commas/newlines) - the simpler splitters
+// elsewhere in this file choke on the sheet's banner rows.
+function azParseCSV(text) {
+  const rows = []; let row = [], cur = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) { if (ch === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === ',') { row.push(cur); cur = ''; }
+    else if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; }
+    else if (ch !== '\r') cur += ch;
+  }
+  if (cur.length || row.length) { row.push(cur); rows.push(row); }
+  return rows;
+}
+function azParseDate(s) {
+  s = String(s || '').trim();
+  const m = s.match(/^(\d{1,2})[\/.-](\d{1,2})(?:[\/.-](\d{2,4}))?/);
+  if (m) { const y = m[3] ? (m[3].length === 2 ? 2000 + parseInt(m[3], 10) : parseInt(m[3], 10)) : new Date().getFullYear(); return `${y}-${String(m[1]).padStart(2,'0')}-${String(m[2]).padStart(2,'0')}`; }
+  const t = Date.parse(s); return isNaN(t) ? null : new Date(t).toISOString().slice(0, 10);
+}
+// Returns [{date, cid, status, pub, tab}] for one tab. Handles repeated
+// header rows and WEEK SET banners; column positions come from the header.
+function azRowsFromCSV(csv, tab) {
+  const rows = azParseCSV(csv), out = [];
+  let cols = null;
+  for (const r of rows) {
+    const up = r.map(c => String(c).trim().toUpperCase());
+    if (up.indexOf('CID') > -1 && up.indexOf('DATE') > -1) { cols = {}; up.forEach((c, j) => { if (c && cols[c] == null) cols[c] = j; }); continue; }
+    if (!cols) continue;
+    const date = String(r[cols.DATE] || '').trim();
+    const cid  = String(r[cols.CID]  || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+    if (!date && !cid) continue;
+    if (/^week\s*set/i.test(date)) continue;
+    if (cid.length < 10) continue;
+    out.push({ date: azParseDate(date), cid, status: String(r[cols.STATUS] || '').trim(), pub: cols.PUB != null ? String(r[cols.PUB] || '').trim() : '', tab });
+  }
+  return out;
+}
+
+async function scanAzSignedSheet(trigger) {
+  const now = new Date();
+  const summary = { at: now.toISOString(), trigger, tabs: [], rows: 0, retained: 0, queued: 0, skipped: 0, unmatched: 0, errors: [] };
+  // current month and the previous one, so month-end rows written late are not missed
+  const tabs = [AZ_SIGNED_MONTHS[now.getMonth()], AZ_SIGNED_MONTHS[(now.getMonth() + 11) % 12]];
+  let all = [];
+  for (const tab of tabs) {
+    try {
+      const url = `https://docs.google.com/spreadsheets/d/${AZ_SIGNED_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tab)}`;
+      const csv = await fetchKASheetCSV(url);
+      if (/<html/i.test(csv.slice(0, 300))) { continue; }   // tab does not exist (yet)
+      const rows = azRowsFromCSV(csv, tab);
+      summary.tabs.push(tab); all = all.concat(rows);
+    } catch (err) { summary.errors.push(`${tab}: ${err.message}`); }
+  }
+  summary.rows = all.length;
+  if (!summary.tabs.length) {
+    summary.errors.push('No readable tab - is the sheet still shared as "anyone with the link can view"?');
+    azSignedLastScan = summary;
+    console.log(`[AZ Signed Sheet] ✕ ${summary.errors.join(' | ')}`);
+    return summary;
+  }
+
+  const signed = all.filter(r => AZ_SIGNED_STATUSES.includes(r.status.toLowerCase()) && r.date && r.date >= AZ_SIGNED_SINCE);
+  summary.retained = signed.length;
+  const newItems = [];
+  const client = await pool.connect();
+  try {
+    for (const r of signed) {
+      // seen before? (any status - approved, held, or still pending - never re-queue)
+      const dup = await client.query(
+        `SELECT id, status FROM billable_queue WHERE cid = $1 AND raw->>'source' = $2 LIMIT 1`,
+        [r.cid, AZ_SIGNED_SOURCE]
+      );
+      if (dup.rows[0]) { summary.skipped++; continue; }
+
+      // match to the AZ-1696 lead by phone so the queue shows the caller's name
+      const match = await client.query(
+        `SELECT id, first_name, last_name, state, billable, revenue FROM leads
+         WHERE phone = $1 AND publisher_sub = $2
+         ORDER BY received_at DESC LIMIT 1`,
+        [r.cid, AZ_SIGNED_PUBLISHER]
+      );
+      const lead = match.rows[0] || null;
+      if (!lead) summary.unmatched++;
+
+      const raw = { source: AZ_SIGNED_SOURCE, sheet_tab: r.tab, sheet_date: r.date, sheet_status: r.status, sheet_pub: r.pub,
+                    unmatched: !lead, filed_already_billable: !!(lead && lead.billable), scanned_at: now.toISOString(), trigger };
+      const ins = await client.query(
+        `INSERT INTO billable_queue (cid, amount, publisher_sub, lead_id, status, raw)
+         VALUES ($1, $2, $3, $4, 'pending', $5::jsonb) RETURNING id`,
+        [r.cid, AZ_SIGNED_PAYOUT, AZ_SIGNED_PUBLISHER, lead ? lead.id : null, JSON.stringify(raw)]
+      );
+      summary.queued++;
+      newItems.push({ queue_id: ins.rows[0].id, cid: r.cid, date: r.date, name: lead ? `${lead.first_name || ''} ${lead.last_name || ''}`.trim() : null, state: lead ? lead.state : null, unmatched: !lead });
+      console.log(`[AZ Signed Sheet] ✓ Queued for approval | CID: ${r.cid} | signed ${r.date} | ${lead ? (lead.first_name + ' ' + lead.last_name) : 'NO MATCHING LEAD'} | queue_id: ${ins.rows[0].id}`);
+    }
+  } catch (err) {
+    summary.errors.push(`DB: ${err.message}`);
+    console.error('[AZ Signed Sheet] DB error:', err.message);
+  } finally {
+    client.release();
+  }
+
+  azSignedLastScan = summary;
+  console.log(`[AZ Signed Sheet] Scan (${trigger}) | tabs: ${summary.tabs.join(',')} | ${summary.rows} rows, ${summary.retained} signed, ${summary.queued} new queued, ${summary.skipped} already handled, ${summary.unmatched} with no matching lead`);
+
+  if (newItems.length) {
+    const lines = newItems.map(i => `<tr><td style="padding:4px 10px 4px 0">${i.date}</td><td style="padding:4px 10px 4px 0;font-family:monospace">${i.cid}</td><td style="padding:4px 10px 4px 0">${i.name || '<i>no matching AZ-1696 lead - review</i>'}${i.state ? ' (' + i.state + ')' : ''}</td></tr>`).join('');
+    sendEmailNotification(
+      `${newItems.length} new Signed SSDI case${newItems.length > 1 ? 's' : ''} from the AZ sheet — $${(newItems.length * AZ_SIGNED_PAYOUT).toFixed(2)} — Needs Approval`,
+      `<p>The ${AZ_SIGNED_SCAN_TIMES.includes(trigger) ? trigger + ' Pacific' : trigger} scan of the KRW DEALS sheet found ${newItems.length} new Retained row${newItems.length > 1 ? 's' : ''} for ${AZ_SIGNED_PUBLISHER}. Each is waiting in your approval queue at $${AZ_SIGNED_PAYOUT.toFixed(2)}.</p>
+       <table style="border-collapse:collapse;font-size:14px"><tr><th align="left" style="padding:4px 10px 4px 0">Signed</th><th align="left" style="padding:4px 10px 4px 0">CID</th><th align="left" style="padding:4px 10px 4px 0">Lead</th></tr>${lines}</table>
+       <p>Nothing is marked billable or sent to any publisher until you approve it on the dashboard.</p>`
+    );
+  }
+  return summary;
+}
+
+// Scheduler: checks every 30s against Pacific wall-clock time and runs each
+// slot once per day. No cron dependency; survives DST because the timezone
+// conversion is done by Intl, not by a fixed UTC offset.
+function azPacificHM() {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date());
+  const g = t => (parts.find(p => p.type === t) || {}).value;
+  return { day: `${g('year')}-${g('month')}-${g('day')}`, hm: `${String(g('hour')).padStart(2, '0').replace('24', '00')}:${g('minute')}` };
+}
+setInterval(() => {
+  const { day, hm } = azPacificHM();
+  if (!AZ_SIGNED_SCAN_TIMES.includes(hm)) return;
+  const slot = `${day} ${hm}`;
+  if (azSignedRanSlots.has(slot)) return;
+  azSignedRanSlots.add(slot);
+  scanAzSignedSheet(hm).catch(err => console.error('[AZ Signed Sheet] Scheduled scan failed:', err.message));
+}, 30 * 1000);
+
+// Admin: run a scan right now (does not affect the schedule) and see the last result
+app.post('/az-signed-sheet/scan', requireKey, async (req, res) => {
+  try { const s = await scanAzSignedSheet('manual'); res.json({ ok: true, ...s }); }
+  catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+app.get('/az-signed-sheet/status', requireKey, (req, res) => {
+  res.json({ ok: true, publisher: AZ_SIGNED_PUBLISHER, payout: AZ_SIGNED_PAYOUT, since: AZ_SIGNED_SINCE, scan_times_pacific: AZ_SIGNED_SCAN_TIMES, now_pacific: azPacificHM(), last_scan: azSignedLastScan });
+});
+// ─── END AZ-1696 SIGNED SHEET SCANNER ───────────────────────────────────────
 
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
