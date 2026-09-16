@@ -3116,7 +3116,9 @@ app.post('/leads/mva-funnel', async (req, res) => {
   }
 });
 
-// ─── MVA-NYC-SPLIT — NLD / LAR-MVA-CPA ALTERNATION (KRW-NYC-MVA ONLY) ──────────
+// ─── MVA-NYC-SPLIT — BUYER LADDER: CH-Intake / LT-Intake -> NLD -> 003 (KRW-NYC-MVA ONLY) ──
+// (Sep 16 rewrite - see BUYER LADDER inside the handler. History below kept for context.)
+// ─── (was) NLD / LAR-MVA-CPA ALTERNATION ────────────────────────────────────
 // Fully isolated from /leads/mva-funnel above - Kevin's and Inbounds' routing
 // is completely untouched by anything in this section. Built per Kyler's
 // instruction (Aug 25-26): Noah's traffic alternates strictly between NLD and
@@ -3163,56 +3165,35 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   if (!leadState)      missing.push('state');
   if (!b.trustedform_cert_url && !b.jornaya_leadid) missing.push('trustedform_cert_url or jornaya_leadid');
 
-  // First 8 real leads each day go to NLD, anything past that goes to
-  // MVA-003-LT instead (Kyler, Sep 2) - Noah's daily volume (~12) split so
-  // NLD isn't overloaded. Counts today's leads specifically, not all-time,
-  // so this resets each day. LAR stays paused per the Sep 1 instruction.
-  const NLD_ONLY_STATES = ['UT','MT','WY','AZ','CA','NV','OK','NE','ND','IA','NM']; // PA removed, CA added (Kyler, Sep 8)
-  const countRes = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM leads
-     WHERE campaign='mva-nyc-split' AND status != 'rejected'
-       AND (received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date`
-  );
-  // A lead only goes to NLD if BOTH today's 12/day cap hasn't been hit AND
-  // the lead's state is one NLD actually accepts - state alone was
-  // previously only gating which fields got validated, not which buyer
-  // actually received the lead, so an out-of-state lead could still be
-  // routed to NLD as long as today's count was under 8. Fixed so state is
-  // a real routing gate, not just a validation gate (Kyler, Sep 8).
-  const nextIsNld = countRes.rows[0].n < 12 && NLD_ONLY_STATES.includes(leadState); // 8->15->12 (Kyler, Sep 15)
-
-  // NLD confirmed directly (Kyler, Sep 2) that address/date_of_birth aren't
-  // actually required on their end - hardcoded rather than rejecting real
-  // leads that are missing them. Applied only when heading to NLD, before
-  // validation runs, so these are never actually missing by the time the
-  // check below looks for them.
-  if (nextIsNld) {
-    if (!b.address)       b.address = '123 Main Street';
-    if (!b.date_of_birth) b.date_of_birth = '01/01/1985';
-  }
-
-  if (nextIsNld && NLD_ONLY_STATES.includes(leadState)) {
-    if (!b.date_of_birth)    missing.push('date_of_birth');
-    if (!b.address)          missing.push('address');
-    if (!b.city)             missing.push('city');
-    if (!b.zip_code && !b.zip) missing.push('zip_code');
-    if (!b.landing_page_url) missing.push('landing_page_url');
-    if (!b.incident_date)    missing.push('incident_date (mm/dd/yyyy format)');
-    if (!b.settlement)       missing.push('settlement');
-    if (!b.cited)            missing.push('cited');
-    if (!b.doctor_treatment) missing.push('doctor_treatment');
-    if (!b.physical_injury)  missing.push('physical_injury');
-    if (!b.at_fault)         missing.push('at_fault');
-  } else if (!nextIsNld) {
-    if (!b.injury && !b.physical_injury) missing.push('injury (or physical_injury)');
-  }
+  // ── BUYER LADDER (Kyler, Sep 16) ─────────────────────────────────────────
+  // Routing is by buyer priority mixed with each buyer's state list:
+  //   1. CH-Intake and LT-Intake: same 13 states, 50/50 between them
+  //      (LT-Intake is skipped until its posting spec is wired in - see LT_INTAKE_WEBHOOK)
+  //   2. NLD CPA: its 11 states, hard cap 5/day (Eastern)
+  //   3. MVA-003-LT: nationwide, bottom of the funnel, takes stragglers
+  // A lead goes to the highest-priority eligible buyer (state ok, under cap,
+  // enabled). If that buyer rejects, it drops to the next rung in the same
+  // request, so a rejection never strands a lead. Caps count leads that
+  // buyer ACCEPTED today, not attempts. Colorado is on both intake lists but
+  // stays blocked by the company-wide CA/CO rule until INTAKE_TAKES_CO is
+  // flipped - blocked leads never reach this ladder.
+  const INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','CO','MO','NE','OK','TN'];
+  const NLD_ONLY_STATES = ['UT','MT','WY','AZ','CA','NV','OK','NE','ND','IA','NM'];
+  const LT_INTAKE_WEBHOOK = process.env.LT_INTAKE_WEBHOOK || '';   // set on Railway when LT-Intake's instructions arrive
+  const NYC_LADDER = [
+    { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                 states: INTAKE_STATES },
+    { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!LT_INTAKE_WEBHOOK, states: INTAKE_STATES },
+    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 5,    payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
+    { name: 'MVA-003-LT', priority: 3, group: '003',    cap: null, payout: 1700, enabled: true,                 states: 'ALL' },
+  ];
 
   if (missing.length) {
     return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
   }
 
   // CA/CO hard-blocked, matching company-wide policy - never forwarded to any buyer
-  if (leadState === 'CA' || leadState === 'CO') {
+  const INTAKE_TAKES_CO = process.env.INTAKE_TAKES_CO === 'true';
+  if (leadState === 'CA' || (leadState === 'CO' && !INTAKE_TAKES_CO)) {
     const clientBlocked = await pool.connect();
     let blockedLeadId = null;
     try {
@@ -3239,7 +3220,52 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     });
   }
 
-  let buyerName = nextIsNld ? 'NLD CPA' : 'MVA-003-LT';
+  // Today's ACCEPTED count per buyer (Eastern day), for caps and the 50/50 tiebreak
+  const countRes = await pool.query(
+    `SELECT raw->>'buyer_name' AS buyer, COUNT(*)::int AS n,
+            MAX(received_at) AS last_at
+     FROM leads
+     WHERE campaign='mva-nyc-split' AND status='forwarded'
+       AND (received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date
+     GROUP BY raw->>'buyer_name'`
+  );
+  const todayCount = {}, lastAt = {};
+  for (const r of countRes.rows) { todayCount[r.buyer] = r.n; lastAt[r.buyer] = r.last_at ? new Date(r.last_at).getTime() : 0; }
+
+  // NLD needs more fields than anyone else. Rather than bouncing the lead
+  // with a 400 when NLD happens to be next, NLD is simply skipped for this
+  // lead if its extra fields can't be satisfied, and the lead moves on.
+  if (!b.address)       b.address = '123 Main Street';   // NLD confirmed not really required (Sep 2)
+  if (!b.date_of_birth) b.date_of_birth = '01/01/1985';
+  const nldMissing = [];
+  if (!b.city)             nldMissing.push('city');
+  if (!b.zip_code && !b.zip) nldMissing.push('zip_code');
+  if (!b.landing_page_url) nldMissing.push('landing_page_url');
+  if (!b.incident_date)    nldMissing.push('incident_date');
+  if (!b.settlement)       nldMissing.push('settlement');
+  if (!b.cited)            nldMissing.push('cited');
+  if (!b.doctor_treatment) nldMissing.push('doctor_treatment');
+  if (!b.physical_injury)  nldMissing.push('physical_injury');
+  if (!b.at_fault)         nldMissing.push('at_fault');
+  if (!b.injury && !b.physical_injury) missing.push('injury (or physical_injury)');
+  if (missing.length) return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+
+  const eligible = NYC_LADDER.filter(buyer => {
+    if (!buyer.enabled) return false;
+    if (buyer.states !== 'ALL' && !buyer.states.includes(leadState)) return false;
+    if (buyer.cap != null && (todayCount[buyer.name] || 0) >= buyer.cap) return false;
+    if (buyer.name === 'NLD CPA' && nldMissing.length) return false;
+    return true;
+  }).sort((a, b2) => {
+    if (a.priority !== b2.priority) return a.priority - b2.priority;
+    // same rung: the buyer with fewer accepted today goes first; on a tie,
+    // whoever did NOT get the most recent one - this is the 50/50
+    const ca = todayCount[a.name] || 0, cb = todayCount[b2.name] || 0;
+    if (ca !== cb) return ca - cb;
+    return (lastAt[a.name] || 0) - (lastAt[b2.name] || 0);
+  });
+  const ladderPlan = eligible.map(x => x.name);
+  console.log(`[MVA-NYC-SPLIT] ${b.first_name} ${b.last_name} | ${leadState} | ladder: ${ladderPlan.join(' -> ') || 'nobody eligible'}${nldMissing.length ? ' | NLD skipped, missing ' + nldMissing.join(',') : ''}`);
 
   // Insert lead first, regardless of buyer outcome
   const client = await pool.connect();
@@ -3262,159 +3288,106 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     client.release();
   }
 
-  let result = {};
+  if (!eligible.length) {
+    const why = `No eligible buyer for ${leadState} right now (caps hit or state not covered)`;
+    const c0 = await pool.connect();
+    try { await c0.query("UPDATE leads SET status='received', buyer_error=$1 WHERE id=$2", [why, leadId]); } finally { c0.release(); }
+    console.log(`[MVA-NYC-SPLIT] ⏸ ${b.first_name} ${b.last_name} | ${leadState} | held: ${why}`);
+    return res.json({ ok: false, result: 'held', message: why, krw_id: leadId });
+  }
 
-  try {
-    if (nextIsNld) {
-      // NLD CPA — same credentials as the main waterfall's NLD buyer, standalone here
-      const incidentStateFull = US_STATE_FULL_NAMES[leadState] || leadState;
-      const nldPayload = {
-        lp_campaign_id: '31080',
-        lp_supplier_id: '110928',
-        lp_key:         'ke21sx0koi7dld',
-        lp_action:      b.lp_test_mode === true ? 'test' : '',
-        lp_subid1:      aliasPub('KRW-NYC-MVA') || '',
-        first_name:     b.first_name,
-        last_name:      b.last_name,
-        email:          b.email,
-        phone:          String(b.phone).replace(/\D/g, ''),
-        date_of_birth:  convertDateToISO(b.date_of_birth),
-        address:        b.address,
-        city:           b.city,
-        state:          leadState,
-        zip_code:       b.zip_code || b.zip,
-        ip_address:     b.ip_address,
+  // ── Per-buyer senders ─────────────────────────────────────────────────
+  const incidentStateFull = US_STATE_FULL_NAMES[leadState] || leadState;
+  const strip = o => { Object.keys(o).forEach(k => { if (o[k] === undefined || o[k] === null || o[k] === '') delete o[k]; }); return o; };
+  const senders = {
+    'NLD CPA': async () => {
+      const p = strip({
+        lp_campaign_id: '31080', lp_supplier_id: '110928', lp_key: 'ke21sx0koi7dld',
+        lp_action: b.lp_test_mode === true ? 'test' : '',
+        lp_subid1: aliasPub('KRW-NYC-MVA') || '',
+        first_name: b.first_name, last_name: b.last_name, email: b.email,
+        phone: String(b.phone).replace(/\D/g, ''),
+        date_of_birth: convertDateToISO(b.date_of_birth), address: b.address, city: b.city,
+        state: leadState, zip_code: b.zip_code || b.zip, ip_address: b.ip_address,
         landing_page_url: b.landing_page_url,
-        trustedform_cert_url: b.trustedform_cert_url || undefined,
-        jornaya_leadid: b.jornaya_leadid || undefined,
-        incident_state: incidentStateFull,
-        incident_date:  b.incident_date,
-        have_attorney:  b.have_attorney,
-        at_fault:       b.at_fault,
-        settlement:     b.settlement,
-        cited:          b.cited,
-        doctor_treatment: b.doctor_treatment,
-        physical_injury:  b.physical_injury,
-        // NYC actually sends these three - previously silently dropped since
-        // nothing extracted them past the validation check, even though the
-        // richer injury/summary data was sitting right in the payload the
-        // whole time (Kyler, Sep 15).
-        injury:           b.injury,
-        summary:          b.summary,
-        county:           b.county,
-      };
-      Object.keys(nldPayload).forEach(k => { if (nldPayload[k] === undefined) delete nldPayload[k]; });
+        trustedform_cert_url: b.trustedform_cert_url || undefined, jornaya_leadid: b.jornaya_leadid || undefined,
+        incident_state: incidentStateFull, incident_date: b.incident_date,
+        have_attorney: b.have_attorney, at_fault: b.at_fault, settlement: b.settlement, cited: b.cited,
+        doctor_treatment: b.doctor_treatment, physical_injury: b.physical_injury,
+        injury: b.injury, summary: b.summary, county: b.county,
+      });
+      if (b.lp_test_mode !== true) delete p.lp_action;
+      const r = await postJSON('https://api.leadprosper.io/direct_post', p);
+      let out; try { out = JSON.parse(r.body); } catch(e) { out = { status: r.status, raw: r.body }; }
+      return { result: out, accepted: out.status === 'ACCEPTED' || out.success === true };
+    },
+    'MVA-003-LT': async () => {
+      const p = strip({
+        lp_subid1: aliasPub('KRW-NYC-MVA') || 'KRW-NYC-MVA',
+        first_name: b.first_name, last_name: b.last_name, email: b.email,
+        phone: String(b.phone).replace(/\D/g, ''),
+        at_fault: b.at_fault, have_attorney: b.have_attorney, physical_injury: b.physical_injury,
+        doctor_treatment: b.doctor_treatment, state: incidentStateFull || leadState,
+        zip_code: b.zip_code || b.zip, incident_date: b.incident_date,
+        trustedform_cert_url: b.trustedform_cert_url || undefined, ip_address: b.ip_address || undefined,
+        injury: b.injury, summary: b.summary, county: b.county, cited: b.cited, settlement: b.settlement,
+        date_of_birth: b.date_of_birth,
+      });
+      const r = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4tdo5z8/', p);
+      let out; try { out = JSON.parse(r.body); } catch(e) { out = { status: r.status, raw: r.body }; }
+      return { result: out, accepted: out.status === 'success' };
+    },
+    'CH-Intake': async () => {
+      // Same payload the tested /leads/forward-to-mva-intake endpoint sends (Sep 15)
+      const p = strip({
+        first_name: b.first_name, last_name: b.last_name,
+        phone: String(b.phone).replace(/\D/g, ''), email: b.email,
+        zip_code: b.zip_code || b.zip, state: leadState,
+        incident_date: b.incident_date, injury: b.injury || b.physical_injury,
+        at_fault: b.at_fault, have_attorney: b.have_attorney,
+        consent_url: b.trustedform_cert_url || b.jornaya_leadid || undefined,
+        consent_timestamp: new Date().toISOString(),
+      });
+      const r = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4d50uja/', p);
+      let out; try { out = JSON.parse(r.body); } catch(e) { out = { status: r.status, raw: r.body }; }
+      return { result: out, accepted: out.status === 'success' || (r.status >= 200 && r.status < 300) };
+    },
+    'LT-Intake': async () => {
+      if (!LT_INTAKE_WEBHOOK) throw new Error('LT-Intake not configured');
+      const p = strip({
+        first_name: b.first_name, last_name: b.last_name,
+        phone: String(b.phone).replace(/\D/g, ''), email: b.email,
+        zip_code: b.zip_code || b.zip, state: leadState,
+        incident_date: b.incident_date, injury: b.injury || b.physical_injury,
+        at_fault: b.at_fault, have_attorney: b.have_attorney,
+        consent_url: b.trustedform_cert_url || b.jornaya_leadid || undefined,
+        consent_timestamp: new Date().toISOString(),
+      });
+      const r = await postJSON(LT_INTAKE_WEBHOOK, p);
+      let out; try { out = JSON.parse(r.body); } catch(e) { out = { status: r.status, raw: r.body }; }
+      return { result: out, accepted: out.status === 'success' || (r.status >= 200 && r.status < 300) };
+    },
+  };
 
-      const nldRes = await postJSON('https://api.leadprosper.io/direct_post', nldPayload);
-      result = JSON.parse(nldRes.body);
-    } else {
-      // MVA-003-LT — overflow buyer once the 12/day NLD cap is hit (Kyler, Sep 2; 8->15->12 on Sep 15).
-      // Same field mapping already confirmed working via manual test.
-      const incidentStateFull003 = US_STATE_FULL_NAMES[leadState] || leadState;
-      const lt003Payload = {
-        lp_subid1:       aliasPub('KRW-NYC-MVA') || 'KRW-NYC-MVA',
-        first_name:      b.first_name,
-        last_name:       b.last_name,
-        email:           b.email,
-        phone:           String(b.phone).replace(/\D/g, ''),
-        at_fault:        b.at_fault,
-        have_attorney:   b.have_attorney,
-        physical_injury: b.physical_injury,
-        doctor_treatment: b.doctor_treatment,
-        state:           incidentStateFull003 || leadState,
-        zip_code:        b.zip_code || b.zip,
-        incident_date:   b.incident_date,
-        trustedform_cert_url: b.trustedform_cert_url || undefined,
-        ip_address:      b.ip_address || undefined,
-        injury:          b.injury,
-        summary:         b.summary,
-        county:          b.county,
-        cited:           b.cited,
-        settlement:      b.settlement,
-        date_of_birth:   b.date_of_birth,
-      };
-      Object.keys(lt003Payload).forEach(k => { if (lt003Payload[k] === undefined) delete lt003Payload[k]; });
-
-      const lt003Res = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4tdo5z8/', lt003Payload);
-      try { result = JSON.parse(lt003Res.body); } catch(e) { result = { status: lt003Res.status, raw: lt003Res.body }; }
-    }
-  } catch (fwdErr) {
-    console.error(`[MVA-NYC-SPLIT] Forward to ${buyerName} failed:`, fwdErr.message);
-    const c4 = await pool.connect();
+  // ── Walk the ladder ───────────────────────────────────────────────────
+  const attempts = [];
+  let buyerName = null, result = {}, accepted = false;
+  for (const buyer of eligible) {
     try {
-      await c4.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2", [fwdErr.message, leadId]);
-    } finally { c4.release(); }
-    return res.status(502).json({ ok: false, error: `Failed to forward to ${buyerName}`, detail: fwdErr.message, krw_id: leadId });
-  }
-
-  let accepted = nextIsNld
-    ? (result.status === 'ACCEPTED' || result.success === true)
-    : (result.status === 'success');
-  // Never auto-billable on acceptance - buyer confirmation always comes
-  // later (manual or postback), per Kyler (Aug 28).
-
-  // Track whether NLD was genuinely tried and what it said, separately from
-  // whatever the final outcome ends up being - previously this got silently
-  // discarded the moment the fallback fired, so there was no way afterward
-  // to tell "NLD was tried and rejected this" apart from "NLD was never
-  // reached at all". Both are now stored so that question never has to be
-  // answered by guessing again (Kyler, Sep 15).
-  const nldAttempted = nextIsNld;
-  const nldResult = nextIsNld ? result : null;
-
-  // Auto-fallback to 003: if NLD rejects for any reason (state, filter,
-  // whatever) instead of leaving the lead sitting as buyer_rejected for
-  // someone to manually resubmit later (as we've done by hand all night),
-  // retry it to 003 immediately, within this same request. Only applies
-  // when NLD was actually tried - never touches the 12/day cap logic itself
-  // (Kyler, Sep 15).
-  if (nextIsNld && !accepted) {
-    console.log(`[MVA-NYC-SPLIT] NLD rejected ${b.first_name} ${b.last_name}, auto-forwarding to 003`);
-    try {
-      const incidentStateFull003 = US_STATE_FULL_NAMES[leadState] || leadState;
-      const lt003Payload = {
-        lp_subid1:       aliasPub('KRW-NYC-MVA') || 'KRW-NYC-MVA',
-        first_name:      b.first_name,
-        last_name:       b.last_name,
-        email:           b.email,
-        phone:           String(b.phone).replace(/\D/g, ''),
-        at_fault:        b.at_fault,
-        have_attorney:   b.have_attorney,
-        physical_injury: b.physical_injury,
-        doctor_treatment: b.doctor_treatment,
-        state:           incidentStateFull003 || leadState,
-        zip_code:        b.zip_code || b.zip,
-        incident_date:   b.incident_date,
-        trustedform_cert_url: b.trustedform_cert_url || undefined,
-        ip_address:      b.ip_address || undefined,
-        injury:          b.injury,
-        summary:         b.summary,
-        county:          b.county,
-        cited:           b.cited,
-        settlement:      b.settlement,
-        date_of_birth:   b.date_of_birth,
-      };
-      Object.keys(lt003Payload).forEach(k => { if (lt003Payload[k] === undefined) delete lt003Payload[k]; });
-
-      const lt003Res = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4tdo5z8/', lt003Payload);
-      let fallbackResult;
-      try { fallbackResult = JSON.parse(lt003Res.body); } catch(e) { fallbackResult = { status: lt003Res.status, raw: lt003Res.body }; }
-
-      // Switch the outcome over to the 003 attempt - this is now what the
-      // DB update and response below reflect, not the original NLD rejection.
-      // nldResult (captured above, before this reassignment) still holds
-      // the original NLD response for the DB update further down.
-      buyerName = 'MVA-003-LT';
-      result = fallbackResult;
-      accepted = (result.status === 'success');
-    } catch (fallbackErr) {
-      console.error('[MVA-NYC-SPLIT] Auto-fallback to 003 failed:', fallbackErr.message);
-      // Fall through with the original NLD rejection - fallback attempt
-      // itself failing shouldn't crash the request, just leaves the lead
-      // as a normal NLD rejection for manual follow-up.
+      const out = await senders[buyer.name]();
+      attempts.push({ buyer: buyer.name, accepted: out.accepted, response: out.result });
+      console.log(`[MVA-NYC-SPLIT] ${out.accepted ? '✓' : '✕'} ${buyer.name} | ${b.first_name} ${b.last_name} | ${leadState} | ${out.result.message || out.result.status || ''}`);
+      if (out.accepted) { buyerName = buyer.name; result = out.result; accepted = true; break; }
+      buyerName = buyer.name; result = out.result;   // last rejection, for the record
+    } catch (fwdErr) {
+      attempts.push({ buyer: buyer.name, accepted: false, error: fwdErr.message });
+      console.error(`[MVA-NYC-SPLIT] Forward to ${buyer.name} failed:`, fwdErr.message);
+      buyerName = buyer.name; result = { status: 'error', message: fwdErr.message };
     }
   }
 
+  // nld_attempted / nld_response kept for anything that reads them (Sep 15 fix)
+  const nldTry = attempts.find(a => a.buyer === 'NLD CPA');
   const c2 = await pool.connect();
   try {
     await c2.query(
@@ -3428,18 +3401,19 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
        WHERE id = $5`,
       [accepted ? 'forwarded' : 'buyer_rejected',
        accepted ? 'Accepted' : 'Rejected',
-       JSON.stringify({ final: result, nld_attempted: nldAttempted, nld_response: nldResult }),
-       JSON.stringify({ buyer_name: buyerName }), leadId]
+       JSON.stringify({ final: result, attempts, ladder: ladderPlan, nld_attempted: !!nldTry, nld_response: nldTry ? (nldTry.response || nldTry.error) : null }),
+       JSON.stringify({ buyer_name: buyerName, routing_attempts: attempts.map(a => a.buyer + (a.accepted ? ':accepted' : ':rejected')) }), leadId]
     );
   } finally { c2.release(); }
 
-  console.log(`[MVA-NYC-SPLIT] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} | -> ${buyerName} | ${result.message || ''}`);
+  console.log(`[MVA-NYC-SPLIT] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} | -> ${buyerName} after ${attempts.length} attempt${attempts.length !== 1 ? 's' : ''}`);
 
   return res.json({
     ok: accepted,
     result: accepted ? 'success' : 'rejected',
     message: result.message || (accepted ? 'Lead accepted' : 'Lead rejected'),
     buyer: buyerName,
+    attempts: attempts.map(a => ({ buyer: a.buyer, accepted: a.accepted })),
     krw_id: leadId
   });
 });
@@ -6274,9 +6248,14 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
 
   try {
     // ── MVA ──────────────────────────────────────────────────────────────
+    // Inbounds.com (KRW-MVA-2026-8RT) removed from the funnel and Leadbloom
+    // (KRW's own brand) shown in its place (Kyler, Sep 16). LEADBLOOM_PUB_ID
+    // must match the publisher_sub Leadbloom's forms post with - until it
+    // does, the node shows 0.
+    const LEADBLOOM_PUB_ID = process.env.LEADBLOOM_PUB_ID || 'KRW-LEADBLOOM-MVA';
     const mvaPubs = {
       'KRW-KANTHONY-RS': 'Kevin Anthony (CPA)',
-      'KRW-MVA-2026-8RT': 'Inbounds.com (CPA)',
+      [LEADBLOOM_PUB_ID]: 'Leadbloom',
       'KRW-NYC-MVA': 'Lumrah LLC',
     };
     const mvaRows = await pool.query(
@@ -6297,7 +6276,10 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     // needs every buyer node to exist so it can draw the correct structural
     // connections from each publisher, not just the buyers that happened to
     // receive traffic this specific period.
-    const mvaKnownBuyers = ['NLD CPA', 'MVA-003-LT', 'Email Agency', 'LAR-MVA-CPA'];
+    // Email Agency and LAR-MVA-CPA dropped as MVA buyers; CH-Intake (was
+    // "MVA-Intake") and LT-Intake (new intake buyer, posting spec pending)
+    // added (Kyler, Sep 16).
+    const mvaKnownBuyers = ['NLD CPA', 'MVA-003-LT', 'CH-Intake', 'LT-Intake'];
     for (const b of mvaKnownBuyers) mva.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
     // De-dupe by phone per publisher for display purposes only (Kyler, Sep 1)
     // - a real duplicate-dial issue was found inflating raw counts. This
@@ -6452,11 +6434,13 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       ssdi,
       mass_tort,
       routing: {
-        // Kevin and Inbounds share the full waterfall (NLD -> MVA-003-LT -> Email Agency).
-        // Lumrah LLC (Noah) is isolated - only ever NLD or LAR-MVA-CPA, never the other two.
-        'KRW-KANTHONY-RS':  ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
-        'KRW-MVA-2026-8RT': ['NLD CPA', 'MVA-003-LT', 'Email Agency'],
-        'KRW-NYC-MVA':      ['NLD CPA', 'MVA-003-LT'], // 12/day NLD cap, overflow to 003 (Sep 2, 8->15->12 Sep 15) - LAR still paused
+        // Kevin and Leadbloom share the NLD -> MVA-003-LT waterfall.
+        // Lumrah LLC (Noah) is isolated: NLD (12/day cap) with overflow to 003.
+        // CH-Intake and LT-Intake are drawn as buyer nodes; their live routing
+        // is wired separately once Kyler confirms the split (Sep 16).
+        'KRW-KANTHONY-RS':  ['NLD CPA', 'MVA-003-LT'],
+        [LEADBLOOM_PUB_ID]: ['NLD CPA', 'MVA-003-LT'],
+        'KRW-NYC-MVA':      ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // ladder order (Sep 16)
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Signed (TD)'], // Fields Law paused - this line now routes via Trackdrive
@@ -6655,7 +6639,7 @@ app.post('/leads/forward-to-mva-intake', async (req, res) => {
     }
     lead = result.rows[0];
   } catch (dbErr) {
-    console.error('[MVA-Intake Forward] DB lookup error:', dbErr.message);
+    console.error('[CH-Intake Forward] DB lookup error:', dbErr.message);
     return res.status(500).json({ ok: false, error: 'Database error' });
   } finally {
     client.release();
@@ -6682,11 +6666,11 @@ app.post('/leads/forward-to-mva-intake', async (req, res) => {
 
   try {
     const intakeRes = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4d50uja/', intakePayload);
-    console.log(`[MVA-Intake Forward] Forwarded krw_id ${krwId} - status ${intakeRes.status}`);
-    return res.json({ ok: true, result: 'success', message: 'Lead forwarded to MVA-Intake', krw_id: krwId, sent_payload: intakePayload });
+    console.log(`[CH-Intake Forward] Forwarded krw_id ${krwId} - status ${intakeRes.status}`);
+    return res.json({ ok: true, result: 'success', message: 'Lead forwarded to CH-Intake', krw_id: krwId, sent_payload: intakePayload });
   } catch (fwdErr) {
-    console.error('[MVA-Intake Forward] Forward failed:', fwdErr.message);
-    return res.status(502).json({ ok: false, error: 'Failed to forward to MVA-Intake', detail: fwdErr.message });
+    console.error('[CH-Intake Forward] Forward failed:', fwdErr.message);
+    return res.status(502).json({ ok: false, error: 'Failed to forward to CH-Intake', detail: fwdErr.message });
   }
 });
 // ─── END MVA-INTAKE FORWARDING ────────────────────────────────────────────────
