@@ -6927,6 +6927,12 @@ app.post('/billable-queue/:id/hold', requireKey, async (req, res) => {
 // approval box, same Approve/Hold buttons. Nothing is marked billable or
 // reaches a publisher portal until Kyler approves it (Kyler, Sep 15).
 const AZ_SIGNED_SHEET_ID   = '1XdryadYJw36zE6mctD5vtL5FQeKJXywfvmVqwuc0pN8';
+// Tabs are read by gid (the number in the sheet link) - reliable. Month names
+// are tried too, but Google returns the FIRST tab for an unknown name instead
+// of an error, so name-based reads are only trusted when a Date/CID header is
+// found. Add next month's gid here (or AZ_SIGNED_GIDS env, comma-separated)
+// when the buyer starts a new tab.
+const AZ_SIGNED_GIDS       = (process.env.AZ_SIGNED_GIDS || '2101881188').split(',').map(s => s.trim()).filter(Boolean);
 const AZ_SIGNED_PUBLISHER  = 'SSDI-AZ-1696';
 const AZ_SIGNED_PAYOUT     = parseFloat(process.env.AZ_SIGNED_PAYOUT || '400') || 400;  // per signed case - CONFIRM with Kyler; 400 mirrors the TD signed line
 const AZ_SIGNED_STATUSES   = ['retained', 'signed'];   // Filed rows on this sheet are ignored - Ringfuel owns Filed
@@ -6981,20 +6987,27 @@ async function scanAzSignedSheet(trigger) {
   const now = new Date();
   const summary = { at: now.toISOString(), trigger, tabs: [], rows: 0, retained: 0, queued: 0, skipped: 0, unmatched: 0, errors: [] };
   // current month and the previous one, so month-end rows written late are not missed
-  const tabs = [AZ_SIGNED_MONTHS[now.getMonth()], AZ_SIGNED_MONTHS[(now.getMonth() + 11) % 12]];
+  const targets = AZ_SIGNED_GIDS.map(g => ({ label: 'gid ' + g, q: 'gid=' + g }))
+    .concat([AZ_SIGNED_MONTHS[now.getMonth()], AZ_SIGNED_MONTHS[(now.getMonth() + 11) % 12]].map(n => ({ label: n, q: 'sheet=' + encodeURIComponent(n) })));
   let all = [];
-  for (const tab of tabs) {
+  summary.debug = [];
+  for (const t of targets) {
     try {
-      const url = `https://docs.google.com/spreadsheets/d/${AZ_SIGNED_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tab)}`;
+      const url = `https://docs.google.com/spreadsheets/d/${AZ_SIGNED_SHEET_ID}/gviz/tq?tqx=out:csv&${t.q}`;
       const csv = await fetchKASheetCSV(url);
-      if (/<html/i.test(csv.slice(0, 300))) { continue; }   // tab does not exist (yet)
-      const rows = azRowsFromCSV(csv, tab);
-      summary.tabs.push(tab); all = all.concat(rows);
-    } catch (err) { summary.errors.push(`${tab}: ${err.message}`); }
+      summary.debug.push({ tab: t.label, first_line: csv.split('\n')[0].slice(0, 120), bytes: csv.length });
+      if (/<html/i.test(csv.slice(0, 300))) continue;
+      const rows = azRowsFromCSV(csv, t.label);
+      if (!rows.length && !/CID/i.test(csv)) continue;   // no Date/CID header: unknown name fell back to the first tab, ignore
+      summary.tabs.push(t.label); all = all.concat(rows);
+    } catch (err) { summary.errors.push(`${t.label}: ${err.message}`); }
   }
+  // the same tab can be reached by gid and by name - keep one copy of each row
+  const seenRow = new Set();
+  all = all.filter(r => { const k = r.cid + '|' + r.date + '|' + r.status.toLowerCase(); if (seenRow.has(k)) return false; seenRow.add(k); return true; });
   summary.rows = all.length;
   if (!summary.tabs.length) {
-    summary.errors.push('No readable tab - is the sheet still shared as "anyone with the link can view"?');
+    summary.errors.push('No tab with a Date/CID header was readable. Check the gid in AZ_SIGNED_GIDS and that the sheet is shared as "anyone with the link can view".');
     azSignedLastScan = summary;
     console.log(`[AZ Signed Sheet] ✕ ${summary.errors.join(' | ')}`);
     return summary;
@@ -7079,7 +7092,7 @@ app.post('/az-signed-sheet/scan', requireKey, async (req, res) => {
   catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 app.get('/az-signed-sheet/status', requireKey, (req, res) => {
-  res.json({ ok: true, publisher: AZ_SIGNED_PUBLISHER, payout: AZ_SIGNED_PAYOUT, since: AZ_SIGNED_SINCE, scan_times_pacific: AZ_SIGNED_SCAN_TIMES, now_pacific: azPacificHM(), last_scan: azSignedLastScan });
+  res.json({ ok: true, publisher: AZ_SIGNED_PUBLISHER, payout: AZ_SIGNED_PAYOUT, since: AZ_SIGNED_SINCE, gids: AZ_SIGNED_GIDS, scan_times_pacific: AZ_SIGNED_SCAN_TIMES, now_pacific: azPacificHM(), last_scan: azSignedLastScan });
 });
 // ─── END AZ-1696 SIGNED SHEET SCANNER ───────────────────────────────────────
 
