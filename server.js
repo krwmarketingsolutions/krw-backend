@@ -7090,6 +7090,245 @@ app.get('/az-signed-sheet/status', requireKey, (req, res) => {
 });
 // ─── END AZ-1696 SIGNED SHEET SCANNER ───────────────────────────────────────
 
+
+// ─── MVA PUBLISHER PORTAL v2 + PUBLISHER POSTBACKS (Sep 16) ─────────────────
+// 1. /portal/leads         - what the rebuilt MVA portal reads. Returns ONLY
+//                            publisher-safe fields (no buyer name, no revenue,
+//                            no routing) and computes the publisher's own
+//                            payout from their payout_rate. The general
+//                            /leads/feed still returns buyer_name/revenue for
+//                            the admin dashboard; the portal no longer uses it.
+// 2. /portal/postback      - per-publisher postback settings (URL, method,
+//                            events, on/off), editable only from their login.
+// 3. Poller (every 2 min)  - finds leads whose status/disposition changed since
+//                            the publisher was last notified and fires their
+//                            postback. Catches every change regardless of how
+//                            it was set (buyer postback, sheet, or Kyler's SQL).
+//                            Retries up to 5 times; every attempt is logged.
+const PB_EVENTS = ['accepted', 'rejected', 'signed', 'disposition_update'];
+const PB_POLL_MS = 2 * 60 * 1000;
+const PB_MAX_ATTEMPTS = 5;
+
+async function initPortalPostbacks() {
+  try {
+    await pool.query(`
+      ALTER TABLE publishers ADD COLUMN IF NOT EXISTS postback_url     TEXT;
+      ALTER TABLE publishers ADD COLUMN IF NOT EXISTS postback_method  TEXT DEFAULT 'POST';
+      ALTER TABLE publishers ADD COLUMN IF NOT EXISTS postback_events  JSONB DEFAULT '["accepted","rejected","signed"]'::jsonb;
+      ALTER TABLE publishers ADD COLUMN IF NOT EXISTS postback_enabled BOOLEAN DEFAULT false;
+      ALTER TABLE publishers ADD COLUMN IF NOT EXISTS postback_since   TIMESTAMPTZ;
+      CREATE TABLE IF NOT EXISTS publisher_postback_log (
+        id          SERIAL PRIMARY KEY,
+        pub_id      TEXT NOT NULL,
+        lead_id     INTEGER,
+        event       TEXT NOT NULL,
+        url         TEXT,
+        method      TEXT,
+        status_code INTEGER,
+        ok          BOOLEAN DEFAULT false,
+        response    TEXT,
+        attempt     INTEGER DEFAULT 1,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_pb_log_pub ON publisher_postback_log (pub_id, created_at DESC);
+    `);
+    console.log('[Portal Postbacks] schema ready');
+  } catch (err) { console.error('[Portal Postbacks] schema init failed:', err.message); }
+}
+initPortalPostbacks();
+
+// Resolve a portal login (portal_id or pub_id) to the publisher record(s) it covers
+async function pbResolvePublisher(portalId) {
+  const r = await pool.query(
+    `SELECT * FROM publishers WHERE (portal_id=$1 OR pub_id=$1) AND active=true ORDER BY (pub_id=$1) DESC LIMIT 1`, [portalId]);
+  if (!r.rows.length) return null;
+  const pub = r.rows[0];
+  const fam = await pool.query(`SELECT pub_id FROM publishers WHERE (portal_id=$1 OR pub_id=$1) AND active=true`, [portalId]);
+  pub._pub_ids = fam.rows.map(x => x.pub_id);
+  return pub;
+}
+
+// Publisher-facing view of a lead. This is the allowlist - nothing else leaves.
+function pbLeadView(l, payoutRate) {
+  const bs = (l.buyer_status || '').trim();
+  const st = l.status || 'received';
+  let response = 'Submitted';
+  if (bs === 'Signed' || bs === 'Retained') response = 'Signed';
+  else if (bs === 'Rejected' || st === 'buyer_rejected') response = 'Rejected';
+  else if (bs === 'Test') response = 'Test';
+  else if (/^open/i.test(bs)) response = 'In outreach';
+  else if (/^pending/i.test(bs)) response = 'Pending';
+  else if (/^archived/i.test(bs)) response = 'Not worked';
+  else if (bs === 'Accepted' || st === 'forwarded') response = 'Accepted';
+  else if (st === 'rejected' || st === 'error') response = 'Not accepted';
+  const raw = l.raw || {};
+  const dispo = raw.buyer_disposition || {};
+  return {
+    id: l.id, received_at: l.received_at, campaign: l.campaign,
+    first_name: l.first_name, last_name: l.last_name, phone: l.phone, email: l.email, state: l.state,
+    zip: raw.zip_code || raw.zip || null, incident_date: raw.incident_date || null,
+    injury: raw.injury || raw.physical_injury || null, at_fault: raw.at_fault || null, have_attorney: raw.have_attorney || null,
+    submitted_status: st, response, notes: l.notes || l.buyer_error || null,
+    updated_at: dispo.synced_at || null, billable: !!l.billable,
+    payout: l.billable ? parseFloat(payoutRate || 0) : 0,
+    trustedform: raw.trustedform_cert_url || null,
+  };
+}
+
+// 1. Portal lead log (allowlisted)
+app.get('/portal/leads', requireKey, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const portalId = (req.query.portal_id || '').trim();
+  if (!portalId) return res.status(400).json({ ok: false, error: 'portal_id required' });
+  try {
+    const pub = await pbResolvePublisher(portalId);
+    if (!pub) return res.status(401).json({ ok: false, error: 'Publisher not found' });
+    const days = parseInt(req.query.days || '9999', 10);
+    const dayClause = days < 9999 ? `AND received_at >= NOW() - INTERVAL '${days} days'` : '';
+    const r = await pool.query(
+      `SELECT id, received_at, campaign, first_name, last_name, email, phone, state, status, buyer_status, buyer_error, notes, billable, raw
+       FROM leads WHERE publisher_sub = ANY($1::text[]) AND COALESCE(vertical,'') <> 'SSDI' ${dayClause}
+       ORDER BY received_at DESC LIMIT 5000`, [pub._pub_ids]);
+    res.json({ ok: true, count: r.rows.length, payout_rate: parseFloat(pub.payout_rate || 0), leads: r.rows.map(l => pbLeadView(l, pub.payout_rate)) });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// 2. Postback settings
+function pbSettingsView(pub) {
+  return { url: pub.postback_url || '', method: (pub.postback_method || 'POST').toUpperCase(),
+           events: Array.isArray(pub.postback_events) ? pub.postback_events : PB_EVENTS.slice(0, 3),
+           enabled: !!pub.postback_enabled, since: pub.postback_since || null };
+}
+app.get('/portal/postback', requireKey, async (req, res) => {
+  const pub = await pbResolvePublisher((req.query.portal_id || '').trim()).catch(() => null);
+  if (!pub) return res.status(401).json({ ok: false, error: 'Publisher not found' });
+  res.json({ ok: true, settings: pbSettingsView(pub), sample: pbBuildPayload({ id: 12345, first_name: 'Jane', last_name: 'Doe', phone: '5551234567', email: 'jane@example.com', state: 'TX', received_at: new Date().toISOString(), status: 'forwarded', buyer_status: 'Signed', notes: 'Signed — retained by buyer', billable: true, raw: {} }, 'signed', pub.payout_rate) });
+});
+app.post('/portal/postback', requireKey, async (req, res) => {
+  const b = req.body || {};
+  const pub = await pbResolvePublisher((b.portal_id || '').trim()).catch(() => null);
+  if (!pub) return res.status(401).json({ ok: false, error: 'Publisher not found' });
+  const url = String(b.url || '').trim();
+  if (url && !/^https?:\/\/[^\s]+$/i.test(url)) return res.status(400).json({ ok: false, error: 'URL must start with http:// or https://' });
+  const method = String(b.method || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
+  const events = (Array.isArray(b.events) ? b.events : []).filter(e => PB_EVENTS.includes(e));
+  const enabled = !!b.enabled && !!url && events.length > 0;
+  try {
+    await pool.query(
+      `UPDATE publishers SET postback_url=$1, postback_method=$2, postback_events=$3::jsonb, postback_enabled=$4,
+         postback_since = CASE WHEN $4 AND postback_since IS NULL THEN NOW() WHEN NOT $4 THEN NULL ELSE postback_since END
+       WHERE pub_id = ANY($5::text[])`,
+      [url || null, method, JSON.stringify(events), enabled, pub._pub_ids]);
+    const fresh = await pbResolvePublisher(pub.pub_id);
+    console.log(`[Portal Postbacks] ${pub.pub_id} settings saved: enabled=${enabled} ${method} ${url} events=${events.join(',')}`);
+    res.json({ ok: true, settings: pbSettingsView(fresh) });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+app.post('/portal/postback/test', requireKey, async (req, res) => {
+  const pub = await pbResolvePublisher(((req.body || {}).portal_id || '').trim()).catch(() => null);
+  if (!pub) return res.status(401).json({ ok: false, error: 'Publisher not found' });
+  if (!pub.postback_url) return res.status(400).json({ ok: false, error: 'Save a postback URL first' });
+  const sample = { id: 0, first_name: 'Test', last_name: 'Lead', phone: '5550000000', email: 'test@example.com', state: 'TX', received_at: new Date().toISOString(), status: 'forwarded', buyer_status: 'Accepted', notes: null, billable: false, raw: {} };
+  const payload = Object.assign(pbBuildPayload(sample, 'accepted', pub.payout_rate), { test: true });
+  const out = await pbDeliver(pub, payload);
+  await pool.query(`INSERT INTO publisher_postback_log (pub_id, lead_id, event, url, method, status_code, ok, response, attempt) VALUES ($1,NULL,'test',$2,$3,$4,$5,$6,1)`,
+    [pub.pub_id, pub.postback_url, pub.postback_method || 'POST', out.status, out.ok, (out.body || out.error || '').slice(0, 500)]);
+  res.json({ ok: out.ok, status_code: out.status, response: (out.body || out.error || '').slice(0, 500), sent: payload });
+});
+app.get('/portal/postback/log', requireKey, async (req, res) => {
+  const pub = await pbResolvePublisher((req.query.portal_id || '').trim()).catch(() => null);
+  if (!pub) return res.status(401).json({ ok: false, error: 'Publisher not found' });
+  const r = await pool.query(
+    `SELECT l.id, l.lead_id, l.event, l.method, l.status_code, l.ok, l.attempt, l.created_at, ld.first_name, ld.last_name
+     FROM publisher_postback_log l LEFT JOIN leads ld ON ld.id = l.lead_id
+     WHERE l.pub_id = ANY($1::text[]) ORDER BY l.created_at DESC LIMIT 20`, [pub._pub_ids]);
+  res.json({ ok: true, log: r.rows });
+});
+
+// 3. Delivery
+function pbBuildPayload(l, event, payoutRate) {
+  const v = pbLeadView(l, payoutRate);
+  return {
+    event, krw_id: v.id, first_name: v.first_name, last_name: v.last_name, phone: v.phone, email: v.email, state: v.state,
+    submitted_at: v.received_at, status: v.response, reason: v.notes || null, signed: v.response === 'Signed',
+    payout: v.payout, updated_at: new Date().toISOString(),
+  };
+}
+function pbDeliver(pub, payload) {
+  return new Promise((resolve) => {
+    try {
+      const method = (pub.postback_method || 'POST').toUpperCase();
+      const u = new URL(pub.postback_url);
+      if (method === 'GET') Object.keys(payload).forEach(k => { if (payload[k] !== null && payload[k] !== undefined) u.searchParams.set(k, String(payload[k])); });
+      const lib = u.protocol === 'http:' ? require('http') : require('https');
+      const body = method === 'POST' ? JSON.stringify(payload) : '';
+      const req2 = lib.request({ hostname: u.hostname, port: u.port || undefined, path: u.pathname + u.search, method,
+        headers: method === 'POST' ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } : {}, timeout: 10000 },
+        (r) => { let data = ''; r.on('data', c => data += c); r.on('end', () => resolve({ ok: r.statusCode >= 200 && r.statusCode < 300, status: r.statusCode, body: data })); });
+      req2.on('timeout', () => { req2.destroy(new Error('timeout after 10s')); });
+      req2.on('error', (e) => resolve({ ok: false, status: null, error: e.message }));
+      if (body) req2.write(body);
+      req2.end();
+    } catch (e) { resolve({ ok: false, status: null, error: e.message }); }
+  });
+}
+function pbEventFor(l) {
+  const bs = (l.buyer_status || '').trim(), st = l.status || '';
+  if (bs === 'Test') return null;
+  if (bs === 'Signed' || bs === 'Retained') return 'signed';
+  if (bs === 'Rejected' || st === 'buyer_rejected') return 'rejected';
+  if (bs === 'Accepted' || (st === 'forwarded' && !bs)) return 'accepted';
+  if (st === 'rejected' || st === 'error') return 'rejected';
+  if (bs) return 'disposition_update';
+  return null;
+}
+async function pbPoll() {
+  let pubs;
+  try { pubs = await pool.query(`SELECT * FROM publishers WHERE postback_enabled = true AND postback_url IS NOT NULL AND active = true`); }
+  catch (e) { return console.error('[Portal Postbacks] poll query failed:', e.message); }
+  for (const pub of pubs.rows) {
+    const events = Array.isArray(pub.postback_events) ? pub.postback_events : [];
+    if (!events.length) continue;
+    let rows;
+    try {
+      rows = await pool.query(
+        `SELECT id, received_at, campaign, first_name, last_name, email, phone, state, status, buyer_status, buyer_error, notes, billable, raw
+         FROM leads
+         WHERE publisher_sub = $1 AND COALESCE(vertical,'') <> 'SSDI'
+           AND received_at >= COALESCE($2::timestamptz, NOW())
+           AND COALESCE(raw->'pub_postback'->>'key','') IS DISTINCT FROM
+               (COALESCE(status,'') || '|' || COALESCE(buyer_status,'') || '|' || COALESCE(raw->'buyer_disposition'->>'synced_at',''))
+           AND ( COALESCE(raw->'pub_postback'->>'tried_key','') IS DISTINCT FROM
+                 (COALESCE(status,'') || '|' || COALESCE(buyer_status,'') || '|' || COALESCE(raw->'buyer_disposition'->>'synced_at',''))
+                 OR COALESCE((raw->'pub_postback'->>'attempts')::int, 0) < $3 )
+         ORDER BY received_at ASC LIMIT 50`, [pub.pub_id, pub.postback_since, PB_MAX_ATTEMPTS]);
+    } catch (e) { console.error('[Portal Postbacks] lead query failed:', e.message); continue; }
+    for (const l of rows.rows) {
+      const key = `${l.status || ''}|${l.buyer_status || ''}|${(l.raw && l.raw.buyer_disposition && l.raw.buyer_disposition.synced_at) || ''}`;
+      const event = pbEventFor(l);
+      const prev = (l.raw && l.raw.pub_postback) || {};
+      const attempts = (prev.tried_key === key ? (prev.attempts || 0) : 0) + 1;
+      // not subscribed to this event, or nothing to say yet: mark as seen so it isn't re-evaluated every 2 minutes
+      if (!event || !events.includes(event)) {
+        await pool.query(`UPDATE leads SET raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('pub_postback', jsonb_build_object('key',$1,'skipped',true,'at',NOW())) WHERE id=$2`, [key, l.id]);
+        continue;
+      }
+      const payload = pbBuildPayload(l, event, pub.payout_rate);
+      const out = await pbDeliver(pub, payload);
+      await pool.query(`INSERT INTO publisher_postback_log (pub_id, lead_id, event, url, method, status_code, ok, response, attempt) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [pub.pub_id, l.id, event, pub.postback_url, pub.postback_method || 'POST', out.status, out.ok, (out.body || out.error || '').slice(0, 500), attempts]);
+      // success: remember the key so this state is never re-sent. failure: leave key unset so it retries,
+      // and count attempts against this exact state (a later status change resets the count).
+      const mark = out.ok ? { key, event, sent_at: new Date().toISOString(), status_code: out.status }
+                          : { key: null, tried_key: key, attempts, event, last_error: out.error || String(out.status), last_try: new Date().toISOString() };
+      await pool.query(`UPDATE leads SET raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('pub_postback', $1::jsonb) WHERE id=$2`, [JSON.stringify(mark), l.id]);
+      console.log(`[Portal Postbacks] ${out.ok ? '✓' : '✕'} ${pub.pub_id} | lead ${l.id} | ${event} | ${out.status || out.error}${attempts > 1 ? ' | attempt ' + attempts : ''}`);
+    }
+  }
+}
+setInterval(() => pbPoll().catch(e => console.error('[Portal Postbacks] poll error:', e.message)), PB_POLL_MS);
+// ─── END MVA PUBLISHER PORTAL v2 + POSTBACKS ─────────────────────────────────
+
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
       console.log(`API_KEY set: ${!!process.env.API_KEY}`);
