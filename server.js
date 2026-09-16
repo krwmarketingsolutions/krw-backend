@@ -6617,6 +6617,80 @@ app.post('/calls/postback/j-signed', async (req, res) => {
 });
 // ─── END J-SIGNED POSTBACK RECEIVER ───────────────────────────────────────────
 
+// ─── MVA-INTAKE FORWARDING (manual/test only - NOT wired into live NYC routing yet) ──
+// New buyer, built ahead of going live Thursday. Deliberately standalone:
+// takes an existing lead's krw_id and forwards it, rather than sitting in
+// the live mva-nyc-split flow, so it can be tested with real lead data
+// without sending anything to MVA-Intake automatically. Wiring this into
+// live NYC traffic is a separate, later step once volume is confirmed
+// (Kyler, Sep 15).
+//
+// Insurance status (both parties) was on MVA-Intake's original field list
+// but confirmed optional on their end - deliberately left out of the
+// payload entirely rather than hard-coded, per Kyler (Sep 15).
+app.post('/leads/forward-to-mva-intake', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [
+    process.env.API_KEY      || '64tgzb5ostadx1azjio9crdlduw4vf29',
+    process.env.LEAD_API_KEY || 'krwleads2026secure',
+  ];
+  if (!validKeys.includes(key)) {
+    return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  }
+
+  const krwId = req.body && req.body.krw_id;
+  if (!krwId) {
+    return res.status(400).json({ ok: false, error: 'Missing required field: krw_id' });
+  }
+
+  const client = await pool.connect();
+  let lead;
+  try {
+    const result = await client.query(
+      `SELECT id, first_name, last_name, phone, email, state, raw, received_at FROM leads WHERE id = $1`,
+      [krwId]
+    );
+    if (!result.rows.length) {
+      return res.status(404).json({ ok: false, error: `No lead found for krw_id ${krwId}` });
+    }
+    lead = result.rows[0];
+  } catch (dbErr) {
+    console.error('[MVA-Intake Forward] DB lookup error:', dbErr.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally {
+    client.release();
+  }
+
+  const b = lead.raw || {};
+  const consentUrl = b.trustedform_cert_url || b.jornaya_leadid || null;
+
+  const intakePayload = {
+    first_name:    lead.first_name,
+    last_name:     lead.last_name,
+    phone:         lead.phone,
+    email:         lead.email,
+    zip_code:      b.zip_code || b.zip,
+    state:         lead.state,
+    incident_date: b.incident_date,
+    injury:        b.injury,
+    at_fault:      b.at_fault,
+    have_attorney: b.have_attorney,
+    consent_url:       consentUrl,
+    consent_timestamp: lead.received_at,
+  };
+  Object.keys(intakePayload).forEach(k => { if (intakePayload[k] === undefined || intakePayload[k] === null) delete intakePayload[k]; });
+
+  try {
+    const intakeRes = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4d50uja/', intakePayload);
+    console.log(`[MVA-Intake Forward] Forwarded krw_id ${krwId} - status ${intakeRes.status}`);
+    return res.json({ ok: true, result: 'success', message: 'Lead forwarded to MVA-Intake', krw_id: krwId, sent_payload: intakePayload });
+  } catch (fwdErr) {
+    console.error('[MVA-Intake Forward] Forward failed:', fwdErr.message);
+    return res.status(502).json({ ok: false, error: 'Failed to forward to MVA-Intake', detail: fwdErr.message });
+  }
+});
+// ─── END MVA-INTAKE FORWARDING ────────────────────────────────────────────────
+
 // ─── RINGFUEL CALL-COMPLETION WEBHOOK — SSDI 1696 (Filed) ──────────────────
 // Fires once a real call hangs up, sending CID/duration/timestamp. This is
 // separate from the ping data already flowing through /leads/ssdi-1696 -
