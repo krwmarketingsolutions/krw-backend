@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════
-// FILE: server.js (v196)
+// FILE: server.js (v197)
 // UPLOAD TO: GitHub repo "krw-backend"
 // PURPOSE: KRW Lead Intake + Call Revenue tracking
 // ══════════════════════════════════════════════════════
@@ -3295,6 +3295,13 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
         cited:          b.cited,
         doctor_treatment: b.doctor_treatment,
         physical_injury:  b.physical_injury,
+        // NYC actually sends these three - previously silently dropped since
+        // nothing extracted them past the validation check, even though the
+        // richer injury/summary data was sitting right in the payload the
+        // whole time (Kyler, Sep 15).
+        injury:           b.injury,
+        summary:          b.summary,
+        county:           b.county,
       };
       Object.keys(nldPayload).forEach(k => { if (nldPayload[k] === undefined) delete nldPayload[k]; });
 
@@ -3319,6 +3326,12 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
         incident_date:   b.incident_date,
         trustedform_cert_url: b.trustedform_cert_url || undefined,
         ip_address:      b.ip_address || undefined,
+        injury:          b.injury,
+        summary:         b.summary,
+        county:          b.county,
+        cited:           b.cited,
+        settlement:      b.settlement,
+        date_of_birth:   b.date_of_birth,
       };
       Object.keys(lt003Payload).forEach(k => { if (lt003Payload[k] === undefined) delete lt003Payload[k]; });
 
@@ -3374,6 +3387,12 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
         incident_date:   b.incident_date,
         trustedform_cert_url: b.trustedform_cert_url || undefined,
         ip_address:      b.ip_address || undefined,
+        injury:          b.injury,
+        summary:         b.summary,
+        county:          b.county,
+        cited:           b.cited,
+        settlement:      b.settlement,
+        date_of_birth:   b.date_of_birth,
       };
       Object.keys(lt003Payload).forEach(k => { if (lt003Payload[k] === undefined) delete lt003Payload[k]; });
 
