@@ -6927,11 +6927,10 @@ app.post('/billable-queue/:id/hold', requireKey, async (req, res) => {
 // approval box, same Approve/Hold buttons. Nothing is marked billable or
 // reaches a publisher portal until Kyler approves it (Kyler, Sep 15).
 const AZ_SIGNED_SHEET_ID   = '1XdryadYJw36zE6mctD5vtL5FQeKJXywfvmVqwuc0pN8';
-// Tabs are read by gid (the number in the sheet link) - reliable. Month names
-// are tried too, but Google returns the FIRST tab for an unknown name instead
-// of an error, so name-based reads are only trusted when a Date/CID header is
-// found. Add next month's gid here (or AZ_SIGNED_GIDS env, comma-separated)
-// when the buyer starts a new tab.
+// Tabs are read by gid (the number after gid= in the tab's link). When the
+// buyer starts an OCTOBER tab, add its gid: AZ_SIGNED_GIDS env on Railway,
+// comma-separated (e.g. "2101881188,123456789"), or edit the default here.
+// Old month gids can stay in the list - rows already handled are skipped.
 const AZ_SIGNED_GIDS       = (process.env.AZ_SIGNED_GIDS || '2101881188').split(',').map(s => s.trim()).filter(Boolean);
 const AZ_SIGNED_PUBLISHER  = 'SSDI-AZ-1696';
 const AZ_SIGNED_PAYOUT     = parseFloat(process.env.AZ_SIGNED_PAYOUT || '400') || 400;  // per signed case - CONFIRM with Kyler; 400 mirrors the TD signed line
@@ -6971,7 +6970,14 @@ function azRowsFromCSV(csv, tab) {
   let cols = null;
   for (const r of rows) {
     const up = r.map(c => String(c).trim().toUpperCase());
-    if (up.indexOf('CID') > -1 && up.indexOf('DATE') > -1) { cols = {}; up.forEach((c, j) => { if (c && cols[c] == null) cols[c] = j; }); continue; }
+    // Google's name-based CSV export can fold the rows above the header into
+    // it ("SEPTEMBER WEEK SET 08-31-2026 DATE"), so match on how the cell ends.
+    const isDate = c => /(^|\s)DATE$/.test(c);
+    if (up.indexOf('CID') > -1 && up.some(isDate)) {
+      cols = {};
+      up.forEach((c, j) => { if (isDate(c)) cols.DATE = j; else if (c === 'CID') cols.CID = j; else if (/STATUS$/.test(c)) cols.STATUS = j; else if (/^PUB/.test(c)) cols.PUB = j; });
+      continue;
+    }
     if (!cols) continue;
     const date = String(r[cols.DATE] || '').trim();
     const cid  = String(r[cols.CID]  || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
@@ -6987,13 +6993,17 @@ async function scanAzSignedSheet(trigger) {
   const now = new Date();
   const summary = { at: now.toISOString(), trigger, tabs: [], rows: 0, retained: 0, queued: 0, skipped: 0, unmatched: 0, errors: [] };
   // current month and the previous one, so month-end rows written late are not missed
-  const targets = AZ_SIGNED_GIDS.map(g => ({ label: 'gid ' + g, q: 'gid=' + g }))
-    .concat([AZ_SIGNED_MONTHS[now.getMonth()], AZ_SIGNED_MONTHS[(now.getMonth() + 11) % 12]].map(n => ({ label: n, q: 'sheet=' + encodeURIComponent(n) })));
+  // Only the tab(s) listed by gid. Name-based reads are deliberately NOT used:
+  // Google returns the workbook's first tab for an unknown name, and that tab
+  // is a different list (Filed/Retained/PUB) that is not this deal (Kyler, Sep 15).
+  const targets = AZ_SIGNED_GIDS.map(g => ({ label: 'gid ' + g, q: 'gid=' + g }));
   let all = [];
   summary.debug = [];
   for (const t of targets) {
     try {
-      const url = `https://docs.google.com/spreadsheets/d/${AZ_SIGNED_SHEET_ID}/gviz/tq?tqx=out:csv&${t.q}`;
+      const url = t.q.startsWith('gid=')
+        ? `https://docs.google.com/spreadsheets/d/${AZ_SIGNED_SHEET_ID}/export?format=csv&${t.q}`
+        : `https://docs.google.com/spreadsheets/d/${AZ_SIGNED_SHEET_ID}/gviz/tq?tqx=out:csv&${t.q}`;
       const csv = await fetchKASheetCSV(url);
       summary.debug.push({ tab: t.label, first_line: csv.split('\n')[0].slice(0, 120), bytes: csv.length });
       if (/<html/i.test(csv.slice(0, 300))) continue;
