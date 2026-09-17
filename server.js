@@ -6901,7 +6901,8 @@ app.get('/billable-queue', requireKey, async (req, res) => {
       `SELECT bq.id, bq.cid, bq.amount, bq.publisher_sub, bq.lead_id, bq.status,
               bq.received_at, bq.resolved_at,
               bq.raw->>'source' AS source, bq.raw->>'sheet_date' AS sheet_date,
-              l.first_name, l.last_name, l.state
+              bq.raw->>'buyer' AS buyer, bq.raw->>'sheet_status' AS sheet_status, bq.raw->>'sheet_notes' AS sheet_notes,
+              l.first_name, l.last_name, l.state, l.vertical, l.campaign, l.phone AS lead_phone
        FROM billable_queue bq
        LEFT JOIN leads l ON l.id = bq.lead_id
        ORDER BY bq.received_at DESC`
