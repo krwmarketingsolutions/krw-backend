@@ -3179,10 +3179,11 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // flipped - blocked leads never reach this ladder.
   const INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','CO','MO','NE','OK','TN'];
   const NLD_ONLY_STATES = ['UT','MT','WY','AZ','CA','NV','OK','NE','ND','IA','NM'];
-  const LT_INTAKE_WEBHOOK = process.env.LT_INTAKE_WEBHOOK || '';   // set on Railway when LT-Intake's instructions arrive
+  // LT-Intake posts to a VICIdial dialer over GET (spec from Adam, Sep 16). It goes live
+  // the moment LT_INTAKE_PASS is set on Railway; until then it is skipped in the ladder.
   const NYC_LADDER = [
-    { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                 states: INTAKE_STATES },
-    { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!LT_INTAKE_WEBHOOK, states: INTAKE_STATES },
+    { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
+    { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
     { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 5,    payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
     { name: 'MVA-003-LT', priority: 3, group: '003',    cap: null, payout: 1700, enabled: true,                 states: 'ALL' },
   ];
@@ -3353,19 +3354,8 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
       return { result: out, accepted: out.status === 'success' || (r.status >= 200 && r.status < 300) };
     },
     'LT-Intake': async () => {
-      if (!LT_INTAKE_WEBHOOK) throw new Error('LT-Intake not configured');
-      const p = strip({
-        first_name: b.first_name, last_name: b.last_name,
-        phone: String(b.phone).replace(/\D/g, ''), email: b.email,
-        zip_code: b.zip_code || b.zip, state: leadState,
-        incident_date: b.incident_date, injury: b.injury || b.physical_injury,
-        at_fault: b.at_fault, have_attorney: b.have_attorney,
-        consent_url: b.trustedform_cert_url || b.jornaya_leadid || undefined,
-        consent_timestamp: new Date().toISOString(),
-      });
-      const r = await postJSON(LT_INTAKE_WEBHOOK, p);
-      let out; try { out = JSON.parse(r.body); } catch(e) { out = { status: r.status, raw: r.body }; }
-      return { result: out, accepted: out.status === 'success' || (r.status >= 200 && r.status < 300) };
+      const r = await sendToLtIntake(b, leadState, leadId);
+      return { result: r.result, accepted: r.accepted };
     },
   };
 
@@ -6612,6 +6602,89 @@ app.post('/calls/postback/j-signed', async (req, res) => {
 // Insurance status (both parties) was on MVA-Intake's original field list
 // but confirmed optional on their end - deliberately left out of the
 // payload entirely rather than hard-coded, per Kyler (Sep 15).
+// ─── LT-INTAKE (Lead Tree intake dialer) ────────────────────────────────────
+// VICIdial non_agent_api add_lead, sent as GET (Adam, Sep 16). Credentials and
+// list come from Railway env so the password never lives in this file:
+//   LT_INTAKE_PASS        required - the dialer API password (turns LT-Intake on)
+//   LT_INTAKE_USER        default CCSapiUSER
+//   LT_INTAKE_BASE        default https://kaizen.phdialer.com/vicidial/non_agent_api.php
+//   LT_INTAKE_LIST_ID     default 7010
+//   LT_INTAKE_CAMPAIGN_ID optional - only sent if set
+//   LT_INTAKE_SOURCE      default KRW
+// The dialer answers with plain text: "SUCCESS: add_lead ..." or "ERROR: add_lead ...".
+function ltIntakeUrl(b, leadState, leadId) {
+  const u = new URL(process.env.LT_INTAKE_BASE || 'https://kaizen.phdialer.com/vicidial/non_agent_api.php');
+  const q = u.searchParams;
+  const set = (k, v) => { if (v !== undefined && v !== null && String(v).trim() !== '') q.set(k, String(v)); };
+  set('function', 'add_lead');
+  set('user', process.env.LT_INTAKE_USER || 'CCSapiUSER');
+  set('pass', process.env.LT_INTAKE_PASS || '');
+  set('phone_number', String(b.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''));
+  set('list_id', process.env.LT_INTAKE_LIST_ID || '7010');
+  set('campaign_id', process.env.LT_INTAKE_CAMPAIGN_ID);
+  set('source', process.env.LT_INTAKE_SOURCE || 'KRW');
+  set('vendor_lead_code', leadId ? 'KRW-' + leadId : undefined);
+  set('first_name', b.first_name);
+  set('last_name', b.last_name);
+  set('address1', b.address && b.address !== '123 Main Street' ? b.address : undefined);
+  set('city', b.city);
+  set('state', leadState);
+  set('postal_code', b.zip_code || b.zip);
+  set('email', b.email);
+  const comments = [
+    b.incident_date ? 'Incident ' + b.incident_date : null,
+    b.injury || b.physical_injury ? 'Injury: ' + (b.injury || b.physical_injury) : null,
+    b.at_fault ? 'At fault: ' + b.at_fault : null,
+    b.have_attorney ? 'Attorney: ' + b.have_attorney : null,
+    b.doctor_treatment ? 'Treatment: ' + b.doctor_treatment : null,
+    b.summary ? b.summary : null,
+    b.trustedform_cert_url ? 'TF ' + b.trustedform_cert_url : null,
+  ].filter(Boolean).join(' | ').slice(0, 250);
+  set('comments', comments);
+  set('dnc_check', 'N'); set('add_to_hopper', 'N'); set('hopper_local_call_time_check', 'N');
+  set('usacan_areacode_check', 'Y'); set('duplicate_check', 'DUPSYS');
+  return u;
+}
+function httpGetText(u) {
+  return new Promise((resolve, reject) => {
+    const lib = u.protocol === 'http:' ? require('http') : require('https');
+    const req2 = lib.get(u, { timeout: 15000 }, (r) => { let d = ''; r.on('data', c => d += c); r.on('end', () => resolve({ status: r.statusCode, body: d })); });
+    req2.on('timeout', () => req2.destroy(new Error('timeout after 15s')));
+    req2.on('error', reject);
+  });
+}
+async function sendToLtIntake(b, leadState, leadId) {
+  if (!process.env.LT_INTAKE_PASS) throw new Error('LT-Intake not configured (LT_INTAKE_PASS not set)');
+  const u = ltIntakeUrl(b, leadState, leadId);
+  const r = await httpGetText(u);
+  const text = String(r.body || '').trim();
+  const accepted = r.status >= 200 && r.status < 300 && /^SUCCESS/i.test(text);
+  const masked = u.toString().replace(/pass=[^&]*/, 'pass=****');
+  console.log(`[LT-Intake] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} | ${text.slice(0, 120)}`);
+  return { accepted, result: { status: accepted ? 'success' : 'error', message: text.slice(0, 300), http: r.status }, url: masked };
+}
+
+// Manual / test: POST { krw_id } re-sends an existing lead to LT-Intake and returns what
+// the dialer said. Does not touch routing; marks the lead only if the dialer accepted it.
+app.post('/leads/forward-to-lt-intake', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29', process.env.LEAD_API_KEY || 'krwleads2026secure'];
+  if (!validKeys.includes(key)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  const { krw_id } = req.body || {};
+  if (!krw_id) return res.status(400).json({ ok: false, error: 'krw_id required' });
+  try {
+    const r = await pool.query('SELECT * FROM leads WHERE id=$1', [krw_id]);
+    if (!r.rows.length) return res.status(404).json({ ok: false, error: 'Lead not found' });
+    const lead = r.rows[0], b = Object.assign({}, lead.raw || {}, { first_name: lead.first_name, last_name: lead.last_name, phone: lead.phone, email: lead.email });
+    const out = await sendToLtIntake(b, (lead.state || (lead.raw || {}).state || '').toUpperCase().slice(0, 2), lead.id);
+    if (out.accepted) {
+      await pool.query(`UPDATE leads SET raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('lt_intake_test', jsonb_build_object('sent_at', NOW(), 'response', $1::text)) WHERE id=$2`, [out.result.message, lead.id]);
+    }
+    res.json({ ok: out.accepted, result: out.result.status, message: out.result.message, krw_id: lead.id, sent_url: out.url });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+// ─── END LT-INTAKE ──────────────────────────────────────────────────────────
+
 app.post('/leads/forward-to-mva-intake', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
   const validKeys = [
