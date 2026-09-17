@@ -6627,6 +6627,7 @@ function ltIntakeUrl(b, leadState, leadId) {
   set('first_name', b.first_name);
   set('last_name', b.last_name);
   set('address1', b.address && b.address !== '123 Main Street' ? b.address : undefined);
+  set('title', leadId === 'TEST' ? 'TEST' : undefined);
   set('city', b.city);
   set('state', leadState);
   set('postal_code', b.zip_code || b.zip);
@@ -6670,8 +6671,22 @@ app.post('/leads/forward-to-lt-intake', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
   const validKeys = [process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29', process.env.LEAD_API_KEY || 'krwleads2026secure'];
   if (!validKeys.includes(key)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  const { krw_id } = req.body || {};
-  if (!krw_id) return res.status(400).json({ ok: false, error: 'krw_id required' });
+  const { krw_id, test, phone } = req.body || {};
+  // Test mode: { test: true, phone: "9493952717" } sends a fake lead ("Test" in every
+  // text field, Yes/No on the yes/no fields) with vendor_lead_code KRW-TEST. Nothing
+  // is written to our database and routing is untouched.
+  if (test) {
+    const tp = String(phone || '').replace(/\D/g, '');
+    if (tp.length !== 10) return res.status(400).json({ ok: false, error: 'test needs a 10-digit phone' });
+    const b = { first_name: 'Test', last_name: 'Test', phone: tp, email: 'test@krwmarketingsolutions.com', address: 'Test', city: 'Test',
+      zip_code: '75001', incident_date: new Date().toLocaleDateString('en-US'), injury: 'Test', at_fault: 'No', have_attorney: 'No',
+      doctor_treatment: 'Yes', summary: 'TEST LEAD - please disregard', trustedform_cert_url: 'Test' };
+    try {
+      const out = await sendToLtIntake(b, 'TX', 'TEST');
+      return res.json({ ok: out.accepted, result: out.result.status, message: out.result.message, test: true, sent_url: out.url });
+    } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+  }
+  if (!krw_id) return res.status(400).json({ ok: false, error: 'krw_id required (or test:true with phone)' });
   try {
     const r = await pool.query('SELECT * FROM leads WHERE id=$1', [krw_id]);
     if (!r.rows.length) return res.status(404).json({ ok: false, error: 'Lead not found' });
@@ -7405,6 +7420,245 @@ async function pbPoll() {
 }
 setInterval(() => pbPoll().catch(e => console.error('[Portal Postbacks] poll error:', e.message)), PB_POLL_MS);
 // ─── END MVA PUBLISHER PORTAL v2 + POSTBACKS ─────────────────────────────────
+
+
+// ─── BUYER DISPOSITION SHEETS (Sep 17) ──────────────────────────────────────
+// Reads each buyer's Google Sheet as the service account in GOOGLE_SA_KEY, five
+// times per working day (Eastern), and:
+//   - any row whose status means money is due (signed / retained / billable /
+//     converted / accepted-by-firm) goes to billable_queue as PENDING for Kyler's
+//     approval - nothing is ever marked billable by this code
+//   - every other status is applied to the lead (buyer_status, notes, status) so
+//     it shows on the right publisher's portal, with the buyer never named
+//   - rows that match no lead we sent that buyer are kept in buyer_sheet_rows
+//     so nothing is silently dropped, and reported per buyer
+//   - each scan is logged (buyer_sheet_scans) with the sheet's Drive
+//     modifiedTime, which is what the Home box shows as "last updated"
+// Sheets are matched to leads by phone, restricted to leads whose recorded
+// buyer is that sheet's buyer, so a number that went to two buyers cannot cross.
+const BS_SCAN_TIMES = ['08:00', '11:00', '13:00', '15:00', '21:00'];   // America/New_York, Mon-Fri
+const BS_BILLABLE = /\b(signed|retained|retainer|billable|converted|conversion|accepted by firm|hired|closed won)\b/i;
+const BS_REJECT   = /\b(reject\w*|not qualified|unqualified|dq|disqualif\w*|unresponsive|wrong number|stop|dnc|duplicate|dupe|not viable|no injury|no insurance|out of state|outside|declin\w*|dead|closed lost|lost|returned|opted out|not interested|no contact|never (made|answered)|unable to reach)\b/i;
+const BS_OPEN     = /\b(chase|outreach|attempt|contacted|in progress|working|scheduled|pending|under review|reviewing|callback|call back|open)\b/i;
+const BS_NOT_BILLABLE_FLAG = /^(no|n|false|not billable|non-billable)$/i;
+
+// One entry per sheet/tab. tab null = first tab that has a phone column and a
+// status column. amount = what the buyer pays on a billable (goes to the queue
+// and becomes leads.revenue on approval). enabled false = read for the Home box
+// only, never write anything.
+const BUYER_SHEETS = [
+  { key: 'nld-mva',   label: 'NLD CPA',    buyer: 'NLD CPA',    vertical: 'MVA', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'MVA CPA Leads - New', amount: 2000, enabled: true },
+  { key: 'nld-ride',  label: 'NLD Rideshare', buyer: 'CH-AD',   vertical: 'Rideshare', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'Rideshare', amount: 1800, enabled: true },
+  { key: 'lt-intake', label: 'LT-Intake',  buyer: 'LT-Intake',  vertical: 'MVA', sheet: '1uEryLwxtEgSkFSrF2vS_egtwBwzbj1OcCFn4dsKX4m4', tab: null, amount: 2500, enabled: true },
+  { key: 'ch-intake', label: 'CH-Intake',  buyer: 'CH-Intake',  vertical: 'MVA', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, amount: 2250, enabled: true },
+  { key: 'mva-003',   label: 'MVA-003-LT', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1700, enabled: true },
+];
+
+// ── Google auth (service account JWT -> access token), no dependencies ──
+let bsToken = null, bsTokenExp = 0;
+function bsSaKey() { try { return JSON.parse(process.env.GOOGLE_SA_KEY || ''); } catch (e) { return null; } }
+async function bsAccessToken() {
+  if (bsToken && Date.now() < bsTokenExp - 60000) return bsToken;
+  const sa = bsSaKey(); if (!sa || !sa.client_email || !sa.private_key) throw new Error('GOOGLE_SA_KEY missing or invalid');
+  const now = Math.floor(Date.now() / 1000);
+  const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const unsigned = b64({ alg: 'RS256', typ: 'JWT' }) + '.' + b64({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.metadata.readonly', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 });
+  const sig = require('crypto').createSign('RSA-SHA256').update(unsigned).sign(sa.private_key, 'base64url');
+  const body = 'grant_type=' + encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer') + '&assertion=' + unsigned + '.' + sig;
+  const r = await bsHttp('POST', 'https://oauth2.googleapis.com/token', body, { 'Content-Type': 'application/x-www-form-urlencoded' });
+  const j = JSON.parse(r.body || '{}');
+  if (!j.access_token) throw new Error('Google token error: ' + (j.error_description || j.error || r.status));
+  bsToken = j.access_token; bsTokenExp = Date.now() + (j.expires_in || 3600) * 1000;
+  return bsToken;
+}
+function bsHttp(method, url, body, headers) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url), lib = require('https');
+    const req2 = lib.request({ hostname: u.hostname, path: u.pathname + u.search, method, headers: Object.assign({}, headers || {}, body ? { 'Content-Length': Buffer.byteLength(body) } : {}), timeout: 20000 },
+      r => { let d = ''; r.on('data', c => d += c); r.on('end', () => resolve({ status: r.statusCode, body: d })); });
+    req2.on('timeout', () => req2.destroy(new Error('timeout'))); req2.on('error', reject);
+    if (body) req2.write(body); req2.end();
+  });
+}
+async function bsApi(url) {
+  const tok = await bsAccessToken();
+  const r = await bsHttp('GET', url, null, { Authorization: 'Bearer ' + tok });
+  if (r.status === 403 || r.status === 404) throw new Error('no access (share the sheet with ' + (bsSaKey() || {}).client_email + ')');
+  if (r.status >= 300) throw new Error('Google API ' + r.status + ': ' + r.body.slice(0, 120));
+  return JSON.parse(r.body || '{}');
+}
+async function bsTabs(sheetId) { const j = await bsApi(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties.title`); return (j.sheets || []).map(s => s.properties.title); }
+async function bsValues(sheetId, tab) { const j = await bsApi(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent("'" + tab.replace(/'/g, "''") + "'")}?majorDimension=ROWS`); return j.values || []; }
+async function bsModified(sheetId) { const j = await bsApi(`https://www.googleapis.com/drive/v3/files/${sheetId}?fields=modifiedTime,name`); return j; }
+
+// ── parsing ──
+function bsNorm(s) { return String(s == null ? '' : s).trim(); }
+function bsPhone(s) { const d = bsNorm(s).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length === 10 ? d : null; }
+function bsParseDate(s) { s = bsNorm(s); if (!s) return null; const m = s.match(/^(\d{1,2})[\/.-](\d{1,2})(?:[\/.-](\d{2,4}))?/); if (m) { const y = m[3] ? (m[3].length === 2 ? 2000 + +m[3] : +m[3]) : new Date().getFullYear(); return new Date(y, +m[1] - 1, +m[2]).toISOString(); } let c = s.replace(/,?\s+at\s+/i, ' '); if (!/\b(19|20)\d{2}\b/.test(c)) c = c.replace(/^([A-Za-z]{3,9}\s+\d{1,2})/, '$1, ' + new Date().getFullYear()); const t = Date.parse(c); return isNaN(t) ? null : new Date(t).toISOString(); }
+// Locate the header row and map columns by name. Works for every buyer layout seen so far.
+function bsMapHeader(rows) {
+  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+    const up = (rows[i] || []).map(c => bsNorm(c).toUpperCase());
+    const find = (...res) => { for (const re of res) { const j = up.findIndex(c => re.test(c)); if (j > -1) return j; } return -1; };
+    const phone = find(/^(PHONE|PHONE NUMBER|CID|CALLER ID|PHONE_NUMBER)$/, /PHONE/, /^CID/);
+    const status = find(/^(STATUS|DISPOSITION|LEAD STATUS|NLD STATUS|RESULT)$/, /STATUS|DISPO/);
+    if (phone < 0 || status < 0) continue;
+    return { headerRow: i, phone, status,
+      date: find(/^DATE$/, /DATE|SUBMITTED|RECEIVED/), first: find(/^FIRST/, /FIRST/), last: find(/^LAST/, /LAST/), name: find(/^(NAME|FULL NAME|CLIENT|LEAD NAME)$/),
+      notes: find(/^(NOTES?|COMMENTS?|REASON|STATUS NOTES)$/, /NOTE|COMMENT|REASON/), invoice: find(/INVOICE/), billable: find(/^BILLABLE$/),
+      vendor: find(/VENDOR|KRW ID|LEAD ID|VENDOR_LEAD_CODE|KRW_ID/) };
+  }
+  return null;
+}
+function bsClassify(cfg, r) {
+  const st = bsNorm(r.status), notes = bsNorm(r.notes), flag = bsNorm(r.billableFlag);
+  if (flag && BS_NOT_BILLABLE_FLAG.test(flag)) { /* explicit no */ }
+  else if ((flag && /^(yes|y|true|billable)$/i.test(flag)) || BS_BILLABLE.test(st)) {
+    if (!/\b(not|non|un)[- ]?(signed|retained|billable)\b/i.test(st)) return { kind: 'billable', status: 'Signed', note: 'Signed — retained by buyer' + (notes ? ' (' + notes + ')' : '') };
+  }
+  if (!st) return null;   // blank status = nothing to say yet
+  if (BS_REJECT.test(st) || BS_REJECT.test(notes)) return { kind: 'rejected', status: 'Rejected', note: 'Rejected — ' + (notes || st).replace(/^rejected\s*[-–:]?\s*/i, '') };
+  if (BS_OPEN.test(st) || BS_OPEN.test(notes)) return { kind: 'open', status: 'Open — in outreach', note: 'Open — ' + (notes || st) };
+  return { kind: 'other', status: 'Pending', note: 'Pending — ' + (notes || st) };
+}
+
+// ── scan ──
+async function bsScanOne(cfg, trigger) {
+  const rep = { key: cfg.key, label: cfg.label, ok: false, rows: 0, matched: 0, unmatched: 0, updated: 0, queued: 0, skipped: 0, error: null, modified: null, tab: null };
+  try {
+    const meta = await bsModified(cfg.sheet); rep.modified = meta.modifiedTime || null;
+    let tab = cfg.tab;
+    if (!tab) { const tabs = await bsTabs(cfg.sheet); for (const t of tabs) { const v = await bsValues(cfg.sheet, t); if (bsMapHeader(v)) { tab = t; break; } } if (!tab) throw new Error('no tab with a phone and status column'); }
+    rep.tab = tab;
+    const rows = await bsValues(cfg.sheet, tab);
+    const map = bsMapHeader(rows); if (!map) throw new Error('could not find a header row with phone + status');
+    const data = rows.slice(map.headerRow + 1).map(r => ({
+      phone: bsPhone(r[map.phone]), status: bsNorm(r[map.status]), notes: map.notes > -1 ? bsNorm(r[map.notes]) : '',
+      date: map.date > -1 ? bsParseDate(r[map.date]) : null, invoice: map.invoice > -1 ? bsNorm(r[map.invoice]) : '',
+      billableFlag: map.billable > -1 ? bsNorm(r[map.billable]) : '', vendor: map.vendor > -1 ? bsNorm(r[map.vendor]) : '',
+      name: map.name > -1 ? bsNorm(r[map.name]) : [bsNorm(r[map.first]), bsNorm(r[map.last])].filter(Boolean).join(' '),
+    })).filter(r => r.phone || /^KRW-\d+/i.test(r.vendor));
+    rep.rows = data.length;
+    // de-dupe: last row for a phone wins (buyers append updates)
+    const byPhone = new Map(); data.forEach(r => byPhone.set(r.phone || r.vendor, r));
+    const client = await pool.connect();
+    try {
+      for (const r of byPhone.values()) {
+        const vendorId = (r.vendor.match(/^KRW-(\d+)/i) || [])[1] || null;
+        const lead = (await client.query(
+          `SELECT id, status, buyer_status, notes, billable, raw, publisher_sub FROM leads
+           WHERE ( ($1::int IS NOT NULL AND id=$1) OR ($2::text IS NOT NULL AND regexp_replace(phone,'\\D','','g')=$2) )
+             AND raw->>'buyer_name' = $3
+           ORDER BY (id=$1) DESC, received_at DESC LIMIT 1`, [vendorId, r.phone, cfg.buyer])).rows[0];
+        const cls = bsClassify(cfg, r);
+        // keep every row we see (for reconciliation + the unmatched list)
+        await client.query(
+          `INSERT INTO buyer_sheet_rows (buyer_key, phone, sheet_status, sheet_notes, sheet_date, invoice, lead_id, kind, first_seen, last_seen)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
+           ON CONFLICT (buyer_key, phone) DO UPDATE SET sheet_status=EXCLUDED.sheet_status, sheet_notes=EXCLUDED.sheet_notes, sheet_date=COALESCE(EXCLUDED.sheet_date, buyer_sheet_rows.sheet_date), invoice=EXCLUDED.invoice, lead_id=COALESCE(EXCLUDED.lead_id, buyer_sheet_rows.lead_id), kind=EXCLUDED.kind, last_seen=NOW()`,
+          [cfg.key, r.phone || r.vendor, r.status, r.notes, r.date, r.invoice, lead ? lead.id : null, cls ? cls.kind : 'blank']);
+        if (!lead) { rep.unmatched++; continue; }
+        rep.matched++;
+        if (!cls || !cfg.enabled) { rep.skipped++; continue; }
+        const locked = lead.raw && lead.raw.billable_locked === 'true';
+        if (cls.kind === 'billable') {
+          // already queued (any state) for this lead from a sheet? never twice
+          const dup = await client.query(`SELECT id FROM billable_queue WHERE lead_id=$1 AND raw->>'source'='buyer_sheet' LIMIT 1`, [lead.id]);
+          if (dup.rows.length || lead.billable) { rep.skipped++; continue; }
+          await client.query(
+            `INSERT INTO billable_queue (cid, amount, publisher_sub, lead_id, status, raw) VALUES ($1,$2,$3,$4,'pending',$5::jsonb)`,
+            [r.phone || lead.id, cfg.amount, lead.publisher_sub, lead.id, JSON.stringify({ source: 'buyer_sheet', buyer_key: cfg.key, buyer: cfg.buyer, vertical: cfg.vertical, sheet_status: r.status, sheet_notes: r.notes, sheet_date: r.date, invoice: r.invoice, scanned_at: new Date().toISOString(), trigger })]);
+          // the portal can show "Signed" now; payout stays hidden until approved (billable flag)
+          await client.query(`UPDATE leads SET buyer_status='Signed', notes=$1, raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$2,'status','Signed','note',$1,'synced_at',NOW())) WHERE id=$3`, [cls.note, cfg.key, lead.id]);
+          rep.queued++;
+          console.log(`[Buyer Sheets] $ ${cfg.label} | lead ${lead.id} ${r.name} | ${r.status} -> queued for approval ($${cfg.amount})`);
+          continue;
+        }
+        // non-billable: apply only if it changed
+        const prev = (lead.raw && lead.raw.buyer_disposition) || {};
+        if (prev.source === 'buyer_sheet' && prev.status === cls.status && prev.note === cls.note) { rep.skipped++; continue; }
+        if (locked || lead.billable) { rep.skipped++; continue; }   // never downgrade an approved billable from a sheet
+        await client.query(
+          `UPDATE leads SET buyer_status=$1, status=CASE WHEN $2='rejected' THEN 'buyer_rejected' ELSE status END, notes=$3,
+             raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$4,'status',$1,'note',$3,'sheet_status',$5,'synced_at',NOW()))
+           WHERE id=$6`, [cls.status, cls.kind, cls.note, cfg.key, r.status, lead.id]);
+        rep.updated++;
+      }
+    } finally { client.release(); }
+    rep.ok = true;
+  } catch (err) { rep.error = err.message; }
+  await pool.query(`INSERT INTO buyer_sheet_scans (buyer_key, ok, error, rows, matched, unmatched, updated, queued, modified_time, tab, trigger) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [cfg.key, rep.ok, rep.error, rep.rows, rep.matched, rep.unmatched, rep.updated, rep.queued, rep.modified, rep.tab, trigger]).catch(() => {});
+  console.log(`[Buyer Sheets] ${rep.ok ? '✓' : '✕'} ${cfg.label} (${trigger}) | ${rep.error || `${rep.rows} rows, ${rep.matched} matched, ${rep.unmatched} unmatched, ${rep.updated} updated, ${rep.queued} queued`}`);
+  return rep;
+}
+async function bsScanAll(trigger, onlyKey) {
+  const out = [];
+  for (const cfg of BUYER_SHEETS) { if (onlyKey && cfg.key !== onlyKey) continue; out.push(await bsScanOne(cfg, trigger)); }
+  const queued = out.reduce((s, r) => s + r.queued, 0);
+  if (queued) {
+    const lines = out.filter(r => r.queued).map(r => `<li><b>${r.label}</b>: ${r.queued} new billable${r.queued > 1 ? 's' : ''} waiting for approval</li>`).join('');
+    sendEmailNotification(`${queued} new billable${queued > 1 ? 's' : ''} from buyer sheets — Needs Approval`, `<p>The ${trigger} scan found billable dispositions on buyer sheets:</p><ul>${lines}</ul><p>They are in your approval queue. Nothing is billed until you approve it.</p>`);
+  }
+  return out;
+}
+
+// ── schedule: five times a working day, Eastern ──
+const bsRan = new Set();
+function bsEasternNow() { const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour12: false, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date()); const g = t => (p.find(x => x.type === t) || {}).value; return { day: `${g('year')}-${g('month')}-${g('day')}`, hm: `${String(g('hour')).padStart(2, '0').replace('24', '00')}:${g('minute')}`, wd: g('weekday') }; }
+setInterval(() => {
+  const { day, hm, wd } = bsEasternNow();
+  if (['Sat', 'Sun'].includes(wd) || !BS_SCAN_TIMES.includes(hm)) return;
+  const slot = day + ' ' + hm; if (bsRan.has(slot)) return; bsRan.add(slot);
+  bsScanAll(hm + ' ET').catch(e => console.error('[Buyer Sheets] scheduled scan failed:', e.message));
+}, 30 * 1000);
+
+// ── tables ──
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS buyer_sheet_rows (
+        id SERIAL PRIMARY KEY, buyer_key TEXT NOT NULL, phone TEXT NOT NULL, sheet_status TEXT, sheet_notes TEXT, sheet_date TIMESTAMPTZ,
+        invoice TEXT, lead_id INTEGER, kind TEXT, first_seen TIMESTAMPTZ DEFAULT NOW(), last_seen TIMESTAMPTZ DEFAULT NOW(), UNIQUE (buyer_key, phone));
+      CREATE TABLE IF NOT EXISTS buyer_sheet_scans (
+        id SERIAL PRIMARY KEY, buyer_key TEXT NOT NULL, scanned_at TIMESTAMPTZ DEFAULT NOW(), ok BOOLEAN, error TEXT, rows INTEGER, matched INTEGER,
+        unmatched INTEGER, updated INTEGER, queued INTEGER, modified_time TIMESTAMPTZ, tab TEXT, trigger TEXT);
+      CREATE INDEX IF NOT EXISTS idx_bss_key ON buyer_sheet_scans (buyer_key, scanned_at DESC);`);
+    console.log('[Buyer Sheets] schema ready; service account: ' + ((bsSaKey() || {}).client_email || 'NOT SET'));
+  } catch (e) { console.error('[Buyer Sheets] schema init failed:', e.message); }
+})();
+
+// ── admin / Home box ──
+app.post('/buyer-sheets/scan', requireKey, async (req, res) => {
+  try { res.json({ ok: true, results: await bsScanAll('manual', req.query.buyer || null) }); }
+  catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+app.get('/buyer-sheets/status', requireKey, async (req, res) => {
+  try {
+    const out = [];
+    for (const cfg of BUYER_SHEETS) {
+      const last = (await pool.query(`SELECT * FROM buyer_sheet_scans WHERE buyer_key=$1 ORDER BY scanned_at DESC LIMIT 1`, [cfg.key])).rows[0] || null;
+      const lastOk = (await pool.query(`SELECT scanned_at, modified_time FROM buyer_sheet_scans WHERE buyer_key=$1 AND ok=true ORDER BY scanned_at DESC LIMIT 1`, [cfg.key])).rows[0] || null;
+      const rec = (await pool.query(
+        `SELECT COUNT(*)::int AS sent,
+                COUNT(*) FILTER (WHERE raw->'buyer_disposition' IS NOT NULL OR buyer_status IN ('Rejected','Signed','Retained','Returned'))::int AS dispositioned,
+                COUNT(*) FILTER (WHERE raw->'buyer_disposition' IS NULL AND buyer_status NOT IN ('Rejected','Signed','Retained','Returned','Test') AND received_at < NOW() - INTERVAL '3 days')::int AS waiting_3d
+         FROM leads WHERE raw->>'buyer_name'=$1 AND status IN ('forwarded','buyer_rejected') AND received_at >= NOW() - INTERVAL '45 days'`, [cfg.buyer])).rows[0];
+      const un = (await pool.query(`SELECT COUNT(*)::int AS n FROM buyer_sheet_rows WHERE buyer_key=$1 AND lead_id IS NULL AND kind <> 'blank'`, [cfg.key])).rows[0];
+      const pend = (await pool.query(`SELECT COUNT(*)::int AS n, COALESCE(SUM(amount),0)::float AS amt FROM billable_queue WHERE status='pending' AND raw->>'source'='buyer_sheet' AND raw->>'buyer_key'=$1`, [cfg.key])).rows[0];
+      out.push({ key: cfg.key, label: cfg.label, vertical: cfg.vertical, enabled: cfg.enabled, sheet_url: 'https://docs.google.com/spreadsheets/d/' + cfg.sheet,
+        last_modified: lastOk ? lastOk.modified_time : null, last_scan: last ? last.scanned_at : null, last_ok: !!(last && last.ok), last_error: last ? last.error : 'not scanned yet',
+        rows: last ? last.rows : 0, unmatched_rows: un.n, pending_approval: pend.n, pending_amount: pend.amt,
+        sent_45d: rec.sent, dispositioned_45d: rec.dispositioned, waiting_over_3d: rec.waiting_3d });
+    }
+    res.json({ ok: true, scan_times_et: BS_SCAN_TIMES, service_account: (bsSaKey() || {}).client_email || null, buyers: out });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+app.get('/buyer-sheets/unmatched', requireKey, async (req, res) => {
+  const r = await pool.query(`SELECT buyer_key, phone, sheet_status, sheet_notes, sheet_date, last_seen FROM buyer_sheet_rows WHERE lead_id IS NULL AND kind <> 'blank' ORDER BY last_seen DESC LIMIT 200`);
+  res.json({ ok: true, rows: r.rows });
+});
+// ─── END BUYER DISPOSITION SHEETS ───────────────────────────────────────────
 
 app.listen(PORT, '0.0.0.0', () => {
       console.log(`KRW server on 0.0.0.0:${PORT}`);
