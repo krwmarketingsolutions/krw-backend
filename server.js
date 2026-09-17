@@ -7402,7 +7402,7 @@ async function pbPoll() {
       const attempts = (prev.tried_key === key ? (prev.attempts || 0) : 0) + 1;
       // not subscribed to this event, or nothing to say yet: mark as seen so it isn't re-evaluated every 2 minutes
       if (!event || !events.includes(event)) {
-        await pool.query(`UPDATE leads SET raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('pub_postback', jsonb_build_object('key',$1,'skipped',true,'at',NOW())) WHERE id=$2`, [key, l.id]);
+        await pool.query(`UPDATE leads SET raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('pub_postback', jsonb_build_object('key',$1::text,'skipped',true,'at',NOW())) WHERE id=$2::int`, [key, l.id]);
         continue;
       }
       const payload = pbBuildPayload(l, event, pub.payout_rate);
@@ -7568,7 +7568,7 @@ async function bsScanOne(cfg, trigger) {
         // keep every row we see (for reconciliation + the unmatched list)
         await client.query(
           `INSERT INTO buyer_sheet_rows (buyer_key, phone, sheet_status, sheet_notes, sheet_date, invoice, lead_id, kind, first_seen, last_seen)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
+           VALUES ($1::text,$2::text,$3::text,$4::text,$5::timestamptz,$6::text,$7::int,$8::text,NOW(),NOW())
            ON CONFLICT (buyer_key, phone) DO UPDATE SET sheet_status=EXCLUDED.sheet_status, sheet_notes=EXCLUDED.sheet_notes, sheet_date=COALESCE(EXCLUDED.sheet_date, buyer_sheet_rows.sheet_date), invoice=EXCLUDED.invoice, lead_id=COALESCE(EXCLUDED.lead_id, buyer_sheet_rows.lead_id), kind=EXCLUDED.kind, last_seen=NOW()`,
           [cfg.key, r.phone || r.vendor, r.status, r.notes, r.date, r.invoice, lead ? lead.id : null, cls ? cls.kind : 'blank']);
         if (!lead) { rep.unmatched++; continue; }
@@ -7583,7 +7583,7 @@ async function bsScanOne(cfg, trigger) {
             `INSERT INTO billable_queue (cid, amount, publisher_sub, lead_id, status, raw) VALUES ($1,$2,$3,$4,'pending',$5::jsonb)`,
             [r.phone || lead.id, cfg.amount, lead.publisher_sub, lead.id, JSON.stringify({ source: 'buyer_sheet', buyer_key: cfg.key, buyer: cfg.buyer, vertical: cfg.vertical, sheet_status: r.status, sheet_notes: r.notes, sheet_date: r.date, invoice: r.invoice, scanned_at: new Date().toISOString(), trigger })]);
           // the portal can show "Signed" now; payout stays hidden until approved (billable flag)
-          await client.query(`UPDATE leads SET buyer_status='Signed', notes=$1, raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$2,'status','Signed','note',$1,'synced_at',NOW())) WHERE id=$3`, [cls.note, cfg.key, lead.id]);
+          await client.query(`UPDATE leads SET buyer_status='Signed', notes=$1, raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$2::text,'status','Signed','note',$1::text,'synced_at',NOW())) WHERE id=$3`, [cls.note, cfg.key, lead.id]);
           rep.queued++;
           console.log(`[Buyer Sheets] $ ${cfg.label} | lead ${lead.id} ${r.name} | ${r.status} -> queued for approval ($${cfg.amount})`);
           continue;
@@ -7593,9 +7593,9 @@ async function bsScanOne(cfg, trigger) {
         if (prev.source === 'buyer_sheet' && prev.status === cls.status && prev.note === cls.note) { rep.skipped++; continue; }
         if (locked || lead.billable) { rep.skipped++; continue; }   // never downgrade an approved billable from a sheet
         await client.query(
-          `UPDATE leads SET buyer_status=$1, status=CASE WHEN $2='rejected' THEN 'buyer_rejected' ELSE status END, notes=$3,
-             raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$4,'status',$1,'note',$3,'sheet_status',$5,'synced_at',NOW()))
-           WHERE id=$6`, [cls.status, cls.kind, cls.note, cfg.key, r.status, lead.id]);
+          `UPDATE leads SET buyer_status=$1::text, status=CASE WHEN $2::text='rejected' THEN 'buyer_rejected' ELSE status END, notes=$3::text,
+             raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$4::text,'status',$1::text,'note',$3::text,'sheet_status',$5::text,'synced_at',NOW()))
+           WHERE id=$6::int`, [cls.status, cls.kind, cls.note, cfg.key, r.status, lead.id]);
         rep.updated++;
       }
     } finally { client.release(); }
