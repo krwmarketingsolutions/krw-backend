@@ -7225,15 +7225,19 @@ async function pbResolvePublisher(portalId) {
 function pbLeadView(l, payoutRate) {
   const bs = (l.buyer_status || '').trim();
   const st = l.status || 'received';
-  let response = 'Submitted';
+  // Publisher-facing wording (Kyler, Sep 16): a lead that went through but has no
+  // buyer response yet is "Delivered", never "Accepted" - delivery is not acceptance.
+  // "Returned" from the buyer is a rejection. A lead the buyer would not take at all
+  // is "Not delivered".
+  let response = 'Delivered';
   if (bs === 'Signed' || bs === 'Retained') response = 'Signed';
-  else if (bs === 'Rejected' || st === 'buyer_rejected') response = 'Rejected';
+  else if (bs === 'Rejected' || bs === 'Returned' || st === 'buyer_rejected') response = 'Rejected';
   else if (bs === 'Test') response = 'Test';
   else if (/^open/i.test(bs)) response = 'In outreach';
   else if (/^pending/i.test(bs)) response = 'Pending';
   else if (/^archived/i.test(bs)) response = 'Not worked';
-  else if (bs === 'Accepted' || st === 'forwarded') response = 'Accepted';
-  else if (st === 'rejected' || st === 'error') response = 'Not accepted';
+  else if (st === 'rejected' || st === 'error') response = 'Not delivered';
+  else response = 'Delivered';
   const raw = l.raw || {};
   const dispo = raw.buyer_disposition || {};
   return {
@@ -7349,7 +7353,7 @@ function pbEventFor(l) {
   const bs = (l.buyer_status || '').trim(), st = l.status || '';
   if (bs === 'Test') return null;
   if (bs === 'Signed' || bs === 'Retained') return 'signed';
-  if (bs === 'Rejected' || st === 'buyer_rejected') return 'rejected';
+  if (bs === 'Rejected' || bs === 'Returned' || st === 'buyer_rejected') return 'rejected';
   if (bs === 'Accepted' || (st === 'forwarded' && !bs)) return 'accepted';
   if (st === 'rejected' || st === 'error') return 'rejected';
   if (bs) return 'disposition_update';
