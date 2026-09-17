@@ -7439,7 +7439,7 @@ setInterval(() => pbPoll().catch(e => console.error('[Portal Postbacks] poll err
 const BS_SCAN_TIMES = ['08:00', '11:00', '13:00', '15:00', '21:00'];   // America/New_York, Mon-Fri
 const BS_BILLABLE = /\b(signed|retained|retainer|billable|converted|conversion|accepted by firm|hired|closed won)\b/i;
 const BS_REJECT   = /\b(reject\w*|not qualified|unqualified|dq|disqualif\w*|unresponsive|wrong number|stop|dnc|duplicate|dupe|not viable|no injury|no insurance|out of state|outside|declin\w*|dead|closed lost|lost|returned|opted out|not interested|no contact|never (made|answered)|unable to reach)\b/i;
-const BS_OPEN     = /\b(chase|outreach|attempt|contacted|in progress|working|scheduled|pending|under review|reviewing|callback|call back|open)\b/i;
+const BS_OPEN     = /\b(chase|outreach|attempt|contacted|in progress|working|scheduled|pending|under review|reviewing|callback|call back|open|waiting)\b/i;
 const BS_NOT_BILLABLE_FLAG = /^(no|n|false|not billable|non-billable)$/i;
 
 // One entry per sheet/tab. tab null = first tab that has a phone column and a
@@ -7448,9 +7448,12 @@ const BS_NOT_BILLABLE_FLAG = /^(no|n|false|not billable|non-billable)$/i;
 // only, never write anything.
 const BUYER_SHEETS = [
   { key: 'nld-mva',   label: 'NLD CPA',    buyer: 'NLD CPA',    vertical: 'MVA', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'MVA CPA Leads - New', amount: 2000, enabled: true },
-  { key: 'nld-ride',  label: 'NLD Rideshare', buyer: 'CH-AD',   vertical: 'Rideshare', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'Rideshare', amount: 1800, enabled: true },
-  { key: 'lt-intake', label: 'LT-Intake',  buyer: 'LT-Intake',  vertical: 'MVA', sheet: '1uEryLwxtEgSkFSrF2vS_egtwBwzbj1OcCFn4dsKX4m4', tab: null, amount: 2500, enabled: true },
-  { key: 'ch-intake', label: 'CH-Intake',  buyer: 'CH-Intake',  vertical: 'MVA', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, amount: 2250, enabled: true },
+  // Rideshare leads carry no buyer_name on the record, so this tab matches by campaign instead
+  { key: 'nld-ride',  label: 'NLD Rideshare', buyer: 'CH-AD',   vertical: 'Rideshare', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'Rideshare', campaigns: ['rideshare-tb'], amount: 1800, enabled: true },
+  // LT's sheet: one tab per month ("Sep 2026"), no phone column - rows are keyed by "Your reference" = our KRW-#### vendor code
+  { key: 'lt-intake', label: 'LT-Intake',  buyer: 'LT-Intake',  vertical: 'MVA', sheet: '1uEryLwxtEgSkFSrF2vS_egtwBwzbj1OcCFn4dsKX4m4', tabPattern: /^[A-Z][a-z]{2} \d{4}$/, amount: 2500, enabled: true },
+  // Chad's intake sheet carries MVA plus his Roblox and Rideshare rows; MVA matches by buyer, the others by campaign
+  { key: 'ch-intake', label: 'CH-Intake',  buyer: 'CH-Intake',  vertical: 'MVA', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, campaigns: ['roblox-mt'], amount: 2250, enabled: true },
   { key: 'mva-003',   label: 'MVA-003-LT', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1700, enabled: true },
 ];
 
@@ -7500,13 +7503,13 @@ function bsMapHeader(rows) {
   for (let i = 0; i < Math.min(rows.length, 15); i++) {
     const up = (rows[i] || []).map(c => bsNorm(c).toUpperCase());
     const find = (...res) => { for (const re of res) { const j = up.findIndex(c => re.test(c)); if (j > -1) return j; } return -1; };
-    const phone = find(/^(PHONE|PHONE NUMBER|CID|CALLER ID|PHONE_NUMBER)$/, /PHONE/, /^CID/);
+    const phone = find(/^(PHONE|PHONE NUMBER|PHONE #|CID|CALLER ID|PHONE_NUMBER)$/, /PHONE/, /^CID/);
+    const vendor = find(/^(YOUR REFERENCE|REFERENCE|VENDOR LEAD CODE|VENDOR_LEAD_CODE|KRW ID|KRW_ID|KRW REF)$/, /REFERENCE|VENDOR|KRW/);
     const status = find(/^(STATUS|DISPOSITION|LEAD STATUS|NLD STATUS|RESULT)$/, /STATUS|DISPO/);
-    if (phone < 0 || status < 0) continue;
-    return { headerRow: i, phone, status,
-      date: find(/^DATE$/, /DATE|SUBMITTED|RECEIVED/), first: find(/^FIRST/, /FIRST/), last: find(/^LAST/, /LAST/), name: find(/^(NAME|FULL NAME|CLIENT|LEAD NAME)$/),
-      notes: find(/^(NOTES?|COMMENTS?|REASON|STATUS NOTES)$/, /NOTE|COMMENT|REASON/), invoice: find(/INVOICE/), billable: find(/^BILLABLE$/),
-      vendor: find(/VENDOR|KRW ID|LEAD ID|VENDOR_LEAD_CODE|KRW_ID/) };
+    if ((phone < 0 && vendor < 0) || status < 0) continue;
+    return { headerRow: i, phone, status, vendor,
+      date: find(/^(DATE|SENT|SUBMISSION DATE|DATE SENT|DATE SUBMITTED)$/, /DATE/), first: find(/^FIRST/, /FIRST/), last: find(/^LAST/, /LAST/), name: find(/^(NAME|FULL NAME|CLIENT|LEAD NAME|LEAD)$/),
+      notes: find(/^STAGE UPDATES$/, /^STATUS NOTES$/, /^REASON$/, /^NOTES?$/, /^COMMENTS?$/, /STAGE|REASON|NOTE|COMMENT/), invoice: find(/INVOICE/), billable: find(/^BILLABLE$/), signed: find(/^SIGNED$/) };
   }
   return null;
 }
@@ -7527,29 +7530,40 @@ async function bsScanOne(cfg, trigger) {
   const rep = { key: cfg.key, label: cfg.label, ok: false, rows: 0, matched: 0, unmatched: 0, updated: 0, queued: 0, skipped: 0, error: null, modified: null, tab: null };
   try {
     const meta = await bsModified(cfg.sheet); rep.modified = meta.modifiedTime || null;
-    let tab = cfg.tab;
-    if (!tab) { const tabs = await bsTabs(cfg.sheet); for (const t of tabs) { const v = await bsValues(cfg.sheet, t); if (bsMapHeader(v)) { tab = t; break; } } if (!tab) throw new Error('no tab with a phone and status column'); }
-    rep.tab = tab;
-    const rows = await bsValues(cfg.sheet, tab);
-    const map = bsMapHeader(rows); if (!map) throw new Error('could not find a header row with phone + status');
-    const data = rows.slice(map.headerRow + 1).map(r => ({
-      phone: bsPhone(r[map.phone]), status: bsNorm(r[map.status]), notes: map.notes > -1 ? bsNorm(r[map.notes]) : '',
-      date: map.date > -1 ? bsParseDate(r[map.date]) : null, invoice: map.invoice > -1 ? bsNorm(r[map.invoice]) : '',
-      billableFlag: map.billable > -1 ? bsNorm(r[map.billable]) : '', vendor: map.vendor > -1 ? bsNorm(r[map.vendor]) : '',
-      name: map.name > -1 ? bsNorm(r[map.name]) : [bsNorm(r[map.first]), bsNorm(r[map.last])].filter(Boolean).join(' '),
-    })).filter(r => r.phone || /^KRW-\d+/i.test(r.vendor));
+    let tabsToRead = [];
+    const allTabs = await bsTabs(cfg.sheet);
+    if (cfg.tab) tabsToRead = [cfg.tab];
+    else if (cfg.tabPattern) tabsToRead = allTabs.filter(t => cfg.tabPattern.test(t));
+    else { for (const t of allTabs) { const v = await bsValues(cfg.sheet, t); if (bsMapHeader(v)) { tabsToRead = [t]; break; } } }
+    if (!tabsToRead.length) throw new Error('no tab with a phone/reference column and a status column');
+    rep.tab = tabsToRead.join(', ');
+    let data = [];
+    for (const tab of tabsToRead) {
+      const rows = await bsValues(cfg.sheet, tab);
+      const map = bsMapHeader(rows); if (!map) { if (tabsToRead.length === 1) throw new Error('could not find a header row with phone/reference + status'); continue; }
+      data = data.concat(rows.slice(map.headerRow + 1).map(r => {
+        const signedVal = map.signed > -1 ? bsNorm(r[map.signed]) : '';
+        const signedYes = signedVal && !/^(no|n|-|false|0|not signed)$/i.test(signedVal);
+        return {
+          phone: map.phone > -1 ? bsPhone(r[map.phone]) : null, status: bsNorm(r[map.status]), notes: map.notes > -1 ? bsNorm(r[map.notes]) : '',
+          date: map.date > -1 ? bsParseDate(r[map.date]) : null, invoice: map.invoice > -1 ? bsNorm(r[map.invoice]) : '',
+          billableFlag: map.billable > -1 && bsNorm(r[map.billable]) ? bsNorm(r[map.billable]) : (signedYes ? 'yes' : ''), vendor: map.vendor > -1 ? bsNorm(r[map.vendor]) : '',
+          name: map.name > -1 ? bsNorm(r[map.name]) : [bsNorm(r[map.first]), bsNorm(r[map.last])].filter(Boolean).join(' '),
+        };
+      }).filter(r => r.phone || /KRW-\d+/i.test(r.vendor)));
+    }
     rep.rows = data.length;
     // de-dupe: last row for a phone wins (buyers append updates)
     const byPhone = new Map(); data.forEach(r => byPhone.set(r.phone || r.vendor, r));
     const client = await pool.connect();
     try {
       for (const r of byPhone.values()) {
-        const vendorId = (r.vendor.match(/^KRW-(\d+)/i) || [])[1] || null;
+        const vendorId = (r.vendor.match(/KRW-(\d+)/i) || [])[1] || null;
         const lead = (await client.query(
           `SELECT id, status, buyer_status, notes, billable, raw, publisher_sub FROM leads
            WHERE ( ($1::int IS NOT NULL AND id=$1::int) OR ($2::text IS NOT NULL AND regexp_replace(phone,'\\D','','g')=$2::text) )
-             AND raw->>'buyer_name' = $3::text
-           ORDER BY (id=$1::int) DESC, received_at DESC LIMIT 1`, [vendorId ? parseInt(vendorId, 10) : null, r.phone, cfg.buyer])).rows[0];
+             AND ( raw->>'buyer_name' = $3::text OR ($4::text[] IS NOT NULL AND campaign = ANY($4::text[])) )
+           ORDER BY (id=$1::int) DESC, received_at DESC LIMIT 1`, [vendorId ? parseInt(vendorId, 10) : null, r.phone, cfg.buyer, cfg.campaigns || null])).rows[0];
         const cls = bsClassify(cfg, r);
         // keep every row we see (for reconciliation + the unmatched list)
         await client.query(
