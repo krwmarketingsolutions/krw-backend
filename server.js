@@ -7547,9 +7547,9 @@ async function bsScanOne(cfg, trigger) {
         const vendorId = (r.vendor.match(/^KRW-(\d+)/i) || [])[1] || null;
         const lead = (await client.query(
           `SELECT id, status, buyer_status, notes, billable, raw, publisher_sub FROM leads
-           WHERE ( ($1::int IS NOT NULL AND id=$1) OR ($2::text IS NOT NULL AND regexp_replace(phone,'\\D','','g')=$2) )
-             AND raw->>'buyer_name' = $3
-           ORDER BY (id=$1) DESC, received_at DESC LIMIT 1`, [vendorId, r.phone, cfg.buyer])).rows[0];
+           WHERE ( ($1::int IS NOT NULL AND id=$1::int) OR ($2::text IS NOT NULL AND regexp_replace(phone,'\\D','','g')=$2::text) )
+             AND raw->>'buyer_name' = $3::text
+           ORDER BY (id=$1::int) DESC, received_at DESC LIMIT 1`, [vendorId ? parseInt(vendorId, 10) : null, r.phone, cfg.buyer])).rows[0];
         const cls = bsClassify(cfg, r);
         // keep every row we see (for reconciliation + the unmatched list)
         await client.query(
@@ -7652,6 +7652,16 @@ app.get('/buyer-sheets/status', requireKey, async (req, res) => {
         sent_45d: rec.sent, dispositioned_45d: rec.dispositioned, waiting_over_3d: rec.waiting_3d });
     }
     res.json({ ok: true, scan_times_et: BS_SCAN_TIMES, service_account: (bsSaKey() || {}).client_email || null, buyers: out });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+// Admin: show tab names and the first rows of each tab so a new buyer's layout can be mapped
+app.get('/buyer-sheets/peek', requireKey, async (req, res) => {
+  const cfg = BUYER_SHEETS.find(b => b.key === req.query.buyer);
+  if (!cfg) return res.status(400).json({ ok: false, error: 'buyer must be one of ' + BUYER_SHEETS.map(b => b.key).join(', ') });
+  try {
+    const tabs = await bsTabs(cfg.sheet), out = [];
+    for (const t of tabs) { const v = await bsValues(cfg.sheet, t); out.push({ tab: t, rows: v.length, header_found: !!bsMapHeader(v), sample: v.slice(0, 6) }); }
+    res.json({ ok: true, buyer: cfg.label, tabs: out });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 app.get('/buyer-sheets/unmatched', requireKey, async (req, res) => {
