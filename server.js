@@ -6933,6 +6933,7 @@ app.post('/billable-queue/:id/approve', requireKey, async (req, res) => {
       [item.id]
     );
     const itemSource = item.raw && typeof item.raw === 'object' ? item.raw.source : null;
+    let matchedCallId = null;
     if (item.lead_id && itemSource === 'az_signed_sheet') {
       // Signed is a second payable event on a lead that may already carry a
       // Filed payout from Ringfuel - add to revenue, never overwrite it, and
@@ -6964,13 +6965,27 @@ app.post('/billable-queue/:id/approve', requireKey, async (req, res) => {
       // which is what the publisher portal actually reads from. Previously
       // this branch didn't exist at all, so approving a calls-based item
       // never touched the real record the portal shows (Kyler, Sep 8).
-      await client.query(
-        "UPDATE calls SET billable=true, payout_amount=$1, call_status_label='cpa' WHERE caller_id=$2 AND publisher_sub=$3",
-        [item.amount, item.cid, item.publisher_sub]
+      // One approval = ONE call. The same number often has several call
+      // records (redials), and the old WHERE matched all of them, so one
+      // approved item could flag 2-3 calls billable at full payout each.
+      // Now only the most recent call for that number is marked (Sep 18).
+      const tgt = await client.query(
+        `SELECT id FROM calls WHERE caller_id=$1 AND publisher_sub=$2
+         ORDER BY (billable IS TRUE) DESC, received_at DESC LIMIT 1`,
+        [item.cid, item.publisher_sub]
       );
+      if (tgt.rows[0]) {
+        matchedCallId = tgt.rows[0].id;
+        await client.query(
+          "UPDATE calls SET billable=true, payout_amount=$1, call_status_label='cpa' WHERE id=$2",
+          [item.amount, matchedCallId]
+        );
+      } else {
+        console.log(`[Billable Queue] ! Approved queue_id ${item.id} but no call found for CID ${item.cid} / ${item.publisher_sub} - nothing will show on a portal`);
+      }
     }
     console.log(`[Billable Queue] ✓ Approved | queue_id: ${item.id} | CID: ${item.cid} | $${item.amount}`);
-    return res.json({ ok: true, result: 'success', message: 'Approved' });
+    return res.json({ ok: true, result: 'success', message: 'Approved', call_id: matchedCallId });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   } finally {
