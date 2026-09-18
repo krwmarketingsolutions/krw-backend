@@ -6945,6 +6945,14 @@ app.post('/billable-queue/:id/approve', requireKey, async (req, res) => {
          WHERE id = $2`,
         [item.amount, item.lead_id, JSON.stringify({ signed: true, signed_amount: item.amount, signed_date: item.raw.sheet_date || null, signed_approved_at: new Date().toISOString() })]
       );
+    } else if (item.lead_id && itemSource === 'buyer_sheet') {
+      // Approval is the moment the lead becomes Signed everywhere: portal, postbacks, revenue.
+      await client.query(
+        `UPDATE leads SET billable=true, revenue=$1, buyer_status='Signed', notes='Signed — retained by buyer',
+           raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', COALESCE(raw->'buyer_disposition','{}'::jsonb) || jsonb_build_object('status','Signed','note','Signed — retained by buyer','awaiting_approval',false,'approved_at',NOW()))
+         WHERE id=$2`,
+        [item.amount, item.lead_id]
+      );
     } else if (item.lead_id) {
       await client.query(
         'UPDATE leads SET billable=true, revenue=$1 WHERE id=$2',
@@ -7246,7 +7254,8 @@ function pbLeadView(l, payoutRate) {
   // "Returned" from the buyer is a rejection. A lead the buyer would not take at all
   // is "Not delivered".
   let response = 'Delivered';
-  if (bs === 'Signed' || bs === 'Retained') response = 'Signed';
+  if ((bs === 'Signed' || bs === 'Retained') && l.billable) response = 'Signed';
+  else if (bs === 'Signed' || bs === 'Retained') response = 'Pending';   // reported by buyer, not yet approved by Kyler
   else if (bs === 'Rejected' || bs === 'Returned' || st === 'buyer_rejected') response = 'Rejected';
   else if (bs === 'Test') response = 'Test';
   else if (/^open/i.test(bs)) response = 'In outreach';
@@ -7368,7 +7377,8 @@ function pbDeliver(pub, payload) {
 function pbEventFor(l) {
   const bs = (l.buyer_status || '').trim(), st = l.status || '';
   if (bs === 'Test') return null;
-  if (bs === 'Signed' || bs === 'Retained') return 'signed';
+  if ((bs === 'Signed' || bs === 'Retained') && l.billable) return 'signed';
+  if (bs === 'Signed' || bs === 'Retained') return 'disposition_update';
   if (bs === 'Rejected' || bs === 'Returned' || st === 'buyer_rejected') return 'rejected';
   if (bs === 'Accepted' || (st === 'forwarded' && !bs)) return 'accepted';
   if (st === 'rejected' || st === 'error') return 'rejected';
@@ -7583,8 +7593,9 @@ async function bsScanOne(cfg, trigger) {
           await client.query(
             `INSERT INTO billable_queue (cid, amount, publisher_sub, lead_id, status, raw) VALUES ($1,$2,$3,$4,'pending',$5::jsonb)`,
             [r.phone || lead.id, cfg.amount, lead.publisher_sub, lead.id, JSON.stringify({ source: 'buyer_sheet', buyer_key: cfg.key, buyer: cfg.buyer, vertical: cfg.vertical, sheet_status: r.status, sheet_notes: r.notes, sheet_date: r.date, invoice: r.invoice, scanned_at: new Date().toISOString(), trigger })]);
-          // the portal can show "Signed" now; payout stays hidden until approved (billable flag)
-          await client.query(`UPDATE leads SET buyer_status='Signed', notes=$1, raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$2::text,'status','Signed','note',$1::text,'synced_at',NOW())) WHERE id=$3`, [cls.note, cfg.key, lead.id]);
+          // Nothing says "Signed" anywhere until Kyler approves it. Until then the lead
+          // reads Pending on the portal, with no reason that reveals the buyer's report.
+          await client.query(`UPDATE leads SET buyer_status='Pending', notes='Pending — under review', raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$1::text,'status','Pending','note','Pending — under review','sheet_status',$2::text,'awaiting_approval',true,'synced_at',NOW())) WHERE id=$3::int`, [cfg.key, r.status, lead.id]);
           rep.queued++;
           console.log(`[Buyer Sheets] $ ${cfg.label} | lead ${lead.id} ${r.name} | ${r.status} -> queued for approval ($${cfg.amount})`);
           continue;
