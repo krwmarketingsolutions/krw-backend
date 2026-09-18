@@ -503,7 +503,10 @@ app.get('/leads/feed', requireKey, async (req, res) => {
     const r = await pool.query(
       `SELECT id,received_at,campaign,first_name,last_name,email,phone,state,
               status,zapier_status,buyer_intake_id,buyer_error,buyer_status,notes,publisher_sub,billable,revenue,
-              raw->>'buyer_name' as buyer_name
+              raw->>'buyer_name' as buyer_name,
+              COALESCE(NULLIF(raw->>'case_description',''), NULLIF(raw->>'summary',''), NULLIF(raw->>'description','')) as case_description,
+              COALESCE(NULLIF(raw->>'injury',''), raw->>'physical_injury') as injury,
+              raw->>'incident_date' as incident_date, raw->>'county' as county
        FROM leads ${wc} ORDER BY received_at DESC LIMIT $${i}`, params);
     res.json({ ok:true, count:r.rows.length, leads:r.rows });
   } catch(err) { res.status(500).json({ error:err.message }); }
@@ -7285,6 +7288,7 @@ function pbLeadView(l, payoutRate) {
     first_name: l.first_name, last_name: l.last_name, phone: l.phone, email: l.email, state: l.state,
     zip: raw.zip_code || raw.zip || null, incident_date: raw.incident_date || null,
     injury: raw.injury || raw.physical_injury || null, at_fault: raw.at_fault || null, have_attorney: raw.have_attorney || null,
+    case_description: raw.case_description || raw.summary || raw.description || null, county: raw.county || null,
     submitted_status: st, response, notes: l.notes || l.buyer_error || null,
     updated_at: dispo.synced_at || null, billable: !!l.billable,
     payout: l.billable ? parseFloat(payoutRate || 0) : 0,
