@@ -530,6 +530,19 @@ app.post('/leads/:id/billable', requireKey, async (req, res) => {
 });
 
 
+// Full single lead incl. the raw payload the publisher posted - admin dashboard drawer only.
+// The feed stays light (5,000 rows); the detail is fetched one lead at a time on open.
+app.get('/leads/detail/:id', requireKey, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ ok: false, error: 'Bad lead id' });
+  try {
+    const r = await pool.query('SELECT * FROM leads WHERE id=$1', [id]);
+    if (!r.rows.length) return res.status(404).json({ ok: false, error: 'Lead not found' });
+    res.json({ ok: true, lead: r.rows[0] });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.get('/leads/export/:campaign', requireKey, async (req, res) => {
   try {
     const { campaign } = req.params;
