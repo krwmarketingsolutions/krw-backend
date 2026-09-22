@@ -6779,6 +6779,101 @@ app.post('/leads/forward-to-mva-intake', async (req, res) => {
   }
 });
 // ─── END MVA-INTAKE FORWARDING ────────────────────────────────────────────────
+// ─── MVA-INTAKE — LA-HI MVA line (Sep 22) ────────────────────────────────────
+// Publisher LA-HI-MVA posts here. Leads go ONLY to the two intake buyers,
+// CH-Intake and LT-Intake, split 50/50 on today's accepted count (shared with
+// the NYC ladder so the buyers see one even split). Never NLD, never 003.
+// A state outside the intake list is stored and HELD, not forwarded, so it
+// shows on the dashboard and the publisher's portal as not delivered.
+const MVA_INTAKE_PUB    = 'LA-HI-MVA';
+const MVA_INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','CO','MO','NE','OK','TN'];
+
+app.post('/leads/mva-intake', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29', process.env.LEAD_API_KEY || 'krwleads2026secure'];
+  if (validKeys.indexOf(key) < 0) return res.status(401).json({ ok: false, error: 'Invalid API key' });
+
+  const b = req.body || {};
+  const leadState = (b.state || '').toUpperCase().trim();
+  if (b.ip_address == null || b.ip_address === '') b.ip_address = '8.8.8.8';
+  if ((b.injury == null || b.injury === '') && b.physical_injury) b.injury = b.physical_injury;
+
+  const missing = [];
+  ['first_name','last_name','phone','email','state','incident_date','injury','at_fault','have_attorney'].forEach(f => { if (b[f] == null || String(b[f]).trim() === '') missing.push(f); });
+  if ((b.zip_code == null || b.zip_code === '') && (b.zip == null || b.zip === '')) missing.push('zip_code');
+  if ((b.trustedform_cert_url == null || b.trustedform_cert_url === '') && (b.jornaya_leadid == null || b.jornaya_leadid === '')) missing.push('trustedform_cert_url or jornaya_leadid');
+  if (missing.length) return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  if (String(b.have_attorney).toLowerCase() === 'yes') return res.status(400).json({ ok: false, result: 'rejected', error: 'Lead already represented by an attorney' });
+
+  const client = await pool.connect();
+  let leadId = null;
+  try {
+    const ins = await client.query(
+      `INSERT INTO leads (campaign, vertical, first_name, last_name, phone, email, publisher_sub, ip_address, state, zip, status, raw, received_at)
+       VALUES ('mva-intake','MVA',$1,$2,$3,$4,$5,$6,$7,$8,'pending',$9::jsonb,NOW()) RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email, MVA_INTAKE_PUB, b.ip_address, leadState, b.zip_code || b.zip || null, JSON.stringify(b)]);
+    leadId = ins.rows[0].id;
+  } catch (dbErr) {
+    console.error('[MVA-Intake] DB insert error:', dbErr.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  } finally { client.release(); }
+
+  const takesCO = process.env.INTAKE_TAKES_CO === 'true';
+  if (MVA_INTAKE_STATES.indexOf(leadState) < 0 || (leadState === 'CO' && takesCO === false)) {
+    const why = 'State ' + leadState + ' is not accepted by the intake buyers';
+    await pool.query("UPDATE leads SET status='received', buyer_error=$1, billable=false WHERE id=$2", [why, leadId]);
+    console.log(`[MVA-Intake] held ${b.first_name} ${b.last_name} | ${leadState} | ${why}`);
+    return res.json({ ok: false, result: 'held', message: why, krw_id: leadId });
+  }
+
+  // 50/50: fewest accepted today goes first; tie goes to whoever did NOT get the last one
+  const cnt = await pool.query(
+    `SELECT raw->>'buyer_name' AS buyer, COUNT(*)::int AS n, MAX(received_at) AS last_at FROM leads
+     WHERE campaign IN ('mva-nyc-split','mva-intake') AND status='forwarded'
+       AND (received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date
+     GROUP BY 1`);
+  const today = {}, lastAt = {};
+  cnt.rows.forEach(r => { today[r.buyer] = r.n; lastAt[r.buyer] = r.last_at ? new Date(r.last_at).getTime() : 0; });
+  const ladder = [{ name: 'CH-Intake', enabled: true }, { name: 'LT-Intake', enabled: Boolean(process.env.LT_INTAKE_PASS) }]
+    .filter(x => x.enabled)
+    .sort((a, c) => ((today[a.name] || 0) - (today[c.name] || 0)) || ((lastAt[a.name] || 0) - (lastAt[c.name] || 0)));
+
+  const strip = o => { Object.keys(o).forEach(k => { if (o[k] === undefined || o[k] === null || o[k] === '') delete o[k]; }); return o; };
+  const senders = {
+    'CH-Intake': async () => {
+      const p = strip({ first_name: b.first_name, last_name: b.last_name, phone: String(b.phone).replace(/\D/g, ''), email: b.email,
+        zip_code: b.zip_code || b.zip, state: leadState, incident_date: b.incident_date, injury: b.injury, at_fault: b.at_fault,
+        have_attorney: b.have_attorney, consent_url: b.trustedform_cert_url || b.jornaya_leadid, consent_timestamp: new Date().toISOString() });
+      const r = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4d50uja/', p);
+      let out; try { out = JSON.parse(r.body); } catch (e) { out = { status: r.status, raw: r.body }; }
+      return { result: out, accepted: out.status === 'success' || (r.status >= 200 && r.status < 300) };
+    },
+    'LT-Intake': async () => { const r = await sendToLtIntake(b, leadState, leadId); return { result: r.result, accepted: r.accepted }; },
+  };
+
+  const attempts = []; let buyerName = null, result = {}, accepted = false;
+  for (const buyer of ladder) {
+    try {
+      const out = await senders[buyer.name]();
+      attempts.push({ buyer: buyer.name, accepted: out.accepted, response: out.result });
+      buyerName = buyer.name; result = out.result;
+      if (out.accepted) { accepted = true; break; }
+    } catch (err) {
+      attempts.push({ buyer: buyer.name, accepted: false, error: err.message });
+      buyerName = buyer.name; result = { status: 'error', message: err.message };
+    }
+  }
+  await pool.query(
+    `UPDATE leads SET status=$1, buyer_status=$2, buyer_response=$3::jsonb, billable=false, revenue=0,
+       raw = COALESCE(raw,'{}'::jsonb) || $4::jsonb WHERE id=$5`,
+    [accepted ? 'forwarded' : (ladder.length ? 'buyer_rejected' : 'received'), accepted ? 'Accepted' : 'Rejected',
+     JSON.stringify({ final: result, attempts }), JSON.stringify({ buyer_name: buyerName, routing_attempts: attempts.map(a => a.buyer + (a.accepted ? ':accepted' : ':rejected')) }), leadId]);
+  console.log(`[MVA-Intake] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} | -> ${buyerName || 'nobody'}`);
+  return res.json({ ok: accepted, result: accepted ? 'success' : 'rejected', message: accepted ? 'Lead accepted' : (result.message || 'Lead rejected'),
+    buyer: buyerName, krw_id: leadId });
+});
+// ─── END MVA-INTAKE (LA-HI) ──────────────────────────────────────────────────
+
 
 // ─── RINGFUEL CALL-COMPLETION WEBHOOK — SSDI 1696 (Filed) ──────────────────
 // Fires once a real call hangs up, sending CID/duration/timestamp. This is
