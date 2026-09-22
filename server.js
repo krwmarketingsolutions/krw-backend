@@ -443,10 +443,10 @@ app.get('/leads/summary', requireKey, async (req, res) => {
     const weekAgo    = new Date(Date.now()-7*86400000).toISOString().split('T')[0];
     const monthStart = new Date().toISOString().slice(0,7)+'-01';
     const [todayQ,weekQ,monthQ,statusQ] = await Promise.all([
-      pool.query(`SELECT campaign, COUNT(*) as count FROM leads WHERE (received_at AT TIME ZONE 'America/New_York')::date=(NOW() AT TIME ZONE 'America/New_York')::date AND COALESCE(vertical,'') != 'SSDI' GROUP BY campaign`),
-      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND COALESCE(vertical,'') != 'SSDI'`,[weekAgo]),
-      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND COALESCE(vertical,'') != 'SSDI'`,[monthStart]),
-      pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE COALESCE(vertical,'') != 'SSDI' GROUP BY status ORDER BY count DESC`),
+      pool.query(`SELECT campaign, COUNT(*) as count FROM leads WHERE (received_at AT TIME ZONE 'America/New_York')::date=(NOW() AT TIME ZONE 'America/New_York')::date AND COALESCE(vertical,'') != 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true' GROUP BY campaign`),
+      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND COALESCE(vertical,'') != 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true'`,[weekAgo]),
+      pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$1 AND COALESCE(vertical,'') != 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true'`,[monthStart]),
+      pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE COALESCE(vertical,'') != 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true' GROUP BY status ORDER BY count DESC`),
     ]);
     res.json({ ok:true, today:todayQ.rows, week:parseInt(weekQ.rows[0]?.count||0), month:parseInt(monthQ.rows[0]?.count||0), by_status:statusQ.rows });
   } catch(err) { res.status(500).json({ error:err.message }); }
@@ -473,7 +473,7 @@ app.get('/leads/feed', requireKey, async (req, res) => {
       // the SSDI tab only. Filtered by vertical, not campaign name, so any
       // future SSDI campaign is automatically covered without needing a
       // separate code change each time one is added.
-      where.push(`COALESCE(vertical,'') != 'SSDI'`);
+      where.push(`COALESCE(vertical,'') != 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true'`);
     }
     if (status)   { where.push(`status=$${i++}`);   params.push(status); }
 
@@ -495,6 +495,7 @@ app.get('/leads/feed', requireKey, async (req, res) => {
       params.push(pub);
     }
 
+    if (req.query.include_excluded == null) where.push("COALESCE(raw->>'excluded','') <> 'true'");
     if (days && parseInt(days) < 9999) {
       where.push(`received_at >= NOW() - INTERVAL '${parseInt(days)} days'`);
     }
@@ -6269,7 +6270,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
               raw->>'buyer_name' as buyer_name
        FROM leads
        WHERE campaign IN ('mva-funnel','mva-nyc-split')
-         AND publisher_sub = ANY($1::text[])
+         AND publisher_sub = ANY($1::text[]) AND COALESCE(raw->>'excluded','') <> 'true'
          AND ${sinceClause}`,
       [Object.keys(mvaPubs)]
     );
