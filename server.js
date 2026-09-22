@@ -7322,7 +7322,7 @@ app.get('/portal/leads', requireKey, async (req, res) => {
     const dayClause = days < 9999 ? `AND received_at >= NOW() - INTERVAL '${days} days'` : '';
     const r = await pool.query(
       `SELECT id, received_at, campaign, first_name, last_name, email, phone, state, status, buyer_status, buyer_error, notes, billable, raw
-       FROM leads WHERE publisher_sub = ANY($1::text[]) AND COALESCE(vertical,'') <> 'SSDI' ${dayClause}
+       FROM leads WHERE publisher_sub = ANY($1::text[]) AND COALESCE(vertical,'') <> 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true' ${dayClause}
        ORDER BY received_at DESC LIMIT 5000`, [pub._pub_ids]);
     res.json({ ok: true, count: r.rows.length, payout_rate: parseFloat(pub.payout_rate || 0), leads: r.rows.map(l => pbLeadView(l, pub.payout_rate)) });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
@@ -7430,7 +7430,7 @@ async function pbPoll() {
       rows = await pool.query(
         `SELECT id, received_at, campaign, first_name, last_name, email, phone, state, status, buyer_status, buyer_error, notes, billable, raw
          FROM leads
-         WHERE publisher_sub = $1 AND COALESCE(vertical,'') <> 'SSDI'
+         WHERE publisher_sub = $1 AND COALESCE(vertical,'') <> 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true'
            AND received_at >= COALESCE($2::timestamptz, NOW())
            AND COALESCE(raw->'pub_postback'->>'key','') IS DISTINCT FROM
                (COALESCE(status,'') || '|' || COALESCE(buyer_status,'') || '|' || COALESCE(raw->'buyer_disposition'->>'synced_at',''))
