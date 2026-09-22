@@ -7578,7 +7578,7 @@ setInterval(() => pbPoll().catch(e => console.error('[Portal Postbacks] poll err
 const BS_SCAN_TIMES = ['08:00', '11:00', '13:00', '15:00', '21:00'];   // America/New_York, Mon-Fri
 const BS_BILLABLE = /\b(signed|retained|retainer|billable|converted|conversion|accepted by firm|hired|closed won)\b/i;
 const BS_REJECT   = /\b(reject\w*|not qualified|unqualified|dq|disqualif\w*|unresponsive|wrong number|stop|dnc|duplicate|dupe|not viable|no injury|no insurance|out of state|outside|declin\w*|dead|closed lost|lost|returned|opted out|not interested|no contact|never (made|answered)|unable to reach)\b/i;
-const BS_OPEN     = /\b(chase|outreach|attempt|contacted|in progress|working|scheduled|pending|under review|reviewing|callback|call back|open|waiting)\b|answering machine|voice ?mail|left (message|vm)|no answer|\bbusy\b|\bringing\b/i;
+const BS_OPEN     = /\b(chase|outreach|attempt|contacted|in progress|working|scheduled|pending|under review|reviewing|callback|call back|open|waiting)\b|answering machine|voice ?mail|left (message|vm)|no answer|\bbusy\b|\bringing\b|^new$/i;
 const BS_NOT_BILLABLE_FLAG = /^(no|n|false|not billable|non-billable)$/i;
 
 // One entry per sheet/tab. tab null = first tab that has a phone column and a
