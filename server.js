@@ -7463,11 +7463,11 @@ function pbLeadView(l, payoutRate) {
   // is "Not delivered".
   let response = 'Delivered';
   if ((bs === 'Signed' || bs === 'Retained') && l.billable) response = 'Signed';
-  else if (bs === 'Signed' || bs === 'Retained') response = 'Pending';   // reported by buyer, not yet approved by Kyler
+  else if (bs === 'Signed' || bs === 'Retained') response = 'In outreach';   // reported by buyer, not yet approved by Kyler
   else if (bs === 'Rejected' || bs === 'Returned' || st === 'buyer_rejected') response = 'Rejected';
   else if (bs === 'Test') response = 'Test';
   else if (/^open/i.test(bs)) response = 'In outreach';
-  else if (/^pending/i.test(bs)) response = 'Pending';
+  else if (/^pending/i.test(bs)) response = 'In outreach';
   else if (/^archived/i.test(bs)) response = 'Not worked';
   else if (st === 'rejected' || st === 'error') response = 'Not delivered';
   else response = 'Delivered';
@@ -7503,11 +7503,31 @@ app.get('/portal/leads', requireKey, async (req, res) => {
     const dayClause = days < 9999 ? `AND received_at >= NOW() - INTERVAL '${days} days'` : '';
     const r = await pool.query(
       `SELECT id, received_at, campaign, first_name, last_name, email, phone, state, status, buyer_status, buyer_error, notes, billable, raw
-       FROM leads WHERE publisher_sub = ANY($1::text[]) AND COALESCE(vertical,'') <> 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true' ${dayClause}
+       FROM leads WHERE publisher_sub = ANY($1::text[]) AND COALESCE(vertical,'') <> 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true' ${req.query.show_hidden ? '' : "AND COALESCE(raw->>'pub_hidden','') <> 'true'"} ${dayClause}
        ORDER BY received_at DESC LIMIT 5000`, [pub._pub_ids]);
     res.json({ ok: true, count: r.rows.length, payout_rate: parseFloat(pub.payout_rate || 0), leads: r.rows.map(l => pbLeadView(l, pub.payout_rate)) });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
+
+// 1b. Publisher removes a lead from their own portal (hidden, not deleted - admin still sees it)
+async function pbSetHidden(req, res, hidden) {
+  const b = req.body || {};
+  const pub = await pbResolvePublisher(String(b.portal_id || '').trim()).catch(() => null);
+  if (pub == null) return res.status(401).json({ ok: false, error: 'Publisher not found' });
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ ok: false, error: 'Bad lead id' });
+  try {
+    const r = await pool.query(
+      `UPDATE leads SET raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('pub_hidden', $1::boolean, 'pub_hidden_at', NOW())
+       WHERE id = $2 AND publisher_sub = ANY($3::text[]) RETURNING id`,
+      [hidden, id, pub._pub_ids]);
+    if (r.rows.length === 0) return res.status(404).json({ ok: false, error: 'Lead not found on this portal' });
+    console.log(`[Portal] ${pub.pub_id} ${hidden ? 'removed' : 'restored'} lead ${id} on their portal`);
+    res.json({ ok: true, id: id, hidden: hidden });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+}
+app.post('/portal/leads/:id/hide',   requireKey, (req, res) => pbSetHidden(req, res, true));
+app.post('/portal/leads/:id/unhide', requireKey, (req, res) => pbSetHidden(req, res, false));
 
 // 2. Postback settings
 function pbSettingsView(pub) {
@@ -7747,7 +7767,7 @@ function bsClassify(cfg, r) {
   if (!st) return null;   // blank status = nothing to say yet
   if (BS_REJECT.test(st) || BS_REJECT.test(notes)) return { kind: 'rejected', status: 'Rejected', note: 'Rejected — ' + (notes || st).replace(/^rejected\s*[-–:]?\s*/i, '') };
   if (BS_OPEN.test(st) || BS_OPEN.test(notes)) return { kind: 'open', status: 'Open — in outreach', note: 'Open — ' + (notes || st) };
-  return { kind: 'other', status: 'Pending', note: 'Pending — ' + (notes || st) };
+  return { kind: 'other', status: 'Pending', note: 'In outreach — ' + (notes || st) };
 }
 
 // ── scan ──
@@ -7809,7 +7829,7 @@ async function bsScanOne(cfg, trigger) {
             [r.phone || lead.id, cfg.amount, lead.publisher_sub, lead.id, JSON.stringify({ source: 'buyer_sheet', buyer_key: cfg.key, buyer: cfg.buyer, vertical: cfg.vertical, sheet_status: r.status, sheet_notes: r.notes, sheet_date: r.date, invoice: r.invoice, scanned_at: new Date().toISOString(), trigger })]);
           // Nothing says "Signed" anywhere until Kyler approves it. Until then the lead
           // reads Pending on the portal, with no reason that reveals the buyer's report.
-          await client.query(`UPDATE leads SET buyer_status='Pending', notes='Pending', raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$1::text,'status','Pending','note','Pending','sheet_status',$2::text,'awaiting_approval',true,'synced_at',NOW())) WHERE id=$3::int`, [cfg.key, r.status, lead.id]);
+          await client.query(`UPDATE leads SET buyer_status='Pending', notes='In outreach', raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$1::text,'status','Pending','note','In outreach','sheet_status',$2::text,'awaiting_approval',true,'synced_at',NOW())) WHERE id=$3::int`, [cfg.key, r.status, lead.id]);
           rep.queued++;
           console.log(`[Buyer Sheets] $ ${cfg.label} | lead ${lead.id} ${r.name} | ${r.status} -> queued for approval ($${cfg.amount})`);
           continue;
