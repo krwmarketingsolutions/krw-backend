@@ -6826,6 +6826,23 @@ app.post('/leads/mva-intake', async (req, res) => {
     return res.json({ ok: false, result: 'held', message: why, krw_id: leadId });
   }
 
+  // Daily cap for this line (Kyler, Sep 23): counts every MVA lead LA-HI sent today that was routed
+  // (state-held leads don't count). Past the cap the lead is stored and held so it still shows on the
+  // dashboard and on their portal as not delivered.
+  const MVA_INTAKE_DAILY_CAP = parseInt(process.env.MVA_INTAKE_DAILY_CAP || '10', 10);
+  const capRes = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM leads
+     WHERE campaign='mva-intake' AND publisher_sub=$1 AND status IN ('forwarded','buyer_rejected','pending')
+       AND id <> $2
+       AND (received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date`,
+    [MVA_INTAKE_PUB, leadId]);
+  if (capRes.rows[0].n >= MVA_INTAKE_DAILY_CAP) {
+    const why = 'Daily cap of ' + MVA_INTAKE_DAILY_CAP + ' MVA leads reached for today';
+    await pool.query("UPDATE leads SET status='received', buyer_error=$1, billable=false WHERE id=$2", [why, leadId]);
+    console.log(`[MVA-Intake] capped ${b.first_name} ${b.last_name} | ${leadState} | ${why}`);
+    return res.json({ ok: false, result: 'held', message: why, krw_id: leadId });
+  }
+
   // 50/50: fewest accepted today goes first; tie goes to whoever did NOT get the last one
   const cnt = await pool.query(
     `SELECT raw->>'buyer_name' AS buyer, COUNT(*)::int AS n, MAX(received_at) AS last_at FROM leads
