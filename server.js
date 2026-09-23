@@ -7392,13 +7392,18 @@ function pbLeadView(l, payoutRate) {
   else response = 'Delivered';
   const raw = l.raw || {};
   const dispo = raw.buyer_disposition || {};
+  var camp = String(l.campaign || '').toLowerCase();
+  var vertical = /ride|lyft|uber/.test(camp) ? 'Rideshare' : /roblox/.test(camp) ? 'Roblox' : /mva/.test(camp) ? 'MVA' : (l.vertical || 'Other');
+  // never surface an internal error message to a publisher
+  var safeNotes = l.notes || l.buyer_error || null;
+  if (safeNotes && /column .* does not exist|relation .* does not exist|syntax error|ECONNREFUSED|timeout/i.test(safeNotes)) safeNotes = 'Delivery error on our side - being reviewed';
   return {
-    id: l.id, received_at: l.received_at, campaign: l.campaign,
+    id: l.id, received_at: l.received_at, campaign: l.campaign, vertical: vertical,
     first_name: l.first_name, last_name: l.last_name, phone: l.phone, email: l.email, state: l.state,
     zip: raw.zip_code || raw.zip || null, incident_date: raw.incident_date || null,
     injury: raw.injury || raw.physical_injury || null, at_fault: raw.at_fault || null, have_attorney: raw.have_attorney || null,
     case_description: raw.case_description || raw.summary || raw.description || null, county: raw.county || null,
-    submitted_status: st, response, notes: l.notes || l.buyer_error || null,
+    submitted_status: st, response, notes: safeNotes,
     updated_at: dispo.synced_at || null, billable: !!l.billable,
     payout: l.billable ? parseFloat(payoutRate || 0) : 0,
     trustedform: raw.trustedform_cert_url || null,
