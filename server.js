@@ -7648,7 +7648,7 @@ function bsMapHeader(rows) {
     if ((phone < 0 && vendor < 0) || status < 0) continue;
     return { headerRow: i, phone, status, vendor,
       date: find(/^(DATE|SENT|SUBMISSION DATE|DATE SENT|DATE SUBMITTED)$/, /DATE/), first: find(/^FIRST/, /FIRST/), last: find(/^LAST/, /LAST/), name: find(/^(NAME|FULL NAME|CLIENT|LEAD NAME|LEAD)$/),
-      notes: find(/^STAGE UPDATES$/, /^STATUS NOTES$/, /^REASON$/, /^NOTES?$/, /^COMMENTS?$/, /STAGE|REASON|NOTE|COMMENT/), invoice: find(/INVOICE/), billable: find(/^BILLABLE$/), signed: find(/^SIGNED$/) };
+      notes: find(/^STAGE UPDATES$/, /^STATUS NOTES$/, /^REASON$/, /^NOTES?$/, /^COMMENTS?$/, /STAGE|REASON|NOTE|COMMENT/), calls: find(/^CALLED_COUNT$/), lastcall: find(/^LAST_LOCAL_CALL_TIME$/), invoice: find(/INVOICE/), billable: find(/^BILLABLE$/), signed: find(/^SIGNED$/) };
   }
   return null;
 }
@@ -7684,7 +7684,7 @@ async function bsScanOne(cfg, trigger) {
         const signedVal = map.signed > -1 ? bsNorm(r[map.signed]) : '';
         const signedYes = signedVal && !/^(no|n|-|false|0|not signed)$/i.test(signedVal);
         return {
-          phone: map.phone > -1 ? bsPhone(r[map.phone]) : null, status: bsNorm(r[map.status]), notes: map.notes > -1 ? bsNorm(r[map.notes]) : '',
+          phone: map.phone > -1 ? bsPhone(r[map.phone]) : null, status: bsNorm(r[map.status]), notes: (function(){ var n = map.notes > -1 ? bsNorm(r[map.notes]) : ''; if (/cert\.trustedform\.com|^Incident \d/i.test(n)) n = ''; var cc = map.calls > -1 ? bsNorm(r[map.calls]) : '', lc = map.lastcall > -1 ? bsNorm(r[map.lastcall]) : ''; if (n === '' && cc !== '') n = 'called ' + cc + ' time' + (cc === '1' ? '' : 's') + (lc !== '' ? ', last ' + lc : ''); return n; })(),
           date: map.date > -1 ? bsParseDate(r[map.date]) : null, invoice: map.invoice > -1 ? bsNorm(r[map.invoice]) : '',
           billableFlag: map.billable > -1 && bsNorm(r[map.billable]) ? bsNorm(r[map.billable]) : (signedYes ? 'yes' : ''), vendor: map.vendor > -1 ? bsNorm(r[map.vendor]) : '',
           name: map.name > -1 ? bsNorm(r[map.name]) : [bsNorm(r[map.first]), bsNorm(r[map.last])].filter(Boolean).join(' '),
