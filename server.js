@@ -6891,6 +6891,70 @@ app.post('/leads/mva-intake', async (req, res) => {
 });
 // ─── END MVA-INTAKE (LA-HI) ──────────────────────────────────────────────────
 
+// ─── MVA-LEADBLOOM2 — LT-Intake only (Sep 23) ────────────────────────────────
+// Publisher KRW-LEADBLOOM2-MVA posts here. Every lead goes to LT-Intake and nowhere
+// else; if LT rejects it, it is marked rejected (no fallback buyer). States outside
+// the intake list are stored and HELD. Requires LT_INTAKE_PASS on Railway.
+const LB2_PUB    = 'KRW-LEADBLOOM2-MVA';
+const LB2_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','CO','MO','NE','OK','TN'];
+
+app.post('/leads/mva-leadbloom2', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29', process.env.LEAD_API_KEY || 'krwleads2026secure'];
+  if (validKeys.indexOf(key) < 0) return res.status(401).json({ ok: false, error: 'Invalid API key' });
+
+  const b = req.body || {};
+  const leadState = (b.state || '').toUpperCase().trim();
+  if (b.ip_address == null || b.ip_address === '') b.ip_address = '8.8.8.8';
+  if ((b.injury == null || b.injury === '') && b.physical_injury) b.injury = b.physical_injury;
+
+  const missing = [];
+  ['first_name','last_name','phone','email','state','incident_date','injury','at_fault','have_attorney'].forEach(f => { if (b[f] == null || String(b[f]).trim() === '') missing.push(f); });
+  if ((b.zip_code == null || b.zip_code === '') && (b.zip == null || b.zip === '')) missing.push('zip_code');
+  if ((b.trustedform_cert_url == null || b.trustedform_cert_url === '') && (b.jornaya_leadid == null || b.jornaya_leadid === '')) missing.push('trustedform_cert_url or jornaya_leadid');
+  if (missing.length) return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+  if (String(b.have_attorney).toLowerCase() === 'yes') return res.status(400).json({ ok: false, result: 'rejected', error: 'Lead already represented by an attorney' });
+
+  let leadId = null;
+  try {
+    const ins = await pool.query(
+      `INSERT INTO leads (campaign, vertical, first_name, last_name, phone, email, publisher_sub, ip_address, state, zip, status, raw, received_at)
+       VALUES ('mva-leadbloom2','MVA',$1,$2,$3,$4,$5,$6,$7,$8,'pending',$9::jsonb,NOW()) RETURNING id`,
+      [b.first_name, b.last_name, b.phone, b.email, LB2_PUB, b.ip_address, leadState, b.zip_code || b.zip || null, JSON.stringify(b)]);
+    leadId = ins.rows[0].id;
+  } catch (dbErr) {
+    console.error('[Leadbloom2] DB insert error:', dbErr.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  }
+
+  const takesCO = process.env.INTAKE_TAKES_CO === 'true';
+  if (LB2_STATES.indexOf(leadState) < 0 || (leadState === 'CO' && takesCO === false)) {
+    const why = 'State ' + leadState + ' is not accepted on this line';
+    await pool.query("UPDATE leads SET status='received', buyer_error=$1, billable=false WHERE id=$2", [why, leadId]);
+    console.log(`[Leadbloom2] held ${b.first_name} ${b.last_name} | ${leadState} | ${why}`);
+    return res.json({ ok: false, result: 'held', message: why, krw_id: leadId });
+  }
+  if (Boolean(process.env.LT_INTAKE_PASS) === false) {
+    const why = 'Buyer not configured (LT_INTAKE_PASS)';
+    await pool.query("UPDATE leads SET status='received', buyer_error=$1 WHERE id=$2", [why, leadId]);
+    return res.json({ ok: false, result: 'held', message: why, krw_id: leadId });
+  }
+
+  let accepted = false, result = {};
+  try {
+    const r = await sendToLtIntake(b, leadState, leadId);
+    accepted = r.accepted; result = r.result;
+  } catch (err) { result = { status: 'error', message: err.message }; }
+  await pool.query(
+    `UPDATE leads SET status=$1, buyer_status=$2, buyer_response=$3::jsonb, billable=false, revenue=0,
+       raw = COALESCE(raw,'{}'::jsonb) || $4::jsonb WHERE id=$5`,
+    [accepted ? 'forwarded' : 'buyer_rejected', accepted ? 'Accepted' : 'Rejected', JSON.stringify({ final: result }),
+     JSON.stringify({ buyer_name: 'LT-Intake', routing_attempts: ['LT-Intake:' + (accepted ? 'accepted' : 'rejected')] }), leadId]);
+  console.log(`[Leadbloom2] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} | -> LT-Intake`);
+  return res.json({ ok: accepted, result: accepted ? 'success' : 'rejected', message: accepted ? 'Lead accepted' : (result.message || 'Lead rejected'), buyer: 'LT-Intake', krw_id: leadId });
+});
+// ─── END MVA-LEADBLOOM2 ──────────────────────────────────────────────────────
+
 
 // ─── RINGFUEL CALL-COMPLETION WEBHOOK — SSDI 1696 (Filed) ──────────────────
 // Fires once a real call hangs up, sending CID/duration/timestamp. This is
