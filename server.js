@@ -7728,7 +7728,7 @@ async function bsScanOne(cfg, trigger) {
             [r.phone || lead.id, cfg.amount, lead.publisher_sub, lead.id, JSON.stringify({ source: 'buyer_sheet', buyer_key: cfg.key, buyer: cfg.buyer, vertical: cfg.vertical, sheet_status: r.status, sheet_notes: r.notes, sheet_date: r.date, invoice: r.invoice, scanned_at: new Date().toISOString(), trigger })]);
           // Nothing says "Signed" anywhere until Kyler approves it. Until then the lead
           // reads Pending on the portal, with no reason that reveals the buyer's report.
-          await client.query(`UPDATE leads SET buyer_status='Pending', notes='Pending — under review', raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$1::text,'status','Pending','note','Pending — under review','sheet_status',$2::text,'awaiting_approval',true,'synced_at',NOW())) WHERE id=$3::int`, [cfg.key, r.status, lead.id]);
+          await client.query(`UPDATE leads SET buyer_status='Pending', notes='Pending', raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$1::text,'status','Pending','note','Pending','sheet_status',$2::text,'awaiting_approval',true,'synced_at',NOW())) WHERE id=$3::int`, [cfg.key, r.status, lead.id]);
           rep.queued++;
           console.log(`[Buyer Sheets] $ ${cfg.label} | lead ${lead.id} ${r.name} | ${r.status} -> queued for approval ($${cfg.amount})`);
           continue;
