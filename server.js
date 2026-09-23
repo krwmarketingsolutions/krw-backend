@@ -981,7 +981,7 @@ app.get('/publishers/:pub_id/calls', requireKey, async (req, res) => {
                         payout_amount, campaign, received_at
                  FROM calls
                  WHERE publisher_sub = ANY($1::text[])
-                   AND source_system IN ('partner','google_sheet')`;
+                   AND source_system IN ('partner','google_sheet','trackdrive_webhook','j_signed_postback','ringfuel_webhook','sheet_import')`;
     if (daysInt < 9999) query += ` AND received_at >= NOW() - INTERVAL '${daysInt} days'`;
     if (billable_only === 'true') query += ' AND billable=true';
     query += ' ORDER BY received_at DESC LIMIT 500';
