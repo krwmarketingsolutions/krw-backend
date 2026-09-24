@@ -2086,7 +2086,7 @@ app.post('/leads/roblox-chad', async (req, res) => {
   if (!b.phone)      missing.push('phone');
   if (!b.email)      missing.push('email');
   if (missing.length) {
-    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+    { const rid = await logRejectedPost('roblox-chad', 'LA-HI-ROBLOX', b, 'Missing: ' + missing.join(', ')); return res.status(400).json({ ok: false, error: 'Missing required fields', missing, krw_id: rid }); }
   }
 
   // Qualification gate: "Already signed with an attorney (Must be NO)".
@@ -2200,7 +2200,7 @@ app.post('/leads/rideshare-chad', async (req, res) => {
   if (!b.phone)      missing.push('phone');
   if (!b.email)      missing.push('email');
   if (missing.length) {
-    return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+    { const rid = await logRejectedPost('rideshare-chad', 'LA-HI-RIDESHARE', b, 'Missing: ' + missing.join(', ')); return res.status(400).json({ ok: false, error: 'Missing required fields', missing, krw_id: rid }); }
   }
 
   // Qualification gate: "Confirmation lead is not already represented by an
@@ -6802,6 +6802,20 @@ app.post('/leads/forward-to-mva-intake', async (req, res) => {
   }
 });
 // ─── END MVA-INTAKE FORWARDING ────────────────────────────────────────────────
+// Store a post that was rejected before routing, so it is visible (dashboard + publisher portal) with the reason.
+async function logRejectedPost(campaign, pub, b, why) {
+  try {
+    const r = await pool.query(
+      `INSERT INTO leads (campaign, vertical, first_name, last_name, phone, email, publisher_sub, ip_address, state, zip, status, buyer_status, buyer_error, billable, raw, received_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'rejected','Rejected',$11,false,$12::jsonb,NOW()) RETURNING id`,
+      [campaign, /roblox/.test(campaign) ? 'Roblox' : /ride/.test(campaign) ? 'Rideshare' : 'MVA',
+       b.first_name || null, b.last_name || null, b.phone || null, b.email || null, pub, b.ip_address || null,
+       (b.state || '').toUpperCase().trim() || null, b.zip_code || b.zip || null, why, JSON.stringify(b)]);
+    console.log(`[${campaign}] stored rejected post ${r.rows[0].id} (${pub}): ${why}`);
+    return r.rows[0].id;
+  } catch (e) { console.error('[logRejectedPost]', e.message); return null; }
+}
+
 // ─── MVA-INTAKE — LA-HI MVA line (Sep 22) ────────────────────────────────────
 // Publisher LA-HI-MVA posts here. Leads go ONLY to the two intake buyers,
 // CH-Intake and LT-Intake, split 50/50 on today's accepted count (shared with
@@ -6825,8 +6839,8 @@ app.post('/leads/mva-intake', async (req, res) => {
   ['first_name','last_name','phone','email','state','incident_date','injury','at_fault','have_attorney'].forEach(f => { if (b[f] == null || String(b[f]).trim() === '') missing.push(f); });
   if ((b.zip_code == null || b.zip_code === '') && (b.zip == null || b.zip === '')) missing.push('zip_code');
   if ((b.trustedform_cert_url == null || b.trustedform_cert_url === '') && (b.jornaya_leadid == null || b.jornaya_leadid === '')) missing.push('trustedform_cert_url or jornaya_leadid');
-  if (missing.length) return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
-  if (String(b.have_attorney).toLowerCase() === 'yes') return res.status(400).json({ ok: false, result: 'rejected', error: 'Lead already represented by an attorney' });
+  if (missing.length) { const rid = await logRejectedPost('mva-intake', MVA_INTAKE_PUB, b, 'Missing: ' + missing.join(', ')); return res.status(400).json({ ok: false, error: 'Missing required fields', missing, krw_id: rid }); }
+  if (String(b.have_attorney).toLowerCase() === 'yes') { const rid = await logRejectedPost('mva-intake', MVA_INTAKE_PUB, b, 'Already represented by an attorney'); return res.status(400).json({ ok: false, result: 'rejected', error: 'Lead already represented by an attorney', krw_id: rid }); }
 
   const client = await pool.connect();
   let leadId = null;
@@ -6935,8 +6949,8 @@ app.post('/leads/mva-leadbloom2', async (req, res) => {
   ['first_name','last_name','phone','email','state','incident_date','injury','at_fault','have_attorney'].forEach(f => { if (b[f] == null || String(b[f]).trim() === '') missing.push(f); });
   if ((b.zip_code == null || b.zip_code === '') && (b.zip == null || b.zip === '')) missing.push('zip_code');
   if ((b.trustedform_cert_url == null || b.trustedform_cert_url === '') && (b.jornaya_leadid == null || b.jornaya_leadid === '')) missing.push('trustedform_cert_url or jornaya_leadid');
-  if (missing.length) return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
-  if (String(b.have_attorney).toLowerCase() === 'yes') return res.status(400).json({ ok: false, result: 'rejected', error: 'Lead already represented by an attorney' });
+  if (missing.length) { const rid = await logRejectedPost('mva-leadbloom2', LB2_PUB, b, 'Missing: ' + missing.join(', ')); return res.status(400).json({ ok: false, error: 'Missing required fields', missing, krw_id: rid }); }
+  if (String(b.have_attorney).toLowerCase() === 'yes') { const rid = await logRejectedPost('mva-leadbloom2', LB2_PUB, b, 'Already represented by an attorney'); return res.status(400).json({ ok: false, result: 'rejected', error: 'Lead already represented by an attorney', krw_id: rid }); }
 
   let leadId = null;
   try {
