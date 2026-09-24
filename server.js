@@ -3201,8 +3201,8 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const NYC_LADDER = [
     { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
     { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 8,    payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
-    { name: 'MVA-003-LT', priority: 3, group: '003',    cap: null, payout: 1700, enabled: true,                 states: 'ALL' },
+    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
+    { name: 'MVA-003-LT', priority: 3, group: '003',    cap: 8,    payout: 1700, enabled: true,                 states: 'ALL' },
   ];
 
   if (missing.length) {
