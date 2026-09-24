@@ -3201,7 +3201,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const NYC_LADDER = [
     { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
     { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
+    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 8,    payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
     { name: 'MVA-003-LT', priority: 3, group: '003',    cap: 8,    payout: 1700, enabled: true,                 states: 'ALL' },
   ];
 
@@ -3236,6 +3236,29 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
       message: `${leadState} is blocked and not accepted for this campaign.`,
       krw_id: blockedLeadId
     });
+  }
+
+  // Per-state cap (Kyler, Sep 23): Pennsylvania has no buyer but 003, so it is limited to a few a day.
+  // Counted on delivered leads for this campaign today (Eastern). Past the cap the lead is stored and held.
+  const NYC_STATE_CAPS = { PA: parseInt(process.env.NYC_PA_DAILY_CAP || '3', 10) };
+  if (NYC_STATE_CAPS[leadState] != null) {
+    const sc = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM leads WHERE campaign='mva-nyc-split' AND state=$1 AND status IN ('forwarded','buyer_rejected','pending')
+         AND (received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date`, [leadState]);
+    if (sc.rows[0].n >= NYC_STATE_CAPS[leadState]) {
+      const why = 'Daily limit of ' + NYC_STATE_CAPS[leadState] + ' ' + leadState + ' leads reached for today';
+      const cCap = await pool.connect();
+      let capId = null;
+      try {
+        const insCap = await cCap.query(
+          `INSERT INTO leads (campaign, vertical, first_name, last_name, phone, email, publisher_sub, ip_address, state, status, buyer_error, billable, raw, received_at)
+           VALUES ('mva-nyc-split','MVA',$1,$2,$3,$4,'KRW-NYC-MVA',$5,$6,'received',$7,false,$8::jsonb,NOW()) RETURNING id`,
+          [b.first_name, b.last_name, b.phone, b.email, b.ip_address, leadState, why, JSON.stringify(b)]);
+        capId = insCap.rows[0].id;
+      } finally { cCap.release(); }
+      console.log(`[MVA-NYC-SPLIT] held ${b.first_name} ${b.last_name} | ${leadState} | ${why}`);
+      return res.json({ ok: false, result: 'held', message: why, krw_id: capId });
+    }
   }
 
   // Today's ACCEPTED count per buyer (Eastern day), for caps and the 50/50 tiebreak
