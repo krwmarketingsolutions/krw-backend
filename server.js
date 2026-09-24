@@ -1844,7 +1844,7 @@ app.get('/calls/feed', requireKey, async (req, res) => {
   try {
     const daysInt = parseInt(days) >= 9999 ? 36500 : parseInt(days);
     const params = [];
-    let query = `SELECT * FROM calls WHERE source_system IN ('partner','sheet_import','trackdrive_webhook','ringfuel_import','ringfuel_webhook')`;
+    let query = `SELECT * FROM calls WHERE source_system IN ('partner','sheet_import','trackdrive_webhook','ringfuel_import','ringfuel_webhook','j_signed_postback')`;
     if (daysInt < 9999) {
       query += ` AND received_at::timestamptz >= NOW() - INTERVAL '${daysInt} days'`;
     }
@@ -1868,7 +1868,7 @@ app.get('/calls/summary', requireKey, async (req, res) => {
         COUNT(*) FILTER(WHERE call_date=(NOW() AT TIME ZONE 'America/New_York')::date::text OR (DATE(received_at AT TIME ZONE 'America/New_York'))=(NOW() AT TIME ZONE 'America/New_York')::date) AS today,
         COALESCE(SUM(payout_amount) FILTER(WHERE billable=true),0)                     AS total_payout
       FROM calls
-      WHERE source_system IN ('partner','sheet_import','trackdrive_webhook','ringfuel_import','ringfuel_webhook')
+      WHERE source_system IN ('partner','sheet_import','trackdrive_webhook','ringfuel_import','ringfuel_webhook','j_signed_postback')
         AND (source_system='sheet_import' OR received_at >= NOW() - INTERVAL '30 days')
     `);
     res.json({ ok: true, ...r.rows[0] });
