@@ -6993,6 +6993,72 @@ app.post('/leads/mva-leadbloom2', async (req, res) => {
 // ─── END MVA-LEADBLOOM2 ──────────────────────────────────────────────────────
 
 
+// ─── SSDI SIGNED via RINGFUEL (campaign "SSDI - CKX") — Joshua Duran (Sep 24) ─
+// Same ping/hold flow as /leads/ssdi-1696: publisher posts caller + lead data,
+// we ping Ringfuel with KRW's key, return the dial number and TTL. Calls come
+// back through /calls/ringfuel-call-webhook and are attributed by caller ID.
+const RINGFUEL_CKX_API_KEY     = process.env.RINGFUEL_CKX_API_KEY     || 'rfp_5d33e89b3e925b6545e2060389c2f221dbd354fea4215882';
+const RINGFUEL_CKX_CAMPAIGN_ID = process.env.RINGFUEL_CKX_CAMPAIGN_ID || '6656fcbb-2cf9-4185-a7c9-7e97ab7a1892';
+const RINGFUEL_CKX_PUB         = 'KRW-JOSHUA-CKX';
+
+app.post('/leads/ssdi-ckx-signed', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29', process.env.LEAD_API_KEY || 'krwleads2026secure'];
+  if (validKeys.indexOf(key) < 0) return res.status(401).json({ ok: false, error: 'Invalid API key' });
+
+  const b = req.body || {};
+  const missing = [];
+  ['first_name','last_name','phone','email','state'].forEach(f => { if (b[f] == null || String(b[f]).trim() === '') missing.push(f); });
+  if (missing.length) return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
+
+  const publisherSub = b.publisher_sub || RINGFUEL_CKX_PUB;
+  const phoneDigits = String(b.phone).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  const st = (b.state || '').toUpperCase().trim();
+
+  let leadId = null;
+  try {
+    const ins = await pool.query(
+      `INSERT INTO leads (campaign, vertical, first_name, last_name, phone, email, publisher_sub, state, status, raw, received_at)
+       VALUES ('ssdi-ckx-signed','SSDI',$1,$2,$3,$4,$5,$6,'pending',$7::jsonb,NOW()) RETURNING id`,
+      [b.first_name, b.last_name, phoneDigits, b.email, publisherSub, st, JSON.stringify(b)]);
+    leadId = ins.rows[0].id;
+  } catch (dbErr) {
+    console.error('[SSDI-CKX] DB insert error:', dbErr.message);
+    return res.status(500).json({ ok: false, error: 'Database error' });
+  }
+
+  const pingPayload = {
+    api_key: RINGFUEL_CKX_API_KEY, campaign_id: RINGFUEL_CKX_CAMPAIGN_ID,
+    caller_number: phoneDigits, caller_state: st, caller_zip: b.zip || b.zip_code || undefined,
+    first_name: b.first_name, last_name: b.last_name, email: b.email, phone: phoneDigits,
+    address: b.address || undefined, city: b.city || undefined, state: st,
+    dob: b.dob || undefined, ssn_last4: b.ssn_last4 || undefined,
+    trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url || b.trustedform_url || undefined,
+    jornaya_leadid: b.jornaya_leadid || undefined,
+  };
+  Object.keys(pingPayload).forEach(k => { if (pingPayload[k] === undefined) delete pingPayload[k]; });
+
+  try {
+    const pingRes = await postJSON(RINGFUEL_PING_URL_1696, pingPayload);
+    const result = JSON.parse(pingRes.body);
+    const available = result.available === true && result.targets && result.targets.count > 0;
+    await pool.query(
+      `UPDATE leads SET status=$1, buyer_status=$2, buyer_response=$3::jsonb, billable=false, revenue=0 WHERE id=$4`,
+      [available ? 'forwarded' : 'buyer_rejected', available ? 'Ping Accepted' : 'Ping Rejected', JSON.stringify(result), leadId]);
+    console.log(`[SSDI-CKX] ${available ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${publisherSub} | available=${result.available}`);
+    return res.json({
+      ok: available, result: available ? 'success' : 'rejected',
+      message: available ? 'Ping accepted — transfer the call now' : 'No targets available',
+      ping_id: result.pingId || null, dial_number: result.dialNumber || null, ttl: result.ttl || null, krw_id: leadId
+    });
+  } catch (err) {
+    console.error('[SSDI-CKX] Ping request failed:', err.message);
+    await pool.query("UPDATE leads SET status='error', buyer_error=$1 WHERE id=$2", ['Unable to reach buyer - technical error', leadId]).catch(() => {});
+    return res.status(502).json({ ok: false, error: 'Failed to ping buyer', krw_id: leadId });
+  }
+});
+// ─── END SSDI SIGNED via RINGFUEL (CKX) ──────────────────────────────────────
+
 // ─── RINGFUEL CALL-COMPLETION WEBHOOK — SSDI 1696 (Filed) ──────────────────
 // Fires once a real call hangs up, sending CID/duration/timestamp. This is
 // separate from the ping data already flowing through /leads/ssdi-1696 -
@@ -7031,11 +7097,15 @@ app.post('/calls/ringfuel-call-webhook', async (req, res) => {
   try {
     const matchRes = await client.query(
       `SELECT publisher_sub FROM leads
-       WHERE phone = $1 AND publisher_sub IN ('SSDI-AZ-1696','SSDI-SLC-1696')
-       LIMIT 1`,
+       WHERE phone = $1 AND publisher_sub IN ('SSDI-AZ-1696','SSDI-SLC-1696','KRW-JOSHUA-CKX')
+       ORDER BY received_at DESC LIMIT 1`,
       [cid]
     );
     const publisherSub = matchRes.rows[0] ? matchRes.rows[0].publisher_sub : 'SSDI-1696-UNATTRIBUTED';
+    const isCkx = publisherSub === 'KRW-JOSHUA-CKX';
+    const campTag = isCkx ? 'ssdi-ckx-signed' : 'ssdi-1696';
+    const campName = isCkx ? 'SSDI Signed (CKX)' : 'SSDI 1696 (Filed)';
+    const buyerTag = isCkx ? 'CKX Signed' : 'Calltoffic 1696';
 
     const insert = await client.query(
       `INSERT INTO calls
@@ -7044,12 +7114,12 @@ app.post('/calls/ringfuel-call-webhook', async (req, res) => {
           disposition, call_status, call_status_label, billable,
           source_system, recording_url, raw, received_at)
        VALUES ($1, $2, $3, $4, $4,
-               $5, 'SSDI', 'ssdi-1696', 'SSDI 1696 (Filed)', 'Calltoffic 1696',
+               $5, 'SSDI', $8, $9, $10,
                'Received', 'Completed', 'pending', false,
                'ringfuel_webhook', $6, $7::jsonb, NOW())
        RETURNING id`,
       [callDatetime.toISOString(), callDateText, cid, duration,
-       publisherSub, b.recording_url || null, JSON.stringify(b)]
+       publisherSub, b.recording_url || null, JSON.stringify(b), campTag, campName, buyerTag]
     );
     const callId = insert.rows[0].id;
     console.log(`[Ringfuel Call Webhook] ✓ Call logged | CID: ${cid} | Duration: ${duration}s | Publisher: ${publisherSub} | krw_id: ${callId}`);
