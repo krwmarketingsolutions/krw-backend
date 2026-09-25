@@ -2542,6 +2542,25 @@ function postJSON(urlStr, payload) {
   });
 }
 
+// ── CH-Intake delivery (LeadProsper direct post, Sep 25) ───────────────────
+// Every CH-Intake send goes through here. LeadProsper answers 200 even when it
+// declines a lead, so acceptance is read from the body, never from the HTTP code.
+const CH_INTAKE_POST_URL = process.env.CH_INTAKE_POST_URL ||
+  'https://api.leadprosper.io/direct_post/?lp_campaign_id=25112&lp_supplier_id=130091&lp_key=voe6ig61ofyye7&lp_action=&lp_subid1=&lp_subid2=';
+async function postToChIntake(payload) {
+  const p = Object.assign({}, payload);
+  const consent = p.consent_url || '';
+  if (consent && /trustedform/i.test(consent) && !p.trusted_form_cert_url) p.trusted_form_cert_url = consent;
+  else if (consent && !p.jornaya_leadid && !p.trusted_form_cert_url) p.jornaya_leadid = consent;
+  Object.keys(p).forEach(k => { if (p[k] === undefined || p[k] === null || p[k] === '') delete p[k]; });
+  const r = await postJSON(CH_INTAKE_POST_URL, p);
+  let out; try { out = JSON.parse(r.body); } catch (e) { out = { status: r.status, raw: String(r.body || '').slice(0, 500) }; }
+  const st = String(out.status || '').toUpperCase();
+  const accepted = st === 'ACCEPTED' || st === 'SUCCESS';
+  const reason = accepted ? null : (Array.isArray(out.errors) ? out.errors.map(e => (e && (e.error || e.message)) || String(e)).join('; ') : (out.message || out.error || st || ('HTTP ' + r.status)));
+  return { http: r.status, result: out, accepted, reason };
+}
+
 // ── Publisher Alias Map ────────────────────────────────────────────────────
 // Disguises internal pub_id values before they're sent to any external buyer
 // as sub_id2 / publisher_sub / source. Buyers should never see which
@@ -3389,9 +3408,8 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
         consent_url: b.trustedform_cert_url || b.jornaya_leadid || undefined,
         consent_timestamp: new Date().toISOString(),
       });
-      const r = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4d50uja/', p);
-      let out; try { out = JSON.parse(r.body); } catch(e) { out = { status: r.status, raw: r.body }; }
-      return { result: out, accepted: out.status === 'success' || (r.status >= 200 && r.status < 300) };
+      const r = await postToChIntake(p);
+      return { result: Object.assign({ http: r.http, reason: r.reason }, r.result), accepted: r.accepted };
     },
     'LT-Intake': async () => {
       const r = await sendToLtIntake(b, leadState, leadId);
@@ -6793,9 +6811,11 @@ app.post('/leads/forward-to-mva-intake', async (req, res) => {
   Object.keys(intakePayload).forEach(k => { if (intakePayload[k] === undefined || intakePayload[k] === null) delete intakePayload[k]; });
 
   try {
-    const intakeRes = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4d50uja/', intakePayload);
-    console.log(`[CH-Intake Forward] Forwarded krw_id ${krwId} - status ${intakeRes.status}`);
-    return res.json({ ok: true, result: 'success', message: 'Lead forwarded to CH-Intake', krw_id: krwId, sent_payload: intakePayload });
+    const intakeRes = await postToChIntake(intakePayload);
+    console.log(`[CH-Intake Forward] krw_id ${krwId} - ${intakeRes.accepted ? 'ACCEPTED' : 'NOT accepted: ' + intakeRes.reason}`);
+    return res.json({ ok: intakeRes.accepted, result: intakeRes.accepted ? 'success' : 'rejected',
+      message: intakeRes.accepted ? 'Lead forwarded to CH-Intake' : ('CH-Intake did not accept: ' + intakeRes.reason),
+      krw_id: krwId, buyer_response: intakeRes.result, sent_payload: intakePayload });
   } catch (fwdErr) {
     console.error('[CH-Intake Forward] Forward failed:', fwdErr.message);
     return res.status(502).json({ ok: false, error: 'Failed to forward to CH-Intake', detail: fwdErr.message });
@@ -6898,7 +6918,7 @@ app.post('/leads/mva-intake', async (req, res) => {
       const p = strip({ first_name: b.first_name, last_name: b.last_name, phone: String(b.phone).replace(/\D/g, ''), email: b.email,
         zip_code: b.zip_code || b.zip, state: leadState, incident_date: b.incident_date, injury: b.injury, at_fault: b.at_fault,
         have_attorney: b.have_attorney, consent_url: b.trustedform_cert_url || b.jornaya_leadid, consent_timestamp: new Date().toISOString() });
-      const r = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4d50uja/', p);
+      const r = await postJSON(CH_INTAKE_POST_URL, p);
       let out; try { out = JSON.parse(r.body); } catch (e) { out = { status: r.status, raw: r.body }; }
       return { result: out, accepted: out.status === 'success' || (r.status >= 200 && r.status < 300) };
     },
