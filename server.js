@@ -2547,8 +2547,19 @@ function postJSON(urlStr, payload) {
 // declines a lead, so acceptance is read from the body, never from the HTTP code.
 const CH_INTAKE_POST_URL = process.env.CH_INTAKE_POST_URL ||
   'https://api.leadprosper.io/direct_post/?lp_campaign_id=25112&lp_supplier_id=130091&lp_key=voe6ig61ofyye7&lp_action=&lp_subid1=&lp_subid2=';
-async function postToChIntake(payload) {
+const CH_INTAKE_DEFAULT_LP = process.env.CH_INTAKE_DEFAULT_LP || 'https://krwmarketingsolutions.com';
+async function postToChIntake(payload, raw) {
   const p = Object.assign({}, payload);
+  const src = raw || {};
+  // LeadProsper campaign fields the old hook never needed
+  if (!p.landing_page_url) p.landing_page_url = src.landing_page_url || src.lp_url || src.source_url || CH_INTAKE_DEFAULT_LP;
+  if (!p.ip_address && src.ip_address) p.ip_address = src.ip_address;
+  if (!p.address && src.address) p.address = src.address;
+  if (!p.city && src.city) p.city = src.city;
+  if (!p.dob && (src.date_of_birth || src.dob)) p.dob = src.date_of_birth || src.dob;
+  if (!p.user_agent && src.user_agent) p.user_agent = src.user_agent;
+  if (!p.trusted_form_cert_url && src.trustedform_cert_url) p.trusted_form_cert_url = src.trustedform_cert_url;
+  if (!p.jornaya_leadid && src.jornaya_leadid) p.jornaya_leadid = src.jornaya_leadid;
   const consent = p.consent_url || '';
   if (consent && /trustedform/i.test(consent) && !p.trusted_form_cert_url) p.trusted_form_cert_url = consent;
   else if (consent && !p.jornaya_leadid && !p.trusted_form_cert_url) p.jornaya_leadid = consent;
@@ -3408,7 +3419,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
         consent_url: b.trustedform_cert_url || b.jornaya_leadid || undefined,
         consent_timestamp: new Date().toISOString(),
       });
-      const r = await postToChIntake(p);
+      const r = await postToChIntake(p, b);
       return { result: Object.assign({ http: r.http, reason: r.reason }, r.result), accepted: r.accepted };
     },
     'LT-Intake': async () => {
@@ -6811,7 +6822,7 @@ app.post('/leads/forward-to-mva-intake', async (req, res) => {
   Object.keys(intakePayload).forEach(k => { if (intakePayload[k] === undefined || intakePayload[k] === null) delete intakePayload[k]; });
 
   try {
-    const intakeRes = await postToChIntake(intakePayload);
+    const intakeRes = await postToChIntake(intakePayload, b);
     console.log(`[CH-Intake Forward] krw_id ${krwId} - ${intakeRes.accepted ? 'ACCEPTED' : 'NOT accepted: ' + intakeRes.reason}`);
     return res.json({ ok: intakeRes.accepted, result: intakeRes.accepted ? 'success' : 'rejected',
       message: intakeRes.accepted ? 'Lead forwarded to CH-Intake' : ('CH-Intake did not accept: ' + intakeRes.reason),
@@ -6918,7 +6929,7 @@ app.post('/leads/mva-intake', async (req, res) => {
       const p = strip({ first_name: b.first_name, last_name: b.last_name, phone: String(b.phone).replace(/\D/g, ''), email: b.email,
         zip_code: b.zip_code || b.zip, state: leadState, incident_date: b.incident_date, injury: b.injury, at_fault: b.at_fault,
         have_attorney: b.have_attorney, consent_url: b.trustedform_cert_url || b.jornaya_leadid, consent_timestamp: new Date().toISOString() });
-      const r = await postToChIntake(p);
+      const r = await postToChIntake(p, b);
       return { result: Object.assign({ http: r.http, reason: r.reason }, r.result), accepted: r.accepted };
     },
     'LT-Intake': async () => { const r = await sendToLtIntake(b, leadState, leadId); return { result: r.result, accepted: r.accepted }; },
