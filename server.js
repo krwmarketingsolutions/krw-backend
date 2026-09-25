@@ -3202,7 +3202,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
     { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
     { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
-    { name: 'MVA-003-LT', priority: 3, group: '003',    cap: 2,    payout: 1700, enabled: true,                 states: 'ALL' },
+    { name: 'MVA-003-LT', priority: 3, group: '003',    cap: 5,    payout: 1700, enabled: true,                 states: 'ALL' },
   ];
 
   if (missing.length) {
@@ -3330,7 +3330,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   }
 
   if (!eligible.length) {
-    const why = `No eligible buyer for ${leadState} right now (caps hit or state not covered)`;
+    const why = nldMissing.length && NLD_ONLY_STATES.includes(leadState) ? `Missing fields for buyer: ${nldMissing.join(', ')}` : `No eligible buyer for ${leadState} right now (daily caps reached)`;
     const c0 = await pool.connect();
     try { await c0.query("UPDATE leads SET status='received', buyer_error=$1 WHERE id=$2", [why, leadId]); } finally { c0.release(); }
     console.log(`[MVA-NYC-SPLIT] ⏸ ${b.first_name} ${b.last_name} | ${leadState} | held: ${why}`);
