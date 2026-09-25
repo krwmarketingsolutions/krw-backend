@@ -6918,9 +6918,8 @@ app.post('/leads/mva-intake', async (req, res) => {
       const p = strip({ first_name: b.first_name, last_name: b.last_name, phone: String(b.phone).replace(/\D/g, ''), email: b.email,
         zip_code: b.zip_code || b.zip, state: leadState, incident_date: b.incident_date, injury: b.injury, at_fault: b.at_fault,
         have_attorney: b.have_attorney, consent_url: b.trustedform_cert_url || b.jornaya_leadid, consent_timestamp: new Date().toISOString() });
-      const r = await postJSON(CH_INTAKE_POST_URL, p);
-      let out; try { out = JSON.parse(r.body); } catch (e) { out = { status: r.status, raw: r.body }; }
-      return { result: out, accepted: out.status === 'success' || (r.status >= 200 && r.status < 300) };
+      const r = await postToChIntake(p);
+      return { result: Object.assign({ http: r.http, reason: r.reason }, r.result), accepted: r.accepted };
     },
     'LT-Intake': async () => { const r = await sendToLtIntake(b, leadState, leadId); return { result: r.result, accepted: r.accepted }; },
   };
