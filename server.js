@@ -2560,6 +2560,14 @@ async function postToChIntake(payload, raw) {
   if (!p.user_agent && src.user_agent) p.user_agent = src.user_agent;
   if (!p.trusted_form_cert_url && src.trustedform_cert_url) p.trusted_form_cert_url = src.trustedform_cert_url;
   if (!p.jornaya_leadid && src.jornaya_leadid) p.jornaya_leadid = src.jornaya_leadid;
+  // Campaign questions on Chad's LeadProsper campaign
+  if (!p.Injured_in_accident_was_not_ur_fault) {
+    const notAtFault = String(p.at_fault || src.at_fault || '').trim().toLowerCase() === 'no';
+    const injured = !!(p.injury || src.injury || src.physical_injury);
+    p.Injured_in_accident_was_not_ur_fault = (notAtFault && injured) ? 'Yes' : 'No';
+  }
+  // Fixed extra fields from Railway, e.g. CH_INTAKE_EXTRA={"field_name":"value"}
+  try { const extra = JSON.parse(process.env.CH_INTAKE_EXTRA || '{}'); Object.keys(extra).forEach(k => { if (p[k] == null) p[k] = extra[k]; }); } catch (e) {}
   const consent = p.consent_url || '';
   if (consent && /trustedform/i.test(consent) && !p.trusted_form_cert_url) p.trusted_form_cert_url = consent;
   else if (consent && !p.jornaya_leadid && !p.trusted_form_cert_url) p.jornaya_leadid = consent;
