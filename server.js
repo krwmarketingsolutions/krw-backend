@@ -6795,6 +6795,26 @@ app.post('/leads/forward-to-mva-intake', async (req, res) => {
   try {
     const intakeRes = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4d50uja/', intakePayload);
     console.log(`[CH-Intake Forward] Forwarded krw_id ${krwId} - status ${intakeRes.status}`);
+    // Stamp the lead so the dashboard shows the buyer / Accepted instead of a bare "Received" (patch 259)
+    try {
+      const c9 = await pool.connect();
+      try {
+        await c9.query(
+          `UPDATE leads SET
+             status         = 'forwarded',
+             buyer_status   = 'Accepted',
+             buyer_error    = NULL,
+             buyer_response = COALESCE(buyer_response,'{}'::jsonb) || $1::jsonb,
+             raw            = COALESCE(raw,'{}'::jsonb) || $2::jsonb
+           WHERE id = $3`,
+          [JSON.stringify({ manual_forward: { buyer: 'CH-Intake', http: intakeRes.status, at: new Date().toISOString() } }),
+           JSON.stringify({ buyer_name: 'CH-Intake', manual_forward: true, manual_forward_at: new Date().toISOString() }),
+           krwId]
+        );
+      } finally { c9.release(); }
+    } catch (stampErr) {
+      console.error('[CH-Intake Forward] Stamp failed (lead was still sent):', stampErr.message);
+    }
     return res.json({ ok: true, result: 'success', message: 'Lead forwarded to CH-Intake', krw_id: krwId, sent_payload: intakePayload });
   } catch (fwdErr) {
     console.error('[CH-Intake Forward] Forward failed:', fwdErr.message);
