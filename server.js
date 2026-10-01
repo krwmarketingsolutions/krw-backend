@@ -3195,7 +3195,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const leadState = (b.state || b.incident_state || '').toUpperCase().trim();
   // patch 266/267: this ladder serves NYC (default), Kevin Anthony and both
   // Leadbloom lines - the lead is attributed to whichever of them posted it.
-  const LADDER_PUBS = ['KRW-KANTHONY-RS', 'KRW-LEADBLOOM-MVA', 'KRW-LEADBLOOM2-MVA'];
+  const LADDER_PUBS = ['KRW-KANTHONY-RS', 'KRW-LEADBLOOM-MVA']; // one Leadbloom account (patch 268)
   const PUB = LADDER_PUBS.includes(b.publisher_sub) ? b.publisher_sub : 'KRW-NYC-MVA';
 
   // Hardcoded fallback IP for this campaign only, per Kyler's explicit
@@ -6319,7 +6319,6 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     const mvaPubs = {
       'KRW-KANTHONY-RS': 'Kevin Anthony (CPA)',
       [LEADBLOOM_PUB_ID]: 'Leadbloom',
-      'KRW-LEADBLOOM2-MVA': 'Leadbloom 2',
       'KRW-NYC-MVA': 'Lumrah LLC',
     };
     const mvaRows = await pool.query(
@@ -6503,8 +6502,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // CH-Intake and LT-Intake are drawn as buyer nodes; their live routing
         // is wired separately once Kyler confirms the split (Sep 16).
         'KRW-KANTHONY-RS':  ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // rides the NYC ladder (patch 266)
-        [LEADBLOOM_PUB_ID]: ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // rides the NYC ladder (patch 267)
-        'KRW-LEADBLOOM2-MVA': ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'],
+        [LEADBLOOM_PUB_ID]: ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // rides the NYC ladder (patch 267); one Leadbloom account (patch 268)
         'KRW-NYC-MVA':      ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // ladder order (Sep 16)
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
@@ -6996,9 +6994,9 @@ app.post('/leads/mva-leadbloom2', async (req, res) => {
   if (validKeys.indexOf(key) < 0) return res.status(401).json({ ok: false, error: 'Invalid API key' });
 
   const b = req.body || {};
-  // patch 267: Leadbloom 2 rides the NYC buyer ladder (CH/LT -> NLD -> 003) with
-  // the same screenings; the ladder attributes the lead to this publisher ID.
-  b.publisher_sub = LB2_PUB;
+  // patch 267/268: rides the NYC buyer ladder; Leadbloom is one account, so
+  // posts to this URL land under KRW-LEADBLOOM-MVA like everything else.
+  b.publisher_sub = 'KRW-LEADBLOOM-MVA';
   req.url = '/leads/mva-nyc-split';
   return app.handle(req, res);
   const leadState = (b.state || '').toUpperCase().trim();
