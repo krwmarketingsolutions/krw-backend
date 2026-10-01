@@ -7607,6 +7607,14 @@ function pbLeadView(l, payoutRate) {
   const d = (pbL.raw && pbL.raw.buyer_disposition) || {};
   let note = (d.note || '').trim();
   note = note.replace(/^Pending\b/i, 'In review');
+  // sheet date serials -> readable dates (patch 262): "last 46295.62708" => "last 9/30 3:03 PM"
+  note = note.replace(/\b(last|on|at)\s+(4\d{4}(?:\.\d+)?)\b/gi, function (mm, word, ser) {
+    var dt = new Date((parseFloat(ser) - 25569) * 86400000);
+    if (isNaN(dt.getTime()) || dt.getUTCFullYear() < 2020 || dt.getUTCFullYear() > 2030) return mm;
+    var h = dt.getUTCHours(), mi = dt.getUTCMinutes();
+    var h12 = ((h + 11) % 12) + 1, ap = h >= 12 ? 'PM' : 'AM';
+    return word + ' ' + (dt.getUTCMonth() + 1) + '/' + dt.getUTCDate() + ' ' + h12 + ':' + (mi < 10 ? '0' : '') + mi + ' ' + ap;
+  });
   v.notes = note || null;
   return portalScrub(v);
 }
