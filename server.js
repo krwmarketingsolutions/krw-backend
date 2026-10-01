@@ -7615,6 +7615,12 @@ function pbLeadView(l, payoutRate) {
     var h12 = ((h + 11) % 12) + 1, ap = h >= 12 ? 'PM' : 'AM';
     return word + ' ' + (dt.getUTCMonth() + 1) + '/' + dt.getUTCDate() + ' ' + h12 + ':' + (mi < 10 ? '0' : '') + mi + ' ' + ap;
   });
+  // patch 263: never show call-attempt counts (buyer sheets don't log them reliably)
+  note = note.replace(/\bcalled\s+\d+\s+times?\b\s*[,;]?\s*/gi, '');
+  // patch 263: buyer identifiers never reach a publisher note (backstop on top of clean data)
+  note = note.replace(/\s*\([^)]*(NLD|CH[-\s]?Intake|LT[-\s]?Intake|MVA[-\s]?003|LAR)[^)]*\)/gi, '');
+  note = note.replace(/\b(NLD(\s+(CPA|Rideshare))?|CH-Intake|LT-Intake|MVA-003(-LT)?|LAR-MVA-CPA)\b(\s*sheet)?/gi, '');
+  note = note.replace(/\s{2,}/g, ' ').replace(/\s+([,.;])/g, '$1').replace(/^[\s,—-]+|[\s,—-]+$/g, '');
   v.notes = note || null;
   return portalScrub(v);
 }
