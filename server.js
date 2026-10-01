@@ -12,6 +12,24 @@ const fs      = require('fs');
 const app     = express();
 
 app.use(express.json());
+// Publisher portals never see IP / user-agent data (patch 260, Kyler Sep 30)
+const PORTAL_HIDDEN_KEYS = /^(ip|ip_?address|ipaddress|user_?agent)$/i;
+function portalScrub(v) {
+  if (Array.isArray(v)) return v.map(portalScrub);
+  if (v && typeof v === 'object' && !(v instanceof Date)) {
+    const o = {};
+    for (const k of Object.keys(v)) { if (!PORTAL_HIDDEN_KEYS.test(k)) o[k] = portalScrub(v[k]); }
+    return o;
+  }
+  return v;
+}
+app.use((req, res, next) => {
+  if (/^\/portal(\/|$)/.test(req.path)) {
+    const send = res.json.bind(res);
+    res.json = (body) => { try { return send(portalScrub(body)); } catch (e) { return send(body); } };
+  }
+  next();
+});
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
@@ -7581,7 +7599,18 @@ async function pbResolvePublisher(portalId) {
 }
 
 // Publisher-facing view of a lead. This is the allowlist - nothing else leaves.
+
+// Portal lead view: Notes column shows the buyer's note only (patch 260)
 function pbLeadView(l, payoutRate) {
+  const v = pbLeadViewBase(l, payoutRate);
+  const pbL = arguments[0] || {};
+  const d = (pbL.raw && pbL.raw.buyer_disposition) || {};
+  let note = (d.note || '').trim();
+  note = note.replace(/^Pending\b/i, 'In review');
+  v.notes = note || null;
+  return portalScrub(v);
+}
+function pbLeadViewBase(l, payoutRate) {
   const bs = (l.buyer_status || '').trim();
   const st = l.status || 'received';
   // Publisher-facing wording (Kyler, Sep 16): a lead that went through but has no
