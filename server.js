@@ -2949,6 +2949,15 @@ app.post('/leads/mva-funnel', async (req, res) => {
 
   const b = req.body || {};
 
+  // patch 266: Kevin Anthony's MVA traffic rides the NYC buyer ladder
+  // (CH-Intake / LT-Intake 50/50 -> NLD -> 003) with the same screenings and
+  // caps. His posting URL and format stay exactly as they are - the ladder
+  // handler attributes the lead to his publisher ID.
+  if ((b.publisher_sub || '') === 'KRW-KANTHONY-RS') {
+    req.url = '/leads/mva-nyc-split';
+    return app.handle(req, res);
+  }
+
   // Validate required fields
   const missing = [];
   if (!b.first_name)    missing.push('first_name');
@@ -3184,6 +3193,9 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
 
   const b = req.body || {};
   const leadState = (b.state || b.incident_state || '').toUpperCase().trim();
+  // patch 266: this ladder serves NYC (default) and Kevin Anthony - the lead
+  // is attributed to whichever of the two posted it.
+  const PUB = (b.publisher_sub === 'KRW-KANTHONY-RS') ? 'KRW-KANTHONY-RS' : 'KRW-NYC-MVA';
 
   // Hardcoded fallback IP for this campaign only, per Kyler's explicit
   // instruction (Aug 26) - Noah's publisher doesn't reliably capture real
@@ -3240,7 +3252,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
          VALUES ('mva-nyc-split','MVA',$1,$2,$3,$4,$5,$6,$7,'rejected',$8,false,$9::jsonb,NOW())
          RETURNING id`,
         [b.first_name, b.last_name, b.phone, b.email,
-         'KRW-NYC-MVA', b.ip_address, leadState,
+         PUB, b.ip_address, leadState,
          `${leadState} is blocked — not accepted for this campaign`, JSON.stringify(b)]
       );
       blockedLeadId = insertBlocked.rows[0].id;
@@ -3271,7 +3283,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
         // patch 265: an over-cap lead is a rejection, on the publisher portal and the funnel alike
         const insCap = await cCap.query(
           `INSERT INTO leads (campaign, vertical, first_name, last_name, phone, email, publisher_sub, ip_address, state, status, buyer_status, buyer_error, billable, raw, received_at)
-           VALUES ('mva-nyc-split','MVA',$1,$2,$3,$4,'KRW-NYC-MVA',$5,$6,'rejected','Rejected',$7,false,$8::jsonb,NOW()) RETURNING id`,
+           VALUES ('mva-nyc-split','MVA',$1,$2,$3,$4,'${PUB}',$5,$6,'rejected','Rejected',$7,false,$8::jsonb,NOW()) RETURNING id`,
           [b.first_name, b.last_name, b.phone, b.email, b.ip_address, leadState, why,
            JSON.stringify({ ...b, buyer_disposition: { status: 'Rejected', note: 'Rejected — daily volume limit reached', source: 'state_cap', synced_at: new Date().toISOString() } })]);
         capId = insCap.rows[0].id;
@@ -3339,7 +3351,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
        VALUES ('mva-nyc-split','MVA',$1,$2,$3,$4,$5,$6,$7,'pending',$8::jsonb,NOW())
        RETURNING id`,
       [b.first_name, b.last_name, b.phone, b.email,
-       'KRW-NYC-MVA', b.ip_address, leadState, JSON.stringify(b)]
+       PUB, b.ip_address, leadState, JSON.stringify(b)]
     );
     leadId = insert.rows[0].id;
   } catch(dbErr) {
@@ -3365,7 +3377,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
       const p = strip({
         lp_campaign_id: '31080', lp_supplier_id: '110928', lp_key: 'ke21sx0koi7dld',
         lp_action: b.lp_test_mode === true ? 'test' : '',
-        lp_subid1: aliasPub('KRW-NYC-MVA') || '',
+        lp_subid1: aliasPub(PUB) || '',
         first_name: b.first_name, last_name: b.last_name, email: b.email,
         phone: String(b.phone).replace(/\D/g, ''),
         date_of_birth: convertDateToISO(b.date_of_birth), address: b.address, city: b.city,
@@ -3384,7 +3396,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     },
     'MVA-003-LT': async () => {
       const p = strip({
-        lp_subid1: aliasPub('KRW-NYC-MVA') || 'KRW-NYC-MVA',
+        lp_subid1: aliasPub(PUB) || PUB,
         first_name: b.first_name, last_name: b.last_name, email: b.email,
         phone: String(b.phone).replace(/\D/g, ''),
         at_fault: b.at_fault, have_attorney: b.have_attorney, physical_injury: b.physical_injury,
@@ -6488,7 +6500,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // Lumrah LLC (Noah) is isolated: NLD (12/day cap) with overflow to 003.
         // CH-Intake and LT-Intake are drawn as buyer nodes; their live routing
         // is wired separately once Kyler confirms the split (Sep 16).
-        'KRW-KANTHONY-RS':  ['NLD CPA', 'MVA-003-LT'],
+        'KRW-KANTHONY-RS':  ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // rides the NYC ladder (patch 266)
         [LEADBLOOM_PUB_ID]: ['NLD CPA', 'MVA-003-LT'],
         'KRW-NYC-MVA':      ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // ladder order (Sep 16)
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
