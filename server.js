@@ -3268,10 +3268,12 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
       const cCap = await pool.connect();
       let capId = null;
       try {
+        // patch 265: an over-cap lead is a rejection, on the publisher portal and the funnel alike
         const insCap = await cCap.query(
-          `INSERT INTO leads (campaign, vertical, first_name, last_name, phone, email, publisher_sub, ip_address, state, status, buyer_error, billable, raw, received_at)
-           VALUES ('mva-nyc-split','MVA',$1,$2,$3,$4,'KRW-NYC-MVA',$5,$6,'received',$7,false,$8::jsonb,NOW()) RETURNING id`,
-          [b.first_name, b.last_name, b.phone, b.email, b.ip_address, leadState, why, JSON.stringify(b)]);
+          `INSERT INTO leads (campaign, vertical, first_name, last_name, phone, email, publisher_sub, ip_address, state, status, buyer_status, buyer_error, billable, raw, received_at)
+           VALUES ('mva-nyc-split','MVA',$1,$2,$3,$4,'KRW-NYC-MVA',$5,$6,'rejected','Rejected',$7,false,$8::jsonb,NOW()) RETURNING id`,
+          [b.first_name, b.last_name, b.phone, b.email, b.ip_address, leadState, why,
+           JSON.stringify({ ...b, buyer_disposition: { status: 'Rejected', note: 'Rejected — daily volume limit reached', source: 'state_cap', synced_at: new Date().toISOString() } })]);
         capId = insCap.rows[0].id;
       } finally { cCap.release(); }
       console.log(`[MVA-NYC-SPLIT] held ${b.first_name} ${b.last_name} | ${leadState} | ${why}`);
@@ -6346,12 +6348,12 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       if (row.status !== 'rejected') p.forwarded++; // 'rejected' = blocked before reaching any buyer (e.g. CA/CO)
       if (row.billable) { p.accepted++; p.revenue += parseFloat(row.revenue || 0); }
 
-      const buyerName = row.buyer_name || 'Unknown';
-      if (row.status !== 'rejected') {
-        if (!mva.buyers[buyerName]) mva.buyers[buyerName] = { received: 0, accepted: 0, revenue: 0 };
-        mva.buyers[buyerName].received++;
-        if (row.billable) { mva.buyers[buyerName].accepted++; mva.buyers[buyerName].revenue += parseFloat(row.revenue || 0); }
-      }
+      // patch 265: a lead that never reached a buyer (over a state cap, CA/CO blocked)
+      // shows under a "Rejected" node - the funnel never says "Unknown".
+      const buyerName = (row.status !== 'rejected' && row.buyer_name) ? row.buyer_name : 'Rejected';
+      if (!mva.buyers[buyerName]) mva.buyers[buyerName] = { received: 0, accepted: 0, revenue: 0 };
+      mva.buyers[buyerName].received++;
+      if (row.billable) { mva.buyers[buyerName].accepted++; mva.buyers[buyerName].revenue += parseFloat(row.revenue || 0); }
     }
 
     // ── SSDI ─────────────────────────────────────────────────────────────
