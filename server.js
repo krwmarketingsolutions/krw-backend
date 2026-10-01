@@ -2953,7 +2953,7 @@ app.post('/leads/mva-funnel', async (req, res) => {
   // (CH-Intake / LT-Intake 50/50 -> NLD -> 003) with the same screenings and
   // caps. His posting URL and format stay exactly as they are - the ladder
   // handler attributes the lead to his publisher ID.
-  if ((b.publisher_sub || '') === 'KRW-KANTHONY-RS') {
+  if (['KRW-KANTHONY-RS', 'KRW-LEADBLOOM-MVA'].includes(b.publisher_sub || '')) {   // + Leadbloom (patch 267)
     req.url = '/leads/mva-nyc-split';
     return app.handle(req, res);
   }
@@ -3193,9 +3193,10 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
 
   const b = req.body || {};
   const leadState = (b.state || b.incident_state || '').toUpperCase().trim();
-  // patch 266: this ladder serves NYC (default) and Kevin Anthony - the lead
-  // is attributed to whichever of the two posted it.
-  const PUB = (b.publisher_sub === 'KRW-KANTHONY-RS') ? 'KRW-KANTHONY-RS' : 'KRW-NYC-MVA';
+  // patch 266/267: this ladder serves NYC (default), Kevin Anthony and both
+  // Leadbloom lines - the lead is attributed to whichever of them posted it.
+  const LADDER_PUBS = ['KRW-KANTHONY-RS', 'KRW-LEADBLOOM-MVA', 'KRW-LEADBLOOM2-MVA'];
+  const PUB = LADDER_PUBS.includes(b.publisher_sub) ? b.publisher_sub : 'KRW-NYC-MVA';
 
   // Hardcoded fallback IP for this campaign only, per Kyler's explicit
   // instruction (Aug 26) - Noah's publisher doesn't reliably capture real
@@ -6318,13 +6319,14 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     const mvaPubs = {
       'KRW-KANTHONY-RS': 'Kevin Anthony (CPA)',
       [LEADBLOOM_PUB_ID]: 'Leadbloom',
+      'KRW-LEADBLOOM2-MVA': 'Leadbloom 2',
       'KRW-NYC-MVA': 'Lumrah LLC',
     };
     const mvaRows = await pool.query(
       `SELECT publisher_sub, status, billable, revenue, phone,
               raw->>'buyer_name' as buyer_name
        FROM leads
-       WHERE campaign IN ('mva-funnel','mva-nyc-split')
+       WHERE campaign IN ('mva-funnel','mva-nyc-split','mva-leadbloom2')
          AND publisher_sub = ANY($1::text[]) AND COALESCE(raw->>'excluded','') <> 'true'
          AND ${sinceClause}`,
       [Object.keys(mvaPubs)]
@@ -6501,7 +6503,8 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // CH-Intake and LT-Intake are drawn as buyer nodes; their live routing
         // is wired separately once Kyler confirms the split (Sep 16).
         'KRW-KANTHONY-RS':  ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // rides the NYC ladder (patch 266)
-        [LEADBLOOM_PUB_ID]: ['NLD CPA', 'MVA-003-LT'],
+        [LEADBLOOM_PUB_ID]: ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // rides the NYC ladder (patch 267)
+        'KRW-LEADBLOOM2-MVA': ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'],
         'KRW-NYC-MVA':      ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // ladder order (Sep 16)
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
@@ -6993,6 +6996,11 @@ app.post('/leads/mva-leadbloom2', async (req, res) => {
   if (validKeys.indexOf(key) < 0) return res.status(401).json({ ok: false, error: 'Invalid API key' });
 
   const b = req.body || {};
+  // patch 267: Leadbloom 2 rides the NYC buyer ladder (CH/LT -> NLD -> 003) with
+  // the same screenings; the ladder attributes the lead to this publisher ID.
+  b.publisher_sub = LB2_PUB;
+  req.url = '/leads/mva-nyc-split';
+  return app.handle(req, res);
   const leadState = (b.state || '').toUpperCase().trim();
   if (b.ip_address == null || b.ip_address === '') b.ip_address = '8.8.8.8';
   if ((b.injury == null || b.injury === '') && b.physical_injury) b.injury = b.physical_injury;
