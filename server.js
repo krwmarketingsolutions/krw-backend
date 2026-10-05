@@ -3181,6 +3181,18 @@ app.post('/leads/mva-funnel', async (req, res) => {
 const LAR_MVA_ENDPOINT = 'https://vividvisions.marketing/api/v1/mva1';
 const LAR_MVA_PUBLISHER_CODE = 'PUB-KYLER1';
 
+// patch 270: TrustedForm enforcement (Kyler, Oct 5). Every MVA lead must carry
+// a structurally valid TrustedForm certificate URL (https://cert.trustedform.com/
+// + 40 hex chars), and a certificate is SINGLE USE - the same cert on a second
+// lead means recycled consent and is rejected outright.
+const TF_CERT_RE = /^https:\/\/cert\.trustedform\.com\/[0-9a-f]{40}$/i;
+function tfValid(u) { return typeof u === 'string' && TF_CERT_RE.test(u.trim()); }
+async function tfSeen(u) {
+  const r = await pool.query(
+    "SELECT id FROM leads WHERE raw->>'trustedform_cert_url' = $1 ORDER BY id LIMIT 1", [u.trim()]);
+  return r.rows.length ? r.rows[0].id : null;
+}
+
 app.post('/leads/mva-nyc-split', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
   const validKeys = [
@@ -3205,13 +3217,33 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // guarantees a missing IP can never hold up or reject a lead.
   if (!b.ip_address) b.ip_address = '8.8.8.8';
 
+  // patch 270: TrustedForm hard gate - a valid, never-before-used cert or the
+  // lead is stored as Rejected and never routed.
+  {
+    const tfU = (b.trustedform_cert_url || '').trim();
+    let tfWhy = null, tfDup = null;
+    if (!tfValid(tfU)) tfWhy = 'Missing or invalid TrustedForm certificate';
+    else { tfDup = await tfSeen(tfU); if (tfDup) tfWhy = 'TrustedForm certificate already used (first on lead ' + tfDup + ')'; }
+    if (tfWhy) {
+      const tfNote = tfDup ? 'Rejected — consent certificate already used on a previous submission'
+                           : 'Rejected — missing or invalid consent certificate';
+      const insTf = await pool.query(
+        `INSERT INTO leads (campaign, vertical, first_name, last_name, phone, email, publisher_sub, ip_address, state, status, buyer_status, buyer_error, billable, raw, received_at)
+         VALUES ('mva-nyc-split','MVA',$1,$2,$3,$4,'${PUB}',$5,$6,'rejected','Rejected',$7,false,$8::jsonb,NOW()) RETURNING id`,
+        [b.first_name || null, b.last_name || null, b.phone || null, b.email || null, b.ip_address || null, leadState || null, tfWhy,
+         JSON.stringify({ ...b, buyer_disposition: { status: 'Rejected', note: tfNote, source: 'tf_gate', synced_at: new Date().toISOString() } })]);
+      console.log(`[MVA-NYC-SPLIT] \u2715 TF gate | ${b.first_name || ''} ${b.last_name || ''} | ${tfWhy}`);
+      return res.status(400).json({ ok: false, result: 'rejected', error: tfWhy, krw_id: insTf.rows[0].id });
+    }
+  }
+
   const missing = [];
   if (!b.first_name)  missing.push('first_name');
   if (!b.last_name)   missing.push('last_name');
   if (!b.phone)        missing.push('phone');
   if (!b.email)        missing.push('email');
   if (!leadState)      missing.push('state');
-  if (!b.trustedform_cert_url && !b.jornaya_leadid) missing.push('trustedform_cert_url or jornaya_leadid');
+  // patch 270: TrustedForm is validated by the hard gate above - jornaya alone no longer passes.
 
   // ── BUYER LADDER (Kyler, Sep 16) ─────────────────────────────────────────
   // Routing is by buyer priority mixed with each buyer's state list:
@@ -6891,8 +6923,15 @@ app.post('/leads/mva-intake', async (req, res) => {
   const missing = [];
   ['first_name','last_name','phone','email','state','incident_date','injury','at_fault','have_attorney'].forEach(f => { if (b[f] == null || String(b[f]).trim() === '') missing.push(f); });
   if ((b.zip_code == null || b.zip_code === '') && (b.zip == null || b.zip === '')) missing.push('zip_code');
-  if ((b.trustedform_cert_url == null || b.trustedform_cert_url === '') && (b.jornaya_leadid == null || b.jornaya_leadid === '')) missing.push('trustedform_cert_url or jornaya_leadid');
+  // patch 270: TrustedForm is validated by the hard gate below - jornaya alone no longer passes.
   if (missing.length) { const rid = await logRejectedPost('mva-intake', MVA_INTAKE_PUB, b, 'Missing: ' + missing.join(', ')); return res.status(400).json({ ok: false, error: 'Missing required fields', missing, krw_id: rid }); }
+  // patch 270: TrustedForm hard gate - valid cert required, single use.
+  {
+    const tfU = (b.trustedform_cert_url || '').trim();
+    if (!tfValid(tfU)) { const rid = await logRejectedPost('mva-intake', MVA_INTAKE_PUB, b, 'Missing or invalid TrustedForm certificate'); return res.status(400).json({ ok: false, result: 'rejected', error: 'Missing or invalid TrustedForm certificate URL', krw_id: rid }); }
+    const tfDup = await tfSeen(tfU);
+    if (tfDup) { const rid = await logRejectedPost('mva-intake', MVA_INTAKE_PUB, b, 'TrustedForm certificate already used (first on lead ' + tfDup + ')'); return res.status(400).json({ ok: false, result: 'rejected', error: 'TrustedForm certificate already used on a previous lead', krw_id: rid }); }
+  }
   if (String(b.have_attorney).toLowerCase() === 'yes') { const rid = await logRejectedPost('mva-intake', MVA_INTAKE_PUB, b, 'Already represented by an attorney'); return res.status(400).json({ ok: false, result: 'rejected', error: 'Lead already represented by an attorney', krw_id: rid }); }
 
   const client = await pool.connect();
