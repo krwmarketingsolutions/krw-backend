@@ -8159,8 +8159,10 @@ const BUYER_SHEETS = [
   { key: 'nld-mva',   label: 'NLD CPA',    buyer: 'NLD CPA',    vertical: 'MVA', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'MVA CPA Leads - New', amount: 2000, enabled: true },
   // Rideshare leads carry no buyer_name on the record, so this tab matches by campaign instead
   { key: 'nld-ride',  label: 'NLD Rideshare', buyer: 'CH-AD',   vertical: 'Rideshare', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'Rideshare', campaigns: ['rideshare-tb'], amount: 1800, enabled: true },
-  // LT's sheet: one tab per month ("Sep 2026"), no phone column - rows are keyed by "Your reference" = our KRW-#### vendor code
-  { key: 'lt-intake', label: 'LT-Intake',  buyer: 'LT-Intake',  vertical: 'MVA', sheet: '16azBD-YOUB2dQbvLnwCXmPF4ntq0ntug582sJC_vs1Y', tab: 'Sheet1', amount: 2500, enabled: true },
+  // LT's sheet (patch 273): Adam's team moved to dated tabs ("9.16-10.1" dialer
+  // export, "10.2" simplified layout, more to come) - scan every tab whose name
+  // starts with a date; newest tab's row wins per phone via the existing de-dupe.
+  { key: 'lt-intake', label: 'LT-Intake',  buyer: 'LT-Intake',  vertical: 'MVA', sheet: '16azBD-YOUB2dQbvLnwCXmPF4ntq0ntug582sJC_vs1Y', tab: null, tabPattern: /^\d{1,2}\.\d{1,2}/, amount: 2500, enabled: true },
   // Chad's intake sheet carries MVA plus his Roblox and Rideshare rows; MVA matches by buyer, the others by campaign
   { key: 'ch-intake', label: 'CH-Intake',  buyer: 'CH-Intake',  vertical: 'MVA', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, campaigns: ['roblox-mt','roblox-chad','rideshare-chad'], amount: 2250, enabled: true },
   { key: 'mva-003',   label: 'MVA-003-LT', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1700, enabled: true },
