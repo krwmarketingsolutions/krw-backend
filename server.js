@@ -8209,6 +8209,50 @@ app.post('/reports/weekly/run', async (req, res) => {
 });
 console.log('[Weekly Reports] armed - Fridays', WEEKLY_REPORT_TIME_ET, 'ET (manual: POST /reports/weekly/run)');
 // ─── end patch 274 ────────────────────────────────────────────────────────────
+
+// ─── patch 275: outreach contacts in the database ─────────────────────────────
+let orTableReady = false;
+async function orEnsureTable() {
+  if (orTableReady) return;
+  await pool.query(`CREATE TABLE IF NOT EXISTS outreach_contacts (
+    id BIGINT PRIMARY KEY, data JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
+  orTableReady = true;
+}
+function orAuth(req, res) {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  if (key !== (process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29')) { res.status(401).json({ ok: false, error: 'Invalid API key' }); return false; }
+  return true;
+}
+app.get('/outreach/contacts', async (req, res) => {
+  if (!orAuth(req, res)) return;
+  try {
+    await orEnsureTable();
+    const r = await pool.query('SELECT id, data FROM outreach_contacts ORDER BY id');
+    res.json({ ok: true, contacts: r.rows.map(x => Object.assign({}, x.data, { id: Number(x.id) })) });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.put('/outreach/contacts', async (req, res) => {
+  if (!orAuth(req, res)) return;
+  try {
+    await orEnsureTable();
+    const list = (req.body && req.body.contacts) || null;
+    if (!Array.isArray(list) || list.length > 5000) return res.status(400).json({ ok: false, error: 'body must be {contacts:[...]} (max 5000)' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM outreach_contacts');
+      for (const c of list) {
+        if (!c || typeof c !== 'object' || c.id == null) continue;
+        await client.query('INSERT INTO outreach_contacts (id, data, updated_at) VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (id) DO UPDATE SET data=EXCLUDED.data, updated_at=NOW()',
+          [Number(c.id), JSON.stringify(c)]);
+      }
+      await client.query('COMMIT');
+    } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+    res.json({ ok: true, saved: list.length });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+console.log('[Outreach] contact store ready - GET/PUT /outreach/contacts');
+// ─── end patch 275 ────────────────────────────────────────────────────────────
 // ─── END MVA PUBLISHER PORTAL v2 + POSTBACKS ─────────────────────────────────
 
 
