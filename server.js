@@ -7973,6 +7973,161 @@ setInterval(kylerAlertsSweep, KYLER_ALERTS_EVERY_MS);
 setTimeout(kylerAlertsSweep, 3 * 60 * 1000);   // first pass 3 min after boot
 console.log('[Kyler Alerts] sweep armed - every 30 min, email to', process.env.NOTIFY_EMAIL || '(NOTIFY_EMAIL unset)');
 // ─── end patch 271 ────────────────────────────────────────────────────────────
+
+// ─── patch 272: overnight janitor ─────────────────────────────────────────────
+const JANITOR_TIME_ET = '06:00';
+let janitorLastRunDate = null;
+const JAN_INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','MO','NE','OK','TN'];
+const JAN_NLD_STATES    = ['UT','MT','WY','AZ','NV','OK','NE','ND','IA','NM'];
+const JAN_LADDER_PUBS   = ['KRW-NYC-MVA','KRW-KANTHONY-RS','KRW-LEADBLOOM-MVA'];
+const JAN_FULL_TO_CODE  = Object.fromEntries(Object.entries(US_STATE_FULL_NAMES).map(([c, f]) => [f.toUpperCase(), c]));
+function janState(st) { st = (st || '').toUpperCase().trim(); return st.length === 2 ? st : (JAN_FULL_TO_CODE[st] || st); }
+
+async function janCountToday(buyer) {
+  const r = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM leads
+     WHERE raw->>'buyer_name' = $1 AND status IN ('forwarded','buyer_rejected','pending')
+       AND (received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date`, [buyer]);
+  return r.rows[0].n;
+}
+
+async function janSend(buyer, b, st, leadId, pub) {
+  const full = US_STATE_FULL_NAMES[st] || st;
+  const strip = o => { Object.keys(o).forEach(k => { if (o[k] === undefined || o[k] === null || o[k] === '') delete o[k]; }); return o; };
+  if (buyer === 'NLD CPA') {
+    const p = strip({ lp_campaign_id: '31080', lp_supplier_id: '110928', lp_key: 'ke21sx0koi7dld',
+      lp_subid1: aliasPub(pub) || '', first_name: b.first_name, last_name: b.last_name, email: b.email,
+      phone: String(b.phone || '').replace(/\D/g, ''), date_of_birth: convertDateToISO(b.date_of_birth),
+      address: b.address, city: b.city, state: st, zip_code: b.zip_code || b.zip, ip_address: b.ip_address,
+      landing_page_url: b.landing_page_url, trustedform_cert_url: b.trustedform_cert_url || undefined,
+      jornaya_leadid: b.jornaya_leadid || undefined, incident_state: full, incident_date: b.incident_date,
+      have_attorney: b.have_attorney, at_fault: b.at_fault, settlement: b.settlement, cited: b.cited,
+      doctor_treatment: b.doctor_treatment, physical_injury: b.physical_injury, injury: b.injury, summary: b.summary, county: b.county });
+    const r = await postJSON('https://api.leadprosper.io/direct_post', p);
+    let out; try { out = JSON.parse(r.body); } catch (e) { out = { status: r.status, raw: r.body }; }
+    return { result: out, accepted: out.status === 'ACCEPTED' || out.success === true };
+  }
+  if (buyer === 'MVA-003-LT') {
+    const p = strip({ lp_subid1: aliasPub(pub) || pub, first_name: b.first_name, last_name: b.last_name,
+      email: b.email, phone: String(b.phone || '').replace(/\D/g, ''), at_fault: b.at_fault,
+      have_attorney: b.have_attorney, physical_injury: b.physical_injury, doctor_treatment: b.doctor_treatment,
+      state: full || st, zip_code: b.zip_code || b.zip, incident_date: b.incident_date,
+      trustedform_cert_url: b.trustedform_cert_url || undefined, ip_address: b.ip_address || undefined,
+      injury: b.injury, summary: b.summary, county: b.county, cited: b.cited, settlement: b.settlement, date_of_birth: b.date_of_birth });
+    const r = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4tdo5z8/', p);
+    let out; try { out = JSON.parse(r.body); } catch (e) { out = { status: r.status, raw: r.body }; }
+    return { result: out, accepted: out.status === 'success' };
+  }
+  if (buyer === 'CH-Intake') {
+    const p = strip({ first_name: b.first_name, last_name: b.last_name, phone: String(b.phone || '').replace(/\D/g, ''),
+      email: b.email, zip_code: b.zip_code || b.zip, state: st, incident_date: b.incident_date,
+      injury: b.injury || b.physical_injury, at_fault: b.at_fault, have_attorney: b.have_attorney,
+      consent_url: b.trustedform_cert_url || b.jornaya_leadid || undefined, consent_timestamp: new Date().toISOString() });
+    const r = await postJSON('https://hooks.zapier.com/hooks/catch/23024319/4d50uja/', p);
+    let out; try { out = JSON.parse(r.body); } catch (e) { out = { status: r.status, raw: r.body }; }
+    return { result: out, accepted: out.status === 'success' || (r.status >= 200 && r.status < 300) };
+  }
+  if (buyer === 'LT-Intake') {
+    const r = await sendToLtIntake(b, st, leadId);
+    return { result: r.result, accepted: r.accepted };
+  }
+  return { result: { error: 'unknown buyer' }, accepted: false };
+}
+
+async function janitorRun() {
+  if (process.env.JANITOR_DISABLED === 'true') return;
+  const lines = [], skippedPA = [];
+  let sentNld = 0, sent003 = 0, recovered = 0, attempted = 0;
+  try {
+    const cand = await pool.query(`
+      SELECT id, first_name, last_name, phone, state, status, raw, received_at FROM leads
+      WHERE COALESCE(raw->>'excluded','') <> 'true' AND vertical='MVA'
+        AND COALESCE(raw->'janitor'->>'at','') = ''
+        AND (
+          (status='rejected' AND raw->'buyer_disposition'->>'source'='state_cap' AND received_at > NOW() - INTERVAL '36 hours')
+          OR (status='buyer_rejected' AND raw->>'buyer_name'='NLD CPA' AND buyer_response->'final'->>'code'='1028' AND received_at > NOW() - INTERVAL '36 hours')
+          OR (status='received' AND campaign IN ('mva-funnel','mva-nyc-split') AND publisher_sub = ANY($1)
+              AND COALESCE(raw->>'buyer_name','') = '' AND received_at BETWEEN NOW() - INTERVAL '14 days' AND NOW() - INTERVAL '2 hours')
+        )
+      ORDER BY received_at ASC LIMIT 40`, [JAN_LADDER_PUBS]);
+
+    let nldToday = await janCountToday('NLD CPA');
+    let lt003Today = await janCountToday('MVA-003-LT');
+    let chToday = await janCountToday('CH-Intake');
+    let ltToday = await janCountToday('LT-Intake');
+
+    for (const row of cand.rows) {
+      if (recovered + attempted >= 10) break;
+      const b = row.raw || {}; b.phone = b.phone || row.phone;
+      const st = janState(row.state);
+      if (st === 'PA') { skippedPA.push(`${row.first_name || ''} ${row.last_name || ''} (lead ${row.id})`); continue; }
+      if (st === 'CA' || st === 'CO') continue;
+      const pub = row.raw && row.raw.publisher_sub ? row.raw.publisher_sub : null;
+      const rowPub = (await pool.query('SELECT publisher_sub FROM leads WHERE id=$1', [row.id])).rows[0].publisher_sub;
+
+      const rungs = [];
+      if (JAN_INTAKE_STATES.includes(st)) {
+        if (process.env.LT_INTAKE_PASS && ltToday < chToday) rungs.push('LT-Intake', 'CH-Intake');
+        else { rungs.push('CH-Intake'); if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake'); }
+      }
+      if (JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < 3) rungs.push('NLD CPA');
+      if (lt003Today < 5 && sent003 < 2) rungs.push('MVA-003-LT');
+      if (!rungs.length) { lines.push(`lead ${row.id} ${row.first_name || ''} ${row.last_name || ''} | ${st} | no eligible buyer today - left as is`); continue; }
+
+      attempted++;
+      let done = false, lastBuyer = null, lastResult = null;
+      for (const buyer of rungs) {
+        try {
+          const out = await janSend(buyer, b, st, row.id, rowPub);
+          lastBuyer = buyer; lastResult = out.result;
+          if (out.accepted) {
+            if (buyer === 'NLD CPA') { sentNld++; nldToday++; }
+            if (buyer === 'MVA-003-LT') { sent003++; lt003Today++; }
+            if (buyer === 'CH-Intake') chToday++;
+            if (buyer === 'LT-Intake') ltToday++;
+            await pool.query(
+              `UPDATE leads SET status='forwarded', buyer_status='Accepted', buyer_error=NULL,
+                 buyer_response = COALESCE(buyer_response,'{}'::jsonb) || $1::jsonb,
+                 raw = COALESCE(raw,'{}'::jsonb) || $2::jsonb WHERE id=$3`,
+              [JSON.stringify({ janitor_final: out.result }),
+               JSON.stringify({ buyer_name: buyer, janitor: { at: new Date().toISOString(), buyer, note: 'auto-recovered by overnight janitor' } }), row.id]);
+            lines.push(`lead ${row.id} ${row.first_name || ''} ${row.last_name || ''} | ${st} | RECOVERED -> ${buyer}`);
+            recovered++; done = true; break;
+          }
+        } catch (e) { lastBuyer = buyer; lastResult = { error: e.message }; }
+      }
+      if (!done) {
+        await pool.query(`UPDATE leads SET raw = COALESCE(raw,'{}'::jsonb) || $1::jsonb WHERE id=$2`,
+          [JSON.stringify({ janitor: { at: new Date().toISOString(), buyer: lastBuyer, note: 'janitor retry not accepted', response: lastResult } }), row.id]);
+        lines.push(`lead ${row.id} ${row.first_name || ''} ${row.last_name || ''} | ${st} | retried ${lastBuyer} - not accepted`);
+      }
+    }
+  } catch (e) { console.error('[Janitor] run error:', e.message); lines.push('Janitor error: ' + e.message); }
+
+  if (lines.length || skippedPA.length) {
+    let html = `<p><b>Overnight janitor</b> - recovered ${recovered} lead(s).</p><ul>` +
+      lines.map(l => `<li>${l}</li>`).join('') + '</ul>';
+    if (skippedPA.length) html += `<p><b>PA leads NOT auto-recovered</b> (fresh PA owns the daily slots - push manually if wanted): ${skippedPA.join(', ')}</p>`;
+    await sendEmailNotification(`Overnight janitor — ${recovered} lead(s) recovered`, html);
+  }
+  console.log(`[Janitor] done: ${recovered} recovered, ${attempted} attempted, ${skippedPA.length} PA skipped`);
+}
+
+setInterval(() => {
+  const hm = new Date().toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' });
+  const d  = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (hm !== JANITOR_TIME_ET || janitorLastRunDate === d) return;
+  janitorLastRunDate = d;
+  janitorRun().catch(e => console.error('[Janitor] fatal:', e.message));
+}, 60 * 1000);
+app.post('/janitor/run', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  if (key !== (process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29')) return res.status(401).json({ ok: false });
+  janitorRun().catch(e => console.error('[Janitor] manual run error:', e.message));
+  res.json({ ok: true, message: 'Janitor run started - summary email follows if it finds anything.' });
+});
+console.log('[Janitor] armed - daily at', JANITOR_TIME_ET, 'ET (manual: POST /janitor/run)');
+// ─── end patch 272 ────────────────────────────────────────────────────────────
 // ─── END MVA PUBLISHER PORTAL v2 + POSTBACKS ─────────────────────────────────
 
 
