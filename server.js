@@ -4484,7 +4484,7 @@ app.post('/postback/mva-funnel', async (req, res) => {
       let lookup;
       if (leadId) {
         lookup = await client.query(
-          `SELECT id, first_name, last_name, phone, email, buyer_status, campaign
+          `SELECT id, first_name, last_name, phone, email, buyer_status, campaign, raw->>'aged_out' AS aged_out
            FROM leads
            WHERE buyer_intake_id = $1 AND campaign = 'mva-funnel'
            LIMIT 1`,
@@ -4493,7 +4493,7 @@ app.post('/postback/mva-funnel', async (req, res) => {
       }
       if (!lookup || !lookup.rows.length) {
         lookup = await client.query(
-          `SELECT id, first_name, last_name, phone, email, buyer_status, campaign
+          `SELECT id, first_name, last_name, phone, email, buyer_status, campaign, raw->>'aged_out' AS aged_out
            FROM leads
            WHERE phone = $1 AND campaign = 'mva-funnel'
            ORDER BY received_at DESC LIMIT 1`,
@@ -4507,6 +4507,13 @@ app.post('/postback/mva-funnel', async (req, res) => {
       }
 
       const lead = lookup.rows[0];
+
+      // patch 282: an aged-out lead (30+ days, written off) ignores replayed
+      // "Accepted"-type statuses - only a real signing gets through.
+      if (lead.aged_out === 'true' && !/sign/i.test(status)) {
+        console.log(`[MVA Postback] skipped aged-out lead ${lead.id} (replayed status: ${status})`);
+        return res.json({ ok: true, lead_id: lead.id, skipped: 'aged_out' });
+      }
 
       // Check if newly billable
       const wasAlreadyBillable = (() => {
@@ -5439,13 +5446,13 @@ async function pollKALeadsSheet() {
           let lookup;
           if (isMVA) {
             lookup = await client.query(
-              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
+              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked, raw->>'aged_out' as aged_out
                FROM leads WHERE phone = $1 AND campaign = $2 AND publisher_sub = ANY($3) LIMIT 1`,
               [phone, sheet.campaign, sheet.pubSubs]
             );
           } else {
             lookup = await client.query(
-              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
+              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked, raw->>'aged_out' as aged_out
                FROM leads WHERE buyer_intake_id = $1 AND campaign = $2 AND publisher_sub = ANY($3) LIMIT 1`,
               [cid, sheet.campaign, sheet.pubSubs]
             );
@@ -5464,6 +5471,8 @@ async function pollKALeadsSheet() {
             console.log(`[KA Sheet Poll] 🔒 Skipping locked lead id=${lead.id}`);
             continue;
           }
+          // patch 282: aged-out write-offs ignore stale sheet rows - only a signing gets through
+          if (lead.aged_out === 'true' && !(nldLower === 'signed' || nldLower.startsWith('signed'))) { skipped++; continue; }
           const wasAlreadyBillable = (() => {
             const prev = (lead.buyer_status || '').toLowerCase().trim();
             return prev === 'signed' || prev.startsWith('signed') ||
@@ -5730,13 +5739,13 @@ async function pollLairdLeadsSheet() {
           let lookup;
           if (cid) {
             lookup = await client.query(
-              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
+              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked, raw->>'aged_out' as aged_out
                FROM leads WHERE buyer_intake_id = $1 AND campaign = $2 LIMIT 1`,
               [cid, sheet.campaign]
             );
           } else if (phone) {
             lookup = await client.query(
-              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked
+              `SELECT id, status, buyer_status, raw->>'billable_locked' as locked, raw->>'aged_out' as aged_out
                FROM leads WHERE phone = $1 AND campaign = $2
                ORDER BY received_at DESC LIMIT 1`,
               [phone, sheet.campaign]
@@ -5754,6 +5763,9 @@ async function pollLairdLeadsSheet() {
             skipped++;
             continue;
           }
+
+          // patch 282: aged-out write-offs ignore stale sheet rows - only a signing gets through
+          if (lead.aged_out === 'true' && !/^signed/i.test((status || '').trim())) { skipped++; continue; }
 
           const patch = JSON.stringify({
             laird_sheet_sync: {
