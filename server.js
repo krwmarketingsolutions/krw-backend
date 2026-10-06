@@ -8128,6 +8128,87 @@ app.post('/janitor/run', async (req, res) => {
 });
 console.log('[Janitor] armed - daily at', JANITOR_TIME_ET, 'ET (manual: POST /janitor/run)');
 // ─── end patch 272 ────────────────────────────────────────────────────────────
+
+// ─── patch 274: weekly publisher reports ──────────────────────────────────────
+const WEEKLY_REPORT_TIME_ET = '20:00';   // Fridays
+let weeklyReportLastDate = null;
+function wrEsc(x) { return String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function wrEt(ts) { return new Date(ts).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+
+async function weeklyPublisherReports(trigger) {
+  const sent = [];
+  try {
+    const pubs = await pool.query(`
+      SELECT l.publisher_sub AS pub, COALESCE(MAX(p.name), l.publisher_sub) AS pub_name, COALESCE(MAX(p.payout_rate), 0) AS payout_rate
+      FROM leads l LEFT JOIN publishers p ON p.pub_id = l.publisher_sub
+      WHERE l.vertical <> 'SSDI' AND COALESCE(l.raw->>'excluded','') <> 'true' AND l.publisher_sub IS NOT NULL
+        AND l.received_at >= (date_trunc('week', NOW() AT TIME ZONE 'America/New_York')) AT TIME ZONE 'America/New_York'
+      GROUP BY l.publisher_sub`);
+    for (const pr of pubs.rows) {
+      const week = await pool.query(`
+        SELECT * FROM leads
+        WHERE publisher_sub = $1 AND vertical <> 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true'
+          AND received_at >= (date_trunc('week', NOW() AT TIME ZONE 'America/New_York')) AT TIME ZONE 'America/New_York'
+        ORDER BY received_at`, [pr.pub]);
+      const alltime = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM leads WHERE publisher_sub = $1 AND vertical <> 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true'`, [pr.pub]);
+      const views = week.rows.map(l => pbLeadView(l, pr.payout_rate)).filter(v => v.response !== 'Test');
+      if (!views.length) continue;
+      const counts = {};
+      views.forEach(v => { counts[v.response] = (counts[v.response] || 0) + 1; });
+      const byState = {};
+      views.forEach(v => { const st = v.state || '?'; byState[st] = (byState[st] || 0) + 1; });
+      const stateLine = Object.entries(byState).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(' · ');
+      const kpi = (label, n, color) => `<td style="border:1px solid #ddd;border-radius:4px;padding:10px 14px;text-align:center"><div style="font-size:22px;font-weight:bold;color:${color}">${n}</div><div style="font-size:10px;letter-spacing:1px;color:#666">${label}</div></td>`;
+      const rows = views.map(v =>
+        `<tr><td style="padding:4px 8px;border:1px solid #e5e5e5;white-space:nowrap">${wrEt(v.received_at)}</td>` +
+        `<td style="padding:4px 8px;border:1px solid #e5e5e5"><b>${wrEsc(v.first_name)} ${wrEsc(v.last_name)}</b><br><span style="color:#888;font-size:11px">${wrEsc(v.phone)}</span></td>` +
+        `<td style="padding:4px 8px;border:1px solid #e5e5e5">${wrEsc(v.state)}</td>` +
+        `<td style="padding:4px 8px;border:1px solid #e5e5e5"><b>${wrEsc(v.response)}</b>${v.notes ? `<br><i style="color:#777;font-size:11px">${wrEsc(v.notes)}</i>` : ''}</td></tr>`).join('');
+      const html = `
+<div style="font-family:Georgia,serif;color:#1c1a15;max-width:760px">
+  <h2 style="margin:0">${wrEsc(pr.pub_name)} — Weekly MVA Lead Report</h2>
+  <p style="color:#666;margin:4px 0 14px 0;border-bottom:3px solid #20392B;padding-bottom:8px">Week of ${new Date(Date.now() - 4 * 86400000).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' })} — ${new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric' })} · Prepared by KRW Marketing Solutions</p>
+  <table cellspacing="6"><tr>
+    ${kpi('SIGNED', counts['Signed'] || 0, '#1e6b34')}
+    ${kpi('IN OUTREACH', counts['In outreach'] || 0, '#a87400')}
+    ${kpi('DELIVERED', counts['Delivered'] || 0, '#2b5486')}
+    ${kpi('REJECTED / ND', (counts['Rejected'] || 0) + (counts['Not delivered'] || 0) + (counts['Not worked'] || 0), '#b02a20')}
+    ${kpi('THIS WEEK', views.length, '#1c1a15')}
+    ${kpi('ALL-TIME SENT', alltime.rows[0].n, '#1c1a15')}
+  </tr></table>
+  <p style="color:#555"><b>By state:</b> ${wrEsc(stateLine)}</p>
+  <table style="border-collapse:collapse;width:100%;font-size:12px">
+    <tr><th style="background:#f0ede4;text-align:left;padding:6px 8px;border:1px solid #ddd">Received (ET)</th><th style="background:#f0ede4;text-align:left;padding:6px 8px;border:1px solid #ddd">Lead</th><th style="background:#f0ede4;text-align:left;padding:6px 8px;border:1px solid #ddd">State</th><th style="background:#f0ede4;text-align:left;padding:6px 8px;border:1px solid #ddd">Status</th></tr>
+    ${rows}
+  </table>
+  <p style="color:#999;font-size:10px;border-top:1px solid #ddd;padding-top:6px">KRW Marketing Solutions — weekly lead report · statuses update live on your portal</p>
+</div>`;
+      await sendEmailNotification(`Weekly report — ${pr.pub_name} (${views.length} leads) — ready to forward`, html);
+      sent.push(`${pr.pub_name}: ${views.length} leads`);
+    }
+    console.log(`[Weekly Reports] (${trigger}) sent ${sent.length} report(s): ${sent.join(' | ') || 'none'}`);
+  } catch (e) { console.error('[Weekly Reports] error:', e.message); }
+  return sent;
+}
+
+setInterval(() => {
+  const now = new Date();
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const hm = now.toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' });
+  const d  = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (et.getDay() !== 5 || hm !== WEEKLY_REPORT_TIME_ET || weeklyReportLastDate === d) return;
+  weeklyReportLastDate = d;
+  weeklyPublisherReports('friday').catch(e => console.error('[Weekly Reports] fatal:', e.message));
+}, 60 * 1000);
+app.post('/reports/weekly/run', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  if (key !== (process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29')) return res.status(401).json({ ok: false });
+  const out = await weeklyPublisherReports('manual');
+  res.json({ ok: true, sent: out });
+});
+console.log('[Weekly Reports] armed - Fridays', WEEKLY_REPORT_TIME_ET, 'ET (manual: POST /reports/weekly/run)');
+// ─── end patch 274 ────────────────────────────────────────────────────────────
 // ─── END MVA PUBLISHER PORTAL v2 + POSTBACKS ─────────────────────────────────
 
 
