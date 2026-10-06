@@ -8459,6 +8459,10 @@ async function bsScanOne(cfg, trigger) {
         if (!lead) { rep.unmatched++; continue; }
         rep.matched++;
         if (!cls || !cfg.enabled) { rep.skipped++; continue; }
+        // patch 281: a lead written off as aged-out (30+ days, no buyer update) stays
+        // Rejected even if the sheet still carries a stale open row. A billable row
+        // still wins - a late signing resurrects the lead into the approval queue.
+        if (lead.raw && lead.raw.aged_out === true && cls.kind !== 'billable') { rep.skipped++; continue; }
         const locked = lead.raw && lead.raw.billable_locked === 'true';
         if (cls.kind === 'billable') {
           // already queued (any state) for this lead from a sheet? never twice
