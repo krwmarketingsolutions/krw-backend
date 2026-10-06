@@ -7893,6 +7893,86 @@ async function pbPoll() {
   }
 }
 setInterval(() => pbPoll().catch(e => console.error('[Portal Postbacks] poll error:', e.message)), PB_POLL_MS);
+
+// ─── patch 271: Kyler alert sweep ─────────────────────────────────────────────
+// Proactive emails to NOTIFY_EMAIL so problems surface without checking the
+// dashboard. Each alert fires at most once per ET day per subject; dedupe is
+// in-memory, so a redeploy may re-send at most one round - harmless.
+const KYLER_ALERTS_EVERY_MS = 30 * 60 * 1000;
+const kylerAlertsSent = new Map();
+function kaFired(etDate, type, key) {
+  const k = etDate + '|' + type + '|' + key;
+  if (kylerAlertsSent.has(k)) return true;
+  if (kylerAlertsSent.size > 1000) kylerAlertsSent.clear();
+  kylerAlertsSent.set(k, true);
+  return false;
+}
+async function kylerAlertsSweep() {
+  try {
+    const now = new Date();
+    const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const etDow  = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getDay();
+    const etHour = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+
+    // 1) Cap burn: 5+ volume-cap rejections for one publisher today
+    const cap = await pool.query(
+      `SELECT publisher_sub, COUNT(*)::int AS n FROM leads
+       WHERE status='rejected' AND raw->'buyer_disposition'->>'source'='state_cap'
+         AND (received_at AT TIME ZONE 'America/New_York')::date = $1::date
+       GROUP BY 1 HAVING COUNT(*) >= 5`, [etDate]);
+    for (const r of cap.rows) {
+      if (kaFired(etDate, 'capburn', r.publisher_sub)) continue;
+      await sendEmailNotification(
+        `⚠ Cap burn — ${r.publisher_sub}: ${r.n} leads rejected on volume caps today`,
+        `<p><b>${r.n}</b> leads from <b>${r.publisher_sub}</b> hit daily volume caps today (ET) and earned nothing. Consider throttling the publisher or revisiting the cap.</p>`);
+    }
+
+    // 2) TrustedForm gate spike: 3+ consent rejections for one publisher today
+    const tf = await pool.query(
+      `SELECT publisher_sub, COUNT(*)::int AS n FROM leads
+       WHERE status='rejected' AND raw->'buyer_disposition'->>'source'='tf_gate'
+         AND (received_at AT TIME ZONE 'America/New_York')::date = $1::date
+       GROUP BY 1 HAVING COUNT(*) >= 3`, [etDate]);
+    for (const r of tf.rows) {
+      if (kaFired(etDate, 'tfgate', r.publisher_sub)) continue;
+      await sendEmailNotification(
+        `⚠ Consent alert — ${r.publisher_sub} hit the TrustedForm gate ${r.n}x today`,
+        `<p><b>${r.publisher_sub}</b> sent <b>${r.n}</b> leads today that were rejected for missing, invalid or REUSED TrustedForm certificates. Reused certs mean recycled consent — worth a direct conversation with the publisher.</p>`);
+    }
+
+    // 3 & 4) Buyer-sheet health - weekdays, working hours ET only
+    if (etDow >= 1 && etDow <= 5 && etHour >= 8 && etHour <= 21) {
+      const sheets = await pool.query(
+        `SELECT DISTINCT ON (buyer_key) buyer_key, modified_time
+         FROM buyer_sheet_scans WHERE ok = true AND modified_time IS NOT NULL
+         ORDER BY buyer_key, scanned_at DESC`);
+      for (const r of sheets.rows) {
+        const hrs = Math.floor((now - new Date(r.modified_time)) / 3600000);
+        if (hrs >= 48 && !kaFired(etDate, 'stalesheet', r.buyer_key)) {
+          await sendEmailNotification(
+            `⚠ Buyer sheet silent — ${r.buyer_key} not updated in ${hrs}h`,
+            `<p>The <b>${r.buyer_key}</b> disposition sheet was last edited <b>${hrs} hours ago</b>. Leads are likely sitting unworked or undispositioned — worth a nudge.</p>`);
+        }
+      }
+      const fails = await pool.query(
+        `SELECT buyer_key, MAX(error) AS last_error FROM (
+           SELECT buyer_key, ok, error, ROW_NUMBER() OVER (PARTITION BY buyer_key ORDER BY scanned_at DESC) rn
+           FROM buyer_sheet_scans) t
+         WHERE rn <= 2 GROUP BY buyer_key
+         HAVING COUNT(*) = 2 AND BOOL_OR(ok) = false`);
+      for (const r of fails.rows) {
+        if (kaFired(etDate, 'scanfail', r.buyer_key)) continue;
+        await sendEmailNotification(
+          `⚠ Sheet scanner failing — ${r.buyer_key}`,
+          `<p>The last two scans of the <b>${r.buyer_key}</b> sheet both failed. Latest error: <code>${String(r.last_error || 'unknown').slice(0, 200)}</code>. Dispositions are not syncing until this is fixed.</p>`);
+      }
+    }
+  } catch (e) { console.error('[Kyler Alerts] sweep error:', e.message); }
+}
+setInterval(kylerAlertsSweep, KYLER_ALERTS_EVERY_MS);
+setTimeout(kylerAlertsSweep, 3 * 60 * 1000);   // first pass 3 min after boot
+console.log('[Kyler Alerts] sweep armed - every 30 min, email to', process.env.NOTIFY_EMAIL || '(NOTIFY_EMAIL unset)');
+// ─── end patch 271 ────────────────────────────────────────────────────────────
 // ─── END MVA PUBLISHER PORTAL v2 + POSTBACKS ─────────────────────────────────
 
 
