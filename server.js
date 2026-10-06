@@ -7714,7 +7714,7 @@ function pbLeadViewBase(l, payoutRate) {
     injury: raw.injury || raw.physical_injury || null, at_fault: raw.at_fault || null, have_attorney: raw.have_attorney || null,
     case_description: raw.case_description || raw.summary || raw.description || null, county: raw.county || null,
     submitted_status: st, response, notes: safeNotes,
-    updated_at: dispo.synced_at || null, billable: !!l.billable,
+    updated_at: dispo.confirmed_at || dispo.synced_at || null, billable: !!l.billable,
     payout: l.billable ? parseFloat(payoutRate || 0) : 0,
     trustedform: raw.trustedform_cert_url || null,
   };
@@ -8469,18 +8469,23 @@ async function bsScanOne(cfg, trigger) {
             [r.phone || lead.id, cfg.amount, lead.publisher_sub, lead.id, JSON.stringify({ source: 'buyer_sheet', buyer_key: cfg.key, buyer: cfg.buyer, vertical: cfg.vertical, sheet_status: r.status, sheet_notes: r.notes, sheet_date: r.date, invoice: r.invoice, scanned_at: new Date().toISOString(), trigger })]);
           // Nothing says "Signed" anywhere until Kyler approves it. Until then the lead
           // reads Pending on the portal, with no reason that reveals the buyer's report.
-          await client.query(`UPDATE leads SET buyer_status='Pending', notes='In outreach', raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$1::text,'status','Pending','note','In outreach','sheet_status',$2::text,'awaiting_approval',true,'synced_at',NOW())) WHERE id=$3::int`, [cfg.key, r.status, lead.id]);
+          await client.query(`UPDATE leads SET buyer_status='Pending', notes='In outreach', raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$1::text,'status','Pending','note','In outreach','sheet_status',$2::text,'awaiting_approval',true,'synced_at',NOW(),'confirmed_at',NOW())) WHERE id=$3::int`, [cfg.key, r.status, lead.id]);
           rep.queued++;
           console.log(`[Buyer Sheets] $ ${cfg.label} | lead ${lead.id} ${r.name} | ${r.status} -> queued for approval ($${cfg.amount})`);
           continue;
         }
         // non-billable: apply only if it changed
         const prev = (lead.raw && lead.raw.buyer_disposition) || {};
-        if (prev.source === 'buyer_sheet' && prev.status === cls.status && prev.note === cls.note) { rep.skipped++; continue; }
+        if (prev.source === 'buyer_sheet' && prev.status === cls.status && prev.note === cls.note) {
+          // patch 280: unchanged, but just confirmed against the live sheet - stamp it so the
+          // portal's "updated" time stays honest. Postbacks key on synced_at, so no re-fires.
+          await client.query(`UPDATE leads SET raw = jsonb_set(COALESCE(raw,'{}'::jsonb), '{buyer_disposition,confirmed_at}', to_jsonb(NOW()), true) WHERE id=$1::int`, [lead.id]);
+          rep.skipped++; continue;
+        }
         if (locked || lead.billable) { rep.skipped++; continue; }   // never downgrade an approved billable from a sheet
         await client.query(
           `UPDATE leads SET buyer_status=$1::text, status=CASE WHEN $2::text='rejected' THEN 'buyer_rejected' ELSE status END, notes=$3::text,
-             raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$4::text,'status',$1::text,'note',$3::text,'sheet_status',$5::text,'synced_at',NOW()))
+             raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_sheet','buyer_key',$4::text,'status',$1::text,'note',$3::text,'sheet_status',$5::text,'synced_at',NOW(),'confirmed_at',NOW()))
            WHERE id=$6::int`, [cls.status, cls.kind, cls.note, cfg.key, r.status, lead.id]);
         rep.updated++;
       }
