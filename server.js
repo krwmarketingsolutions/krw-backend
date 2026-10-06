@@ -8253,6 +8253,54 @@ app.put('/outreach/contacts', async (req, res) => {
 });
 console.log('[Outreach] contact store ready - GET/PUT /outreach/contacts');
 // ─── end patch 275 ────────────────────────────────────────────────────────────
+
+// ─── patch 279: stale-lead chase list ─────────────────────────────────────────
+// Daily digest of every lead a buyer is sitting on, so stale portals get
+// chased instead of discovered. Weekdays, first sweep after 9 AM ET; one
+// email per day, and only when there is something to chase.
+const CHASE_NO_DISPO_DAYS = parseInt(process.env.CHASE_NO_DISPO_DAYS || '3', 10);
+const CHASE_STUCK_DAYS    = parseInt(process.env.CHASE_STUCK_DAYS || '10', 10);
+let chaseLastSent = null;
+async function staleChaseSweep() {
+  try {
+    const now = new Date();
+    const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const etDow  = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getDay();
+    const etHour = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+    if (etDow < 1 || etDow > 5 || etHour < 9 || etHour > 20) return;
+    if (chaseLastSent === etDate) return;
+    const r = await pool.query(
+      `SELECT id, received_at, campaign, publisher_sub, first_name, last_name, state,
+              COALESCE(buyer_status,'') AS buyer_status, COALESCE(notes,'') AS notes,
+              FLOOR(EXTRACT(EPOCH FROM (NOW() - received_at)) / 86400)::int AS days,
+              (COALESCE(buyer_status,'') = '') AS no_dispo
+       FROM leads
+       WHERE status = 'forwarded'
+         AND COALESCE(vertical,'') <> 'SSDI'
+         AND COALESCE(raw->>'excluded','') <> 'true'
+         AND COALESCE(buyer_status,'') NOT IN ('Signed','Retained','Rejected','Returned','Test')
+         AND (COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')) NOT ILIKE '%test%'
+         AND ( (COALESCE(buyer_status,'') = ''  AND received_at < NOW() - make_interval(days => $1))
+            OR (COALESCE(buyer_status,'') <> '' AND received_at < NOW() - make_interval(days => $2)) )
+       ORDER BY received_at ASC LIMIT 60`, [CHASE_NO_DISPO_DAYS, CHASE_STUCK_DAYS]);
+    if (!r.rows.length) { chaseLastSent = etDate; return; }
+    const fmt = d => new Date(d).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: '2-digit', day: '2-digit' });
+    const row = l => `<tr><td>#${l.id}</td><td>${(l.first_name || '') + ' ' + (l.last_name || '')}</td><td>${l.campaign}</td><td>${l.publisher_sub || ''}</td><td>${fmt(l.received_at)}</td><td><b>${l.days}d</b></td><td>${l.no_dispo ? '<i>never dispositioned</i>' : (l.buyer_status + (l.notes ? ' — ' + l.notes : ''))}</td></tr>`;
+    const noDispo = r.rows.filter(l => l.no_dispo), stuck = r.rows.filter(l => !l.no_dispo);
+    const tbl = rows => '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-size:13px"><tr><th>Lead</th><th>Name</th><th>Campaign</th><th>Publisher</th><th>Sent</th><th>Waiting</th><th>Last buyer update</th></tr>' + rows.map(row).join('') + '</table>';
+    let html = '<p>These leads are waiting on the buyer. The sheet scanner is syncing fine - the buyer just has not logged an outcome.</p>';
+    if (noDispo.length) html += `<p><b>No disposition at all after ${CHASE_NO_DISPO_DAYS}+ days (${noDispo.length}):</b></p>` + tbl(noDispo);
+    if (stuck.length)   html += `<p><b>Still open/in outreach after ${CHASE_STUCK_DAYS}+ days (${stuck.length}):</b></p>` + tbl(stuck);
+    html += '<p>Worth a nudge to the buyer - or write them off so the portal reads clean.</p>';
+    await sendEmailNotification(`⚠ Chase list — ${r.rows.length} lead${r.rows.length > 1 ? 's' : ''} waiting on buyer updates`, html);
+    chaseLastSent = etDate;
+    console.log(`[Chase List] sent - ${noDispo.length} undispositioned, ${stuck.length} stuck`);
+  } catch (e) { console.error('[Chase List] sweep error:', e.message); }
+}
+setInterval(staleChaseSweep, 30 * 60 * 1000);
+setTimeout(staleChaseSweep, 4 * 60 * 1000);
+console.log('[Chase List] armed - daily digest of leads waiting on buyer updates');
+// ─── end patch 279 ────────────────────────────────────────────────────────────
 // ─── END MVA PUBLISHER PORTAL v2 + POSTBACKS ─────────────────────────────────
 
 
@@ -8271,6 +8319,7 @@ console.log('[Outreach] contact store ready - GET/PUT /outreach/contacts');
 // Sheets are matched to leads by phone, restricted to leads whose recorded
 // buyer is that sheet's buyer, so a number that went to two buyers cannot cross.
 const BS_SCAN_TIMES = ['08:00', '11:00', '13:00', '15:00', '21:00'];   // America/New_York, Mon-Fri
+const BS_WEEKEND_SCAN_TIMES = ['11:00', '17:00'];   // patch 279: weekend scans so portals stay current
 const BS_BILLABLE = /\b(signed|retained|retainer|billable|converted|conversion|accepted by firm|hired|closed won)\b/i;
 const BS_REJECT   = /\b(reject\w*|not qualified|unqualified|dq|disqualif\w*|unresponsive|wrong number|stop|dnc|duplicate|dupe|not viable|no injury|no insurance|out of state|outside|declin\w*|dead|closed lost|lost|returned|opted out|not interested|no contact|never (made|answered)|unable to reach)\b/i;
 const BS_OPEN     = /\b(chase|outreach|attempt|contacted|in progress|working|scheduled|pending|under review|reviewing|callback|call back|open|waiting)\b|answering machine|voice ?mail|left (message|vm)|no answer|\bbusy\b|\bringing\b|\bcalled\b|^new$/i;
@@ -8459,7 +8508,7 @@ const bsRan = new Set();
 function bsEasternNow() { const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour12: false, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date()); const g = t => (p.find(x => x.type === t) || {}).value; return { day: `${g('year')}-${g('month')}-${g('day')}`, hm: `${String(g('hour')).padStart(2, '0').replace('24', '00')}:${g('minute')}`, wd: g('weekday') }; }
 setInterval(() => {
   const { day, hm, wd } = bsEasternNow();
-  if (['Sat', 'Sun'].includes(wd) || !BS_SCAN_TIMES.includes(hm)) return;
+  if ((['Sat', 'Sun'].includes(wd) ? BS_WEEKEND_SCAN_TIMES : BS_SCAN_TIMES).indexOf(hm) < 0) return;   // patch 279
   const slot = day + ' ' + hm; if (bsRan.has(slot)) return; bsRan.add(slot);
   bsScanAll(hm + ' ET').catch(e => console.error('[Buyer Sheets] scheduled scan failed:', e.message));
 }, 30 * 1000);
