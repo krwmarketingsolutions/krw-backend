@@ -7988,6 +7988,7 @@ console.log('[Kyler Alerts] sweep armed - every 30 min, email to', process.env.N
 
 // ─── patch 272: overnight janitor ─────────────────────────────────────────────
 const JANITOR_TIME_ET = '06:00';
+const JAN_NLD_MAX = parseInt(process.env.JANITOR_NLD_MAX || '3', 10);   // patch 283: janitor's per-day NLD send limit
 let janitorLastRunDate = null;
 const JAN_INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','MO','NE','OK','TN'];
 const JAN_NLD_STATES    = ['UT','MT','WY','AZ','NV','OK','NE','ND','IA','NM'];
@@ -8082,7 +8083,7 @@ async function janitorRun() {
         if (process.env.LT_INTAKE_PASS && ltToday < chToday) rungs.push('LT-Intake', 'CH-Intake');
         else { rungs.push('CH-Intake'); if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake'); }
       }
-      if (JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < 3) rungs.push('NLD CPA');
+      if (JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX) rungs.push('NLD CPA');   // patch 283
       if (lt003Today < 5 && sent003 < 2) rungs.push('MVA-003-LT');
       if (!rungs.length) { lines.push(`lead ${row.id} ${row.first_name || ''} ${row.last_name || ''} | ${st} | no eligible buyer today - left as is`); continue; }
 
