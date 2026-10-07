@@ -6558,7 +6558,8 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
        FROM leads
        WHERE campaign IN ('mva-funnel','mva-nyc-split','mva-leadbloom2')
          AND publisher_sub = ANY($1::text[]) AND COALESCE(raw->>'excluded','') <> 'true'
-         AND ${sinceClause}`,
+         AND ${sinceClause}
+       ORDER BY (billable IS TRUE) DESC, (status='forwarded') DESC, (status='buyer_rejected') DESC, id DESC`,
       [Object.keys(mvaPubs)]
     );
 
@@ -6613,7 +6614,8 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       `SELECT publisher_sub, status, billable, revenue, phone
        FROM leads
        WHERE publisher_sub = ANY($1::text[])
-         AND ${sinceClause}`,
+         AND ${sinceClause}
+       ORDER BY (billable IS TRUE) DESC, (status='forwarded') DESC, (status='buyer_rejected') DESC, id DESC`,
       [Object.keys(ssdiPubs)]
     );
 
@@ -6625,8 +6627,9 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       `SELECT publisher_sub, billable, payout_amount AS revenue, caller_id
        FROM calls
        WHERE publisher_sub = 'KRW-JOSHUA-SIGNED'
-         AND ${sinceClause}`
-    );
+         AND ${sinceClause}
+       ORDER BY (billable IS TRUE) DESC, id DESC`
+    );   // patch 303: billed copy of a redialed number wins the de-dupe
 
     const ssdi = { publishers: {}, buyers: {} };
     for (const pubId of Object.keys(ssdiPubs)) {
@@ -6691,7 +6694,8 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       `SELECT publisher_sub, status, billable, revenue, phone
        FROM leads
        WHERE publisher_sub = ANY($1::text[])
-         AND ${sinceClause}`,
+         AND ${sinceClause}
+       ORDER BY (billable IS TRUE) DESC, (status='forwarded') DESC, (status='buyer_rejected') DESC, id DESC`,
       [Object.keys(massTortPubs)]
     );
 
@@ -8270,12 +8274,20 @@ async function janitorRun() {
       const rowPub = (await pool.query('SELECT publisher_sub FROM leads WHERE id=$1', [row.id])).rows[0].publisher_sub;
 
       const rungs = [];
-      if (JAN_INTAKE_STATES.includes(st)) {
+      const janPushIntake = () => {
         if (process.env.LT_INTAKE_PASS && ltToday < chToday) rungs.push('LT-Intake', 'CH-Intake');
         else { rungs.push('CH-Intake'); if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake'); }
-      }
+      };
+      if (JAN_INTAKE_STATES.includes(st)) janPushIntake();
       if (JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX) rungs.push('NLD CPA');   // patch 283
-      if (lt003Today < 5 && sent003 < 2) rungs.push('MVA-003-LT');
+      // patch 302 (Kyler, Oct 7): Leadbloom NEVER goes to 003 - the janitor
+      // included. Its out-of-state stuck leads fall back to CH/LT without the
+      // state filter, mirroring the live ladder's overflow rung (patch 299).
+      if (rowPub === 'KRW-LEADBLOOM-MVA') {
+        if (!JAN_INTAKE_STATES.includes(st)) janPushIntake();
+      } else if (lt003Today < 5 && sent003 < 2) {
+        rungs.push('MVA-003-LT');
+      }
       if (!rungs.length) { lines.push(`lead ${row.id} ${row.first_name || ''} ${row.last_name || ''} | ${st} | no eligible buyer today - left as is`); continue; }
 
       attempted++;
