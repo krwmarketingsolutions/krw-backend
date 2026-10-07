@@ -6573,7 +6573,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       [Object.keys(mvaPubs)]
     );
 
-    const mva = { publishers: {}, buyers: {} };
+    const mva = { publishers: {}, buyers: {}, edges: {} };   // patch 308: edges = real pub->buyer flow
     for (const pubId of Object.keys(mvaPubs)) {
       mva.publishers[pubId] = { name: mvaPubs[pubId], received: 0, forwarded: 0, accepted: 0, revenue: 0 };
     }
@@ -6608,6 +6608,12 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       const buyerName = (row.status !== 'rejected' && row.buyer_name) ? row.buyer_name : 'Rejected';
       if (!mva.buyers[buyerName]) mva.buyers[buyerName] = { received: 0, accepted: 0, revenue: 0 };
       mva.buyers[buyerName].received++;
+      // patch 308: count the real flow per publisher->buyer pair, so the
+      // funnel can draw lines for traffic that actually happened.
+      if (buyerName !== 'Rejected') {
+        if (!mva.edges[row.publisher_sub]) mva.edges[row.publisher_sub] = {};
+        mva.edges[row.publisher_sub][buyerName] = (mva.edges[row.publisher_sub][buyerName] || 0) + 1;
+      }
       if (row.billable) { mva.buyers[buyerName].accepted++; mva.buyers[buyerName].revenue += parseFloat(row.revenue || 0); }
     }
 
@@ -6641,7 +6647,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
        ORDER BY (billable IS TRUE) DESC, id DESC`
     );   // patch 303: billed copy of a redialed number wins the de-dupe
 
-    const ssdi = { publishers: {}, buyers: {} };
+    const ssdi = { publishers: {}, buyers: {}, edges: {} };   // patch 308
     for (const pubId of Object.keys(ssdiPubs)) {
       ssdi.publishers[pubId] = { name: ssdiPubs[pubId].name, buyer: ssdiPubs[pubId].buyer, received: 0, forwarded: 0, accepted: 0, revenue: 0 };
     }
@@ -6709,7 +6715,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       [Object.keys(massTortPubs)]
     );
 
-    const mass_tort = { publishers: {}, buyers: {} };
+    const mass_tort = { publishers: {}, buyers: {}, edges: {} };   // patch 308
     for (const pubId of Object.keys(massTortPubs)) {
       mass_tort.publishers[pubId] = { name: massTortPubs[pubId].name, buyer: massTortPubs[pubId].buyer, received: 0, forwarded: 0, accepted: 0, revenue: 0 };
     }
@@ -6735,6 +6741,15 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       }
     }
 
+    // patch 308: 1:1 sections - the edge is simply the publisher's forwarded
+    // count into its only buyer.
+    for (const [pid, p] of Object.entries(ssdi.publishers)) {
+      if (p.forwarded > 0) ssdi.edges[pid] = { [p.buyer]: p.forwarded };
+    }
+    for (const [pid, p] of Object.entries(mass_tort.publishers)) {
+      if (p.forwarded > 0) mass_tort.edges[pid] = { [p.buyer]: p.forwarded };
+    }
+
     res.json({
       ok: true,
       period,
@@ -6746,9 +6761,10 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // Lumrah LLC (Noah) is isolated: NLD (12/day cap) with overflow to 003.
         // CH-Intake and LT-Intake are drawn as buyer nodes; their live routing
         // is wired separately once Kyler confirms the split (Sep 16).
-        'KRW-KANTHONY-RS':  ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // rides the NYC ladder (patch 266)
-        [LEADBLOOM_PUB_ID]: ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // rides the NYC ladder (patch 267); one Leadbloom account (patch 268)
-        'KRW-NYC-MVA':      ['CH-Intake', 'LT-Intake', 'NLD CPA', 'MVA-003-LT'], // ladder order (Sep 16)
+        // patch 308: MVA-003-LT removed - 003 is off for every publisher (patch 305)
+        'KRW-KANTHONY-RS':  ['CH-Intake', 'LT-Intake', 'NLD CPA'],
+        [LEADBLOOM_PUB_ID]: ['CH-Intake', 'LT-Intake', 'NLD CPA'],
+        'KRW-NYC-MVA':      ['CH-Intake', 'LT-Intake', 'NLD CPA'],
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Signed (TD)'], // Fields Law paused - this line now routes via Trackdrive
