@@ -32,8 +32,11 @@ app.use((req, res, next) => {
 });
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+  // patch 292: Authorization is what the dashboard's login token rides in.
+  // Without it here the browser blocks the request before it is ever sent.
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Max-Age', '600');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
