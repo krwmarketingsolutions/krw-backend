@@ -2807,9 +2807,7 @@ const MVA_BUYERS = [
   // are excluded here too for clarity in case that upstream block ever moves.
   {
     name:   'MVA-003-LT',
-    states: ['AL','AK','AZ','AR','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA',
-              'ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK',
-              'OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'], // all states except CA, CO
+    states: [],   // patch 305 (Kyler, Oct 7): 003 turned off completely - this entry can never match a lead again
     async post(b, publisherSub) {
       const stateCode = (b.state || b.incident_state || '').toUpperCase().trim();
       const incidentStateFull = US_STATE_FULL_NAMES[stateCode] || b.incident_state || null;
@@ -3432,7 +3430,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
     { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
     { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
-    { name: 'MVA-003-LT', priority: 3, group: '003',    cap: 5,    payout: 1700, enabled: true,                 states: 'ALL' },
+    { name: 'MVA-003-LT', priority: 3, group: '003',    cap: 5,    payout: 1700, enabled: false,                states: 'ALL' },   // patch 305: 003 off
   ];
 
   // patch 299 (Kyler, Oct 7): Leadbloom is OFF MVA-003-LT completely. CH and
@@ -3448,7 +3446,10 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     { name: 'CH-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2250, enabled: true,                        states: 'ALL' },
     { name: 'LT-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },
   ];
-  const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LEADBLOOM_LADDER : NYC_LADDER;
+  // patch 305 (Kyler, Oct 7): 003 is OFF for EVERYONE. Every publisher rides
+  // the same ladder: CH/LT (intake states) -> NLD -> CH/LT (any state).
+  // NYC_LADDER above is no longer selected; its 003 entry is also disabled.
+  const LADDER_FOR_PUB = LEADBLOOM_LADDER;
 
   if (missing.length) {
     return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
@@ -8296,14 +8297,10 @@ async function janitorRun() {
       };
       if (JAN_INTAKE_STATES.includes(st)) janPushIntake();
       if (JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX) rungs.push('NLD CPA');   // patch 283
-      // patch 302 (Kyler, Oct 7): Leadbloom NEVER goes to 003 - the janitor
-      // included. Its out-of-state stuck leads fall back to CH/LT without the
-      // state filter, mirroring the live ladder's overflow rung (patch 299).
-      if (rowPub === 'KRW-LEADBLOOM-MVA') {
-        if (!JAN_INTAKE_STATES.includes(st)) janPushIntake();
-      } else if (lt003Today < 5 && sent003 < 2) {
-        rungs.push('MVA-003-LT');
-      }
+      // patch 305 (Kyler, Oct 7): 003 is off for EVERY publisher (extends
+      // patch 302, which was Leadbloom-only). Stuck out-of-state leads fall
+      // back to CH/LT without the state filter.
+      if (!JAN_INTAKE_STATES.includes(st)) janPushIntake();
       if (!rungs.length) { lines.push(`lead ${row.id} ${row.first_name || ''} ${row.last_name || ''} | ${st} | no eligible buyer today - left as is`); continue; }
 
       attempted++;
@@ -8408,13 +8405,9 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     };
     if (JAN_INTAKE_STATES.includes(st)) pushIntake();
     if (NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10) rungs.push('NLD CPA');
-    if (isLeadbloom) {
-      // patch 299 rule: Leadbloom never goes to 003. Out-of-state leads fall
-      // back to CH/LT without the state filter instead.
-      if (!JAN_INTAKE_STATES.includes(st)) pushIntake();
-    } else if (lt003Today < 5) {
-      rungs.push('MVA-003-LT');
-    }
+    // patch 305: 003 is off for every publisher - out-of-state leads fall
+    // back to CH/LT without the state filter.
+    if (!JAN_INTAKE_STATES.includes(st)) pushIntake();
     const plan = rungs.filter((x, i) => rungs.indexOf(x) === i);   // dedupe, order kept
     if (!plan.length) return res.status(409).json({ ok: false, error: 'No eligible buyer right now (caps reached)', state: st });
 
