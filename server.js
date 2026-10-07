@@ -798,9 +798,37 @@ app.patch('/calls/:id', requireKey, async (req, res) => {
 
 app.patch('/calls/:id/billable', requireKey, async (req, res) => {
   try {
-    const { billable } = req.body;
-    await pool.query('UPDATE calls SET billable=$1 WHERE id=$2',[billable===true||billable==='true', req.params.id]);
-    res.json({ ok:true });
+    const b = req.body || {};
+    const billable = b.billable === true || b.billable === 'true';
+    // patch 300: payout_amount and call_status_label are optional and are
+    // written ONLY when explicitly sent, so the dashboard's existing toggle
+    // (which sends just {billable}) behaves exactly as it did before.
+    // Without them a call can be flagged billable while still carrying
+    // payout_amount 0.00, which adds nothing to the publisher's payout.
+    const sets = ['billable=$1'];
+    const params = [billable];
+    let i = 2;
+    if (b.payout_amount !== undefined && b.payout_amount !== null && b.payout_amount !== '') {
+      const amt = parseFloat(b.payout_amount);
+      if (!isFinite(amt) || amt < 0) {
+        return res.status(400).json({ ok: false, error: 'payout_amount must be a non-negative number' });
+      }
+      sets.push('payout_amount=$' + (i++));
+      params.push(amt.toFixed(2));
+    }
+    if (b.call_status_label) {
+      sets.push('call_status_label=$' + (i++));
+      params.push(String(b.call_status_label));
+    }
+    params.push(req.params.id);
+    const r = await pool.query(
+      'UPDATE calls SET ' + sets.join(', ') + ' WHERE id=$' + i +
+      ' RETURNING id, call_date, caller_id, call_duration, billable, payout_amount,' +
+      ' call_status_label, disposition, publisher_sub, campaign',
+      params);
+    if (!r.rows[0]) return res.status(404).json({ ok: false, error: 'Call not found' });
+    console.log(`[Calls] billable=${billable} | call ${r.rows[0].id} | CID ${r.rows[0].caller_id} | $${r.rows[0].payout_amount} | ${r.rows[0].call_duration}s`);
+    res.json({ ok: true, call: r.rows[0] });
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
@@ -3407,6 +3435,21 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     { name: 'MVA-003-LT', priority: 3, group: '003',    cap: 5,    payout: 1700, enabled: true,                 states: 'ALL' },
   ];
 
+  // patch 299 (Kyler, Oct 7): Leadbloom is OFF MVA-003-LT completely. CH and
+  // LT take its out-of-state leads as the bottom rung instead, so nothing on
+  // this line sells at $1,700 and nothing goes undelivered for want of a
+  // nationwide buyer. Order still puts NLD ($2,000) ahead of the out-of-state
+  // intake attempt, so a lead is only pushed outside a buyer's stated states
+  // once the buyer who does cover that state has passed on it.
+  const LEADBLOOM_LADDER = [
+    { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
+    { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
+    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
+    { name: 'CH-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2250, enabled: true,                        states: 'ALL' },
+    { name: 'LT-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },
+  ];
+  const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LEADBLOOM_LADDER : NYC_LADDER;
+
   if (missing.length) {
     return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
   }
@@ -3495,7 +3538,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   if (!b.injury && !b.physical_injury) missing.push('injury (or physical_injury)');
   if (missing.length) return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
 
-  const eligible = NYC_LADDER.filter(buyer => {
+  const eligible = LADDER_FOR_PUB.filter(buyer => {   // patch 299
     if (!buyer.enabled) return false;
     if (buyer.states !== 'ALL' && !buyer.states.includes(leadState)) return false;
     if (buyer.cap != null && (todayCount[buyer.name] || 0) >= buyer.cap) return false;
@@ -3509,7 +3552,12 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     if (ca !== cb) return ca - cb;
     return (lastAt[a.name] || 0) - (lastAt[b2.name] || 0);
   });
-  const ladderPlan = eligible.map(x => x.name);
+  // patch 299: a buyer can appear on both its state rung and the nationwide
+  // overflow rung. Keep only its first (best-priority) appearance so the
+  // ladder never re-posts the same lead to a buyer that already declined it.
+  const seenBuyer = new Set();
+  const ladder = eligible.filter(x => { if (seenBuyer.has(x.name)) return false; seenBuyer.add(x.name); return true; });
+  const ladderPlan = ladder.map(x => x.name);
   console.log(`[MVA-NYC-SPLIT] ${b.first_name} ${b.last_name} | ${leadState} | ladder: ${ladderPlan.join(' -> ') || 'nobody eligible'}${nldMissing.length ? ' | NLD skipped, missing ' + nldMissing.join(',') : ''}`);
 
   // Insert lead first, regardless of buyer outcome
@@ -3606,7 +3654,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // ── Walk the ladder ───────────────────────────────────────────────────
   const attempts = [];
   let buyerName = null, result = {}, accepted = false;
-  for (const buyer of eligible) {
+  for (const buyer of ladder) {   // patch 299: deduped
     try {
       const out = await senders[buyer.name]();
       attempts.push({ buyer: buyer.name, accepted: out.accepted, response: out.result });
