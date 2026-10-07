@@ -8102,13 +8102,32 @@ setInterval(() => pbPoll().catch(e => console.error('[Portal Postbacks] poll err
 // dashboard. Each alert fires at most once per ET day per subject; dedupe is
 // in-memory, so a redeploy may re-send at most one round - harmless.
 const KYLER_ALERTS_EVERY_MS = 30 * 60 * 1000;
-const kylerAlertsSent = new Map();
-function kaFired(etDate, type, key) {
-  const k = etDate + '|' + type + '|' + key;
-  if (kylerAlertsSent.has(k)) return true;
-  if (kylerAlertsSent.size > 1000) kylerAlertsSent.clear();
-  kylerAlertsSent.set(k, true);
-  return false;
+// patch 304: dedupe and delivery live in the database now. Alerts queue in
+// notify_outbox and go out inside the twice-daily brief instead of emailing
+// the moment they are detected. The UNIQUE constraint is what makes the
+// dedupe survive redeploys - the in-memory Map this replaces re-sent the
+// same alerts after every one of today's 7 deploys.
+async function notifyOutboxInit() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS notify_outbox (
+    id SERIAL PRIMARY KEY,
+    day TEXT NOT NULL,
+    type TEXT NOT NULL,
+    key TEXT NOT NULL DEFAULT '',
+    subject TEXT,
+    html TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    sent_at TIMESTAMPTZ,
+    UNIQUE (day, type, key)
+  )`);
+}
+notifyOutboxInit().catch(e => console.error('[Notify Outbox] init error:', e.message));
+async function kaQueue(etDate, type, key, subject, html) {
+  try {
+    await pool.query(
+      `INSERT INTO notify_outbox (day, type, key, subject, html)
+       VALUES ($1,$2,$3,$4,$5) ON CONFLICT (day, type, key) DO NOTHING`,
+      [etDate, type, String(key || ''), subject, html]);
+  } catch (e) { console.error('[Notify Outbox] queue error:', e.message); }
 }
 async function kylerAlertsSweep() {
   try {
@@ -8124,9 +8143,8 @@ async function kylerAlertsSweep() {
          AND (received_at AT TIME ZONE 'America/New_York')::date = $1::date
        GROUP BY 1 HAVING COUNT(*) >= 5`, [etDate]);
     for (const r of cap.rows) {
-      if (kaFired(etDate, 'capburn', r.publisher_sub)) continue;
-      await sendEmailNotification(
-        `⚠ Cap burn — ${r.publisher_sub}: ${r.n} leads rejected on volume caps today`,
+      await kaQueue(etDate, 'capburn', r.publisher_sub,
+        `Cap burn — ${r.publisher_sub}: ${r.n} leads rejected on volume caps today`,
         `<p><b>${r.n}</b> leads from <b>${r.publisher_sub}</b> hit daily volume caps today (ET) and earned nothing. Consider throttling the publisher or revisiting the cap.</p>`);
     }
 
@@ -8137,9 +8155,8 @@ async function kylerAlertsSweep() {
          AND (received_at AT TIME ZONE 'America/New_York')::date = $1::date
        GROUP BY 1 HAVING COUNT(*) >= 3`, [etDate]);
     for (const r of tf.rows) {
-      if (kaFired(etDate, 'tfgate', r.publisher_sub)) continue;
-      await sendEmailNotification(
-        `⚠ Consent alert — ${r.publisher_sub} hit the TrustedForm gate ${r.n}x today`,
+      await kaQueue(etDate, 'tfgate', r.publisher_sub,
+        `Consent alert — ${r.publisher_sub} hit the TrustedForm gate ${r.n}x today`,
         `<p><b>${r.publisher_sub}</b> sent <b>${r.n}</b> leads today that were rejected for missing, invalid or REUSED TrustedForm certificates. Reused certs mean recycled consent — worth a direct conversation with the publisher.</p>`);
     }
 
@@ -8151,9 +8168,9 @@ async function kylerAlertsSweep() {
          ORDER BY buyer_key, scanned_at DESC`);
       for (const r of sheets.rows) {
         const hrs = Math.floor((now - new Date(r.modified_time)) / 3600000);
-        if (hrs >= 48 && !kaFired(etDate, 'stalesheet', r.buyer_key)) {
-          await sendEmailNotification(
-            `⚠ Buyer sheet silent — ${r.buyer_key} not updated in ${hrs}h`,
+        if (hrs >= 48) {
+          await kaQueue(etDate, 'stalesheet', r.buyer_key,
+            `Buyer sheet silent — ${r.buyer_key} not updated in ${hrs}h`,
             `<p>The <b>${r.buyer_key}</b> disposition sheet was last edited <b>${hrs} hours ago</b>. Leads are likely sitting unworked or undispositioned — worth a nudge.</p>`);
         }
       }
@@ -8164,9 +8181,8 @@ async function kylerAlertsSweep() {
          WHERE rn <= 2 GROUP BY buyer_key
          HAVING COUNT(*) = 2 AND BOOL_OR(ok) = false`);
       for (const r of fails.rows) {
-        if (kaFired(etDate, 'scanfail', r.buyer_key)) continue;
-        await sendEmailNotification(
-          `⚠ Sheet scanner failing — ${r.buyer_key}`,
+        await kaQueue(etDate, 'scanfail', r.buyer_key,
+          `Sheet scanner failing — ${r.buyer_key}`,
           `<p>The last two scans of the <b>${r.buyer_key}</b> sheet both failed. Latest error: <code>${String(r.last_error || 'unknown').slice(0, 200)}</code>. Dispositions are not syncing until this is fixed.</p>`);
       }
     }
@@ -8174,7 +8190,7 @@ async function kylerAlertsSweep() {
 }
 setInterval(kylerAlertsSweep, KYLER_ALERTS_EVERY_MS);
 setTimeout(kylerAlertsSweep, 3 * 60 * 1000);   // first pass 3 min after boot
-console.log('[Kyler Alerts] sweep armed - every 30 min, email to', process.env.NOTIFY_EMAIL || '(NOTIFY_EMAIL unset)');
+console.log('[Kyler Alerts] sweep armed - every 30 min, QUEUES into the twice-daily brief (patch 304)');
 // ─── end patch 271 ────────────────────────────────────────────────────────────
 
 // ─── patch 272: overnight janitor ─────────────────────────────────────────────
@@ -9187,15 +9203,12 @@ console.log('[Replies] reply watcher ' + (replyArmed()
 const CHASE_NO_DISPO_DAYS = parseInt(process.env.CHASE_NO_DISPO_DAYS || '3', 10);
 const CHASE_STUCK_DAYS    = parseInt(process.env.CHASE_STUCK_DAYS || '10', 10);
 const CHASE_MAX_DAYS      = parseInt(process.env.CHASE_MAX_DAYS || '14', 10);   // patch 284: chase emails only cover leads this fresh
-let chaseLastSent = null;
-async function staleChaseSweep() {
+async function buildChaseSection() {   // patch 304: returns html for the evening brief instead of emailing
   try {
     const now = new Date();
     const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const etDow  = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getDay();
     const etHour = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
-    if (etDow < 1 || etDow > 5 || etHour < 9 || etHour > 20) return;
-    if (chaseLastSent === etDate) return;
     const r = await pool.query(
       `SELECT id, received_at, campaign, publisher_sub, first_name, last_name, state,
               COALESCE(buyer_status,'') AS buyer_status, COALESCE(notes,'') AS notes,
@@ -9211,7 +9224,7 @@ async function staleChaseSweep() {
             OR (COALESCE(buyer_status,'') <> '' AND received_at < NOW() - make_interval(days => $2)) )
          AND received_at >= NOW() - make_interval(days => $3)
        ORDER BY received_at ASC LIMIT 60`, [CHASE_NO_DISPO_DAYS, CHASE_STUCK_DAYS, CHASE_MAX_DAYS]);
-    if (!r.rows.length) { chaseLastSent = etDate; return; }
+    if (!r.rows.length) return '';
     const fmt = d => new Date(d).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: '2-digit', day: '2-digit' });
     const row = l => `<tr><td>#${l.id}</td><td>${(l.first_name || '') + ' ' + (l.last_name || '')}</td><td>${l.campaign}</td><td>${l.publisher_sub || ''}</td><td>${fmt(l.received_at)}</td><td><b>${l.days}d</b></td><td>${l.no_dispo ? '<i>never dispositioned</i>' : (l.buyer_status + (l.notes ? ' — ' + l.notes : ''))}</td></tr>`;
     const noDispo = r.rows.filter(l => l.no_dispo), stuck = r.rows.filter(l => !l.no_dispo);
@@ -9220,14 +9233,64 @@ async function staleChaseSweep() {
     if (noDispo.length) html += `<p><b>No disposition at all after ${CHASE_NO_DISPO_DAYS}+ days (${noDispo.length}):</b></p>` + tbl(noDispo);
     if (stuck.length)   html += `<p><b>Still open/in outreach after ${CHASE_STUCK_DAYS}+ days (${stuck.length}):</b></p>` + tbl(stuck);
     html += '<p>Worth a nudge to the buyer - or write them off so the portal reads clean.</p>';
-    await sendEmailNotification(`⚠ Chase list — ${r.rows.length} lead${r.rows.length > 1 ? 's' : ''} waiting on buyer updates`, html);
-    chaseLastSent = etDate;
-    console.log(`[Chase List] sent - ${noDispo.length} undispositioned, ${stuck.length} stuck`);
-  } catch (e) { console.error('[Chase List] sweep error:', e.message); }
+    return `<h3>Chase list — ${r.rows.length} lead${r.rows.length > 1 ? 's' : ''} waiting on buyer updates</h3>` + html;
+  } catch (e) { console.error('[Chase List] build error:', e.message); return ''; }
 }
-setInterval(staleChaseSweep, 30 * 60 * 1000);
-setTimeout(staleChaseSweep, 4 * 60 * 1000);
-console.log('[Chase List] armed - daily digest of leads waiting on buyer updates');
+console.log('[Chase List] folded into the evening brief (patch 304)');
+
+// ─── patch 304: the twice-daily brief ────────────────────────────────────────
+// The ONLY scheduled notification emails: 8:00 AM and 7:00 PM Pacific
+// (override with BRIEF_TIMES_PT, comma-separated HH:MM). Everything the
+// alert sweep finds in between queues silently and ships inside these.
+const BRIEF_TIMES_PT = (process.env.BRIEF_TIMES_PT || '08:00,19:00').split(',').map(s => s.trim());
+async function sendDailyBrief(slot) {
+  // claim the slot in the DB first - a redeploy at exactly send time, or a
+  // second instance, can never double-send
+  const day = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  const claim = await pool.query(
+    `INSERT INTO notify_outbox (day, type, key, subject) VALUES ($1,'brief',$2,'claimed')
+     ON CONFLICT (day, type, key) DO NOTHING RETURNING id`, [day, slot]);
+  if (!claim.rows.length) return;
+
+  const s = await pool.query(
+    `SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status='forwarded')::int AS delivered,
+            COUNT(*) FILTER (WHERE status IN ('rejected','buyer_rejected'))::int AS rejected,
+            COALESCE(SUM(revenue) FILTER (WHERE billable), 0)::numeric AS revenue
+     FROM leads
+     WHERE COALESCE(raw->>'excluded','') <> 'true' AND COALESCE(vertical,'') <> 'SSDI'
+       AND (received_at AT TIME ZONE 'America/Los_Angeles')::date = (NOW() AT TIME ZONE 'America/Los_Angeles')::date`);
+  const q = await pool.query(`SELECT COUNT(*)::int AS n FROM billable_queue WHERE status='pending'`);
+  const alerts = await pool.query(
+    `SELECT id, subject, html FROM notify_outbox
+     WHERE sent_at IS NULL AND type <> 'brief' AND subject IS NOT NULL AND html IS NOT NULL
+     ORDER BY created_at ASC LIMIT 40`);
+  const chase = slot === 'pm' ? await buildChaseSection() : '';
+  const t = s.rows[0];
+  let html = `<p><b>Today so far (PT):</b> ${t.total} MVA lead${t.total === 1 ? '' : 's'} in, ` +
+             `${t.delivered} delivered, ${t.rejected} rejected, $${parseFloat(t.revenue).toFixed(0)} billable revenue. ` +
+             `${q.rows[0].n} item${q.rows[0].n === 1 ? '' : 's'} in the approval queue.</p>`;
+  if (alerts.rows.length) {
+    html += '<h3>Alerts since the last brief</h3>' +
+      alerts.rows.map(a => `<p><b>${a.subject}</b></p>${a.html}`).join('');
+  }
+  if (chase) html += chase;
+  if (!alerts.rows.length && !chase) html += '<p>No alerts. Nothing is waiting on you beyond the approval queue.</p>';
+  const label = slot === 'am' ? 'Morning' : 'Evening';
+  await sendEmailNotification(`KRW brief — ${label}`, html);
+  if (alerts.rows.length) {
+    await pool.query(`UPDATE notify_outbox SET sent_at = NOW() WHERE id = ANY($1::int[])`, [alerts.rows.map(a => a.id)]);
+  }
+  console.log(`[Daily Brief] ${label} sent - ${alerts.rows.length} alert(s)` + (chase ? ' + chase list' : ''));
+}
+setInterval(() => {
+  const hm = new Date().toLocaleTimeString('en-GB', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit' });
+  const idx = BRIEF_TIMES_PT.indexOf(hm);
+  if (idx < 0) return;
+  sendDailyBrief(idx === 0 ? 'am' : 'pm').catch(e => console.error('[Daily Brief] error:', e.message));
+}, 60 * 1000);
+console.log('[Daily Brief] armed - Pacific times:', BRIEF_TIMES_PT.join(', '));
+// ─── end patch 304 ────────────────────────────────────────────────────────────
 // ─── end patch 279 ────────────────────────────────────────────────────────────
 // ─── END MVA PUBLISHER PORTAL v2 + POSTBACKS ─────────────────────────────────
 
