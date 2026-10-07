@@ -8287,6 +8287,70 @@ app.put('/outreach/contacts', async (req, res) => {
 console.log('[Outreach] contact store ready - GET/PUT /outreach/contacts');
 // ─── end patch 275 ────────────────────────────────────────────────────────────
 
+// ─── patch 285: add ONE outreach contact without replacing the table ──────────
+// PUT /outreach/contacts replaces the whole board; this adds/updates a single
+// contact so scripts, Claude, or a phone call can log outreach safely.
+async function orUpsertContact(c) {
+  await orEnsureTable();
+  const name = String(c.name || '').trim();
+  if (!name) throw new Error('name is required');
+  const company = String(c.company || '').trim();
+  const existing = await pool.query(
+    `SELECT id, data FROM outreach_contacts
+      WHERE lower(data->>'name') = lower($1) AND lower(COALESCE(data->>'company','')) = lower($2) LIMIT 1`,
+    [name, company]);
+  if (existing.rows.length) {
+    const id = Number(existing.rows[0].id);
+    const merged = Object.assign({}, existing.rows[0].data, c, { id, name, company });
+    await pool.query('UPDATE outreach_contacts SET data=$2::jsonb, updated_at=NOW() WHERE id=$1', [id, JSON.stringify(merged)]);
+    return { id, created: false };
+  }
+  const mx = await pool.query('SELECT COALESCE(MAX(id),0) AS m FROM outreach_contacts');
+  const id = Number(mx.rows[0].m) + 1;
+  const row = Object.assign({
+    company: '', role: 'buyer', vertical: '', stage: 'cold', source: '',
+    lastContact: '', followup: '', contact: '', potential: 0, offer: '', notes: ''
+  }, c, { id, name, company });
+  await pool.query('INSERT INTO outreach_contacts (id, data, updated_at) VALUES ($1, $2::jsonb, NOW())', [id, JSON.stringify(row)]);
+  return { id, created: true };
+}
+app.post('/outreach/contacts/add', async (req, res) => {
+  if (!orAuth(req, res)) return;
+  try {
+    const r = await orUpsertContact(req.body || {});
+    res.json(Object.assign({ ok: true }, r));
+  } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+// one-time seed (flag stored so a deleted contact is never re-created on redeploy)
+async function orSeedOnce(flag, contacts) {
+  await pool.query(`CREATE TABLE IF NOT EXISTS krw_seed_flags (flag TEXT PRIMARY KEY, done_at TIMESTAMPTZ DEFAULT NOW())`);
+  const done = await pool.query('SELECT 1 FROM krw_seed_flags WHERE flag=$1', [flag]);
+  if (done.rows.length) return;
+  for (const c of contacts) await orUpsertContact(c);
+  await pool.query('INSERT INTO krw_seed_flags (flag) VALUES ($1) ON CONFLICT DO NOTHING', [flag]);
+  console.log('[Outreach] seeded ' + flag + ' (' + contacts.length + ')');
+}
+setTimeout(() => {
+  orSeedOnce('patch285-kurt-london', [{
+    name: 'Kurt London',
+    company: 'London Harker Injury Law',
+    role: 'buyer',
+    vertical: 'MVA',
+    stage: 'contacted',
+    source: 'LinkedIn',
+    lastContact: '2026-10-07',
+    followup: '2026-10-12',
+    contact: '',
+    potential: 0,
+    offer: 'PI leads (paid social, search, SEO) - Managing Partner, Utah PI firm also serving MT, AZ, CA, NV',
+    notes: 'LinkedIn DM sent Oct 7 2026. Utah connection (Kyler grew up there). Casual pitch, wants to earn some of his business. https://www.linkedin.com/in/kurtlondon/'
+  }]).catch(e => console.warn('[Outreach] patch 285 seed failed:', e.message));
+}, 8000);
+console.log('[Outreach] POST /outreach/contacts/add ready (patch 285)');
+// ─── end patch 285 ────────────────────────────────────────────────────────────
+
+
 // ─── patch 279: stale-lead chase list ─────────────────────────────────────────
 // Daily digest of every lead a buyer is sitting on, so stale portals get
 // chased instead of discovered. Weekdays, first sweep after 9 AM ET; one
