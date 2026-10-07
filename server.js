@@ -2748,7 +2748,7 @@ const MVA_BUYERS = [
         trustedform_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url || undefined,
         tcpa_text:      b.tcpa_text || undefined,
         incident_state: incidentStateFull,
-        incident_date:  b.incident_date,
+        incident_date:  toUsDate(b.incident_date),   // patch 298
         have_attorney:  b.have_attorney,
         at_fault:       b.at_fault,
         settlement:     b.settlement,
@@ -2955,6 +2955,25 @@ function convertDateToISO(dateStr) {
     return `${yyyy}-${mm.padStart(2,'0')}-${dd.padStart(2,'0')}`;
   }
   return dateStr; // unrecognized format, pass through unchanged rather than silently drop it
+}
+
+// patch 298: NLD campaign 31080 requires incident_date as mm/dd/yyyy and
+// rejects the whole post with "field `incident_date` has wrong format"
+// otherwise. Most publishers already send mm/dd/yyyy; Leadbloom sends ISO,
+// which is why 100% of its leads were failing to NLD and dropping to 003 at
+// $300 less. This normalizes on the way out so the publisher's format no
+// longer decides which buyer a lead can reach.
+function toUsDate(v) {
+  if (!v) return v;
+  const s = String(v).trim();
+  if (!s) return v;
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$/);      // ISO date, or a full timestamp
+  if (m) return m[2].padStart(2, '0') + '/' + m[3].padStart(2, '0') + '/' + m[1];
+  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);          // mm/dd/yyyy or mm-dd-yyyy
+  if (m) return m[1].padStart(2, '0') + '/' + m[2].padStart(2, '0') + '/' + m[3];
+  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})$/);          // 2-digit year, eg 06/19/25
+  if (m) return m[1].padStart(2, '0') + '/' + m[2].padStart(2, '0') + '/20' + m[3];
+  return v;                        // unrecognized - pass through, do not mangle
 }
 
 async function forwardToNldPing(b, publisherSub) {
@@ -3537,7 +3556,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
         state: leadState, zip_code: b.zip_code || b.zip, ip_address: b.ip_address,
         landing_page_url: b.landing_page_url,
         trustedform_cert_url: b.trustedform_cert_url || undefined, jornaya_leadid: b.jornaya_leadid || undefined,
-        incident_state: incidentStateFull, incident_date: b.incident_date,
+        incident_state: incidentStateFull, incident_date: toUsDate(b.incident_date),   // patch 298
         have_attorney: b.have_attorney, at_fault: b.at_fault, settlement: b.settlement, cited: b.cited,
         doctor_treatment: b.doctor_treatment, physical_injury: b.physical_injury,
         injury: b.injury, summary: b.summary, county: b.county,
@@ -8134,7 +8153,7 @@ async function janSend(buyer, b, st, leadId, pub) {
       phone: String(b.phone || '').replace(/\D/g, ''), date_of_birth: convertDateToISO(b.date_of_birth),
       address: b.address, city: b.city, state: st, zip_code: b.zip_code || b.zip, ip_address: b.ip_address,
       landing_page_url: b.landing_page_url, trustedform_cert_url: b.trustedform_cert_url || undefined,
-      jornaya_leadid: b.jornaya_leadid || undefined, incident_state: full, incident_date: b.incident_date,
+      jornaya_leadid: b.jornaya_leadid || undefined, incident_state: full, incident_date: toUsDate(b.incident_date),   // patch 298
       have_attorney: b.have_attorney, at_fault: b.at_fault, settlement: b.settlement, cited: b.cited,
       doctor_treatment: b.doctor_treatment, physical_injury: b.physical_injury, injury: b.injury, summary: b.summary, county: b.county });
     const r = await postJSON('https://api.leadprosper.io/direct_post', p);
