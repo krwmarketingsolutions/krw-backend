@@ -44,11 +44,90 @@ const LEAD_KEY = process.env.LEAD_API_KEY;
 const pool     = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
 // ── Auth middleware ───────────────────────────────────
-function requireKey(req, res, next) {
+// ── patch 288: admin login tokens + a scoped portal key ──────────────────────
+// The portals are served from public GitHub Pages, so anything baked into
+// their HTML is public. Admin access moves to a signed token behind a
+// password; publisher portals get their own key that admin routes refuse.
+const _crypto288 = require('crypto');
+const DASH_PASSWORD = process.env.DASH_PASSWORD || '';
+const PORTAL_KEY    = process.env.PORTAL_API_KEY || '';
+const TOKEN_TTL_MS  = 12 * 60 * 60 * 1000;
+
+function _tokenSecret() {
+  // Signing secret is derived, never shipped anywhere.
+  return (process.env.TOKEN_SECRET || process.env.API_KEY || 'krw') + '|' + (DASH_PASSWORD || '');
+}
+function mintToken(role) {
+  const payload = JSON.stringify({ role, exp: Date.now() + TOKEN_TTL_MS });
+  const b = Buffer.from(payload).toString('base64url');
+  const sig = _crypto288.createHmac('sha256', _tokenSecret()).update(b).digest('base64url');
+  return b + '.' + sig;
+}
+function readToken(tok) {
+  try {
+    const [b, sig] = String(tok || '').split('.');
+    if (!b || !sig) return null;
+    const good = _crypto288.createHmac('sha256', _tokenSecret()).update(b).digest('base64url');
+    const a = Buffer.from(sig), c = Buffer.from(good);
+    if (a.length !== c.length || !_crypto288.timingSafeEqual(a, c)) return null;
+    const p = JSON.parse(Buffer.from(b, 'base64url').toString());
+    if (!p || typeof p.exp !== 'number' || Date.now() > p.exp) return null;
+    return p;
+  } catch (e) { return null; }
+}
+function _bearer(req) {
+  const h = String(req.headers['authorization'] || '');
+  if (h.toLowerCase().startsWith('bearer ')) return h.slice(7).trim();
+  // CSV downloads open in a new tab and cannot set a header, so a token (which
+  // expires in 12h) may ride in the query string. The API key may NOT.
+  return String(req.query.token || '').trim();
+}
+// Who is calling: 'admin' (key or token), 'portal' (scoped key), or null.
+function callerRole(req) {
   const key = (req.headers['x-api-key'] || req.query.api_key || '').trim();
-  if (!API_KEY || key !== API_KEY) return res.status(401).json({ error: 'Unauthorized' });
+  if (API_KEY && key === API_KEY) return 'admin';
+  const t = readToken(_bearer(req));
+  if (t && t.role === 'admin') return 'admin';
+  if (PORTAL_KEY && key === PORTAL_KEY) return 'portal';
+  return null;
+}
+
+function requireKey(req, res, next) {
+  const role = callerRole(req);
+  if (role !== 'admin') return res.status(401).json({ error: 'Unauthorized' });
+  req.authRole = 'admin';
   next();
 }
+// Publisher-facing routes: admin OR the scoped portal key.
+function requirePortalKey(req, res, next) {
+  const role = callerRole(req);
+  if (!role) return res.status(401).json({ error: 'Unauthorized' });
+  req.authRole = role;
+  next();
+}
+
+app.post('/auth/login', async (req, res) => {
+  try {
+    if (!DASH_PASSWORD) return res.status(503).json({ ok: false, error: 'DASH_PASSWORD is not set on the server yet' });
+    const given = String((req.body && req.body.password) || '');
+    const a = Buffer.from(given), b = Buffer.from(DASH_PASSWORD);
+    const ok = a.length === b.length && _crypto288.timingSafeEqual(a, b);
+    if (!ok) { await new Promise(r => setTimeout(r, 400)); return res.status(401).json({ ok: false, error: 'Wrong password' }); }
+    res.json({ ok: true, token: mintToken('admin'), expires_in_hours: TOKEN_TTL_MS / 3600000 });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.get('/auth/check', (req, res) => {
+  const role = callerRole(req);
+  res.json({ ok: !!role, role: role || null, login_available: !!DASH_PASSWORD });
+});
+// Admin-only. Lets the dashboard build publisher posting instructions without
+// the lead key being written into a page that anyone can read.
+app.get('/auth/config', requireKey, (req, res) => {
+  res.json({ ok: true, lead_key: LEAD_KEY || '' });
+});
+console.log('[Auth] patch 288 - admin login ' + (DASH_PASSWORD ? 'ENABLED' : 'OFF (set DASH_PASSWORD)') +
+            ', portal key ' + (PORTAL_KEY ? 'set' : 'NOT set (set PORTAL_API_KEY)'));
+// ── end patch 288 auth ───────────────────────────────────────────────────────
 
 function requireLeadKey(req, res, next) {
   const key = (req.headers['x-api-key'] || req.query.api_key || '').trim();
@@ -470,7 +549,24 @@ app.get('/leads/summary', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
-app.get('/leads/feed', requireKey, async (req, res) => {
+
+// patch 288: a portal-key caller must name its publisher and never sees
+// buyer, routing or revenue columns.
+function portalGuard(req, res) {
+  if (req.authRole !== 'portal') return true;
+  if (!req.query.portal_id && !req.query.pub) {
+    res.status(400).json({ error: 'portal_id is required' });
+    return false;
+  }
+  return true;
+}
+function portalStrip(req, rows) {
+  if (req.authRole !== 'portal') return rows;
+  const drop = ["buyer_name", "buyer_status", "buyer_error", "buyer_intake_id", "revenue", "billable", "notes", "zapier_status"];
+  return rows.map(r => { const o = Object.assign({}, r); drop.forEach(k => { delete o[k]; }); return o; });
+}
+
+app.get('/leads/feed', requirePortalKey, async (req, res) => {
   // This endpoint's data changes constantly (new leads arrive continuously) -
   // explicitly prevent any caching so publishers always see current data,
   // never a stale response from before their latest submission. Found via
@@ -479,6 +575,7 @@ app.get('/leads/feed', requireKey, async (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
+  if (!portalGuard(req, res)) return;                      // patch 288
   try {
     const { campaign, status, limit=100, pub, days, portal_id } = req.query;
     const where=[], params=[];
@@ -527,7 +624,7 @@ app.get('/leads/feed', requireKey, async (req, res) => {
               COALESCE(NULLIF(raw->>'injury',''), raw->>'physical_injury') as injury,
               raw->>'incident_date' as incident_date, raw->>'county' as county
        FROM leads ${wc} ORDER BY received_at DESC LIMIT $${i}`, params);
-    res.json({ ok:true, count:r.rows.length, leads:r.rows });
+    res.json({ ok:true, count:r.rows.length, leads:portalStrip(req, r.rows) });   // patch 288
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
@@ -705,7 +802,7 @@ app.get('/dashboard', (req, res) => {
 
 // ── Health / Debug ────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok:true, status:'healthy' }));
-app.get('/debug',  (req, res) => res.json({ api_key_set:!!process.env.API_KEY, lead_key_set:!!process.env.LEAD_API_KEY, db_url_set:!!process.env.DATABASE_URL }));
+app.get('/debug', requireKey, (req, res) => res.json({ api_key_set:!!process.env.API_KEY, lead_key_set:!!process.env.LEAD_API_KEY, db_url_set:!!process.env.DATABASE_URL, portal_key_set:!!process.env.PORTAL_API_KEY, dash_password_set:!!process.env.DASH_PASSWORD }));   // patch 288: was public
 
 
 // ══════════════════════════════════════════════════════
@@ -1857,7 +1954,8 @@ app.patch('/calls/update', async (req, res) => {
 });
 
 // Get calls feed (dashboard)
-app.get('/calls/feed', requireKey, async (req, res) => {
+app.get('/calls/feed', requirePortalKey, async (req, res) => {
+  if (!portalGuard(req, res)) return;                      // patch 288
   const { days = 30, pub } = req.query;
   try {
     const daysInt = parseInt(days) >= 9999 ? 36500 : parseInt(days);
@@ -7733,7 +7831,7 @@ function pbLeadViewBase(l, payoutRate) {
 }
 
 // 1. Portal lead log (allowlisted)
-app.get('/portal/leads', requireKey, async (req, res) => {
+app.get('/portal/leads', requirePortalKey, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   const portalId = (req.query.portal_id || '').trim();
   if (!portalId) return res.status(400).json({ ok: false, error: 'portal_id required' });
@@ -7768,7 +7866,7 @@ async function pbSetHidden(req, res, hidden) {
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 }
 app.post('/portal/leads/:id/hide',   requireKey, (req, res) => pbSetHidden(req, res, true));
-app.post('/portal/leads/:id/unhide', requireKey, (req, res) => pbSetHidden(req, res, false));
+app.post('/portal/leads/:id/unhide', requirePortalKey, (req, res) => pbSetHidden(req, res, false));
 
 // 2. Postback settings
 function pbSettingsView(pub) {
@@ -7776,12 +7874,12 @@ function pbSettingsView(pub) {
            events: Array.isArray(pub.postback_events) ? pub.postback_events : PB_EVENTS.slice(0, 3),
            enabled: !!pub.postback_enabled, since: pub.postback_since || null };
 }
-app.get('/portal/postback', requireKey, async (req, res) => {
+app.get('/portal/postback', requirePortalKey, async (req, res) => {
   const pub = await pbResolvePublisher((req.query.portal_id || '').trim()).catch(() => null);
   if (!pub) return res.status(401).json({ ok: false, error: 'Publisher not found' });
   res.json({ ok: true, settings: pbSettingsView(pub), sample: pbBuildPayload({ id: 12345, first_name: 'Jane', last_name: 'Doe', phone: '5551234567', email: 'jane@example.com', state: 'TX', received_at: new Date().toISOString(), status: 'forwarded', buyer_status: 'Signed', notes: 'Signed — retained by buyer', billable: true, raw: {} }, 'signed', pub.payout_rate) });
 });
-app.post('/portal/postback', requireKey, async (req, res) => {
+app.post('/portal/postback', requirePortalKey, async (req, res) => {
   const b = req.body || {};
   const pub = await pbResolvePublisher((b.portal_id || '').trim()).catch(() => null);
   if (!pub) return res.status(401).json({ ok: false, error: 'Publisher not found' });
@@ -7801,7 +7899,7 @@ app.post('/portal/postback', requireKey, async (req, res) => {
     res.json({ ok: true, settings: pbSettingsView(fresh) });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
-app.post('/portal/postback/test', requireKey, async (req, res) => {
+app.post('/portal/postback/test', requirePortalKey, async (req, res) => {
   const pub = await pbResolvePublisher(((req.body || {}).portal_id || '').trim()).catch(() => null);
   if (!pub) return res.status(401).json({ ok: false, error: 'Publisher not found' });
   if (!pub.postback_url) return res.status(400).json({ ok: false, error: 'Save a postback URL first' });
@@ -7812,7 +7910,7 @@ app.post('/portal/postback/test', requireKey, async (req, res) => {
     [pub.pub_id, pub.postback_url, pub.postback_method || 'POST', out.status, out.ok, (out.body || out.error || '').slice(0, 500)]);
   res.json({ ok: out.ok, status_code: out.status, response: (out.body || out.error || '').slice(0, 500), sent: payload });
 });
-app.get('/portal/postback/log', requireKey, async (req, res) => {
+app.get('/portal/postback/log', requirePortalKey, async (req, res) => {
   const pub = await pbResolvePublisher((req.query.portal_id || '').trim()).catch(() => null);
   if (!pub) return res.status(401).json({ ok: false, error: 'Publisher not found' });
   const r = await pool.query(
