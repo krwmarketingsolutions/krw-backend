@@ -7989,6 +7989,7 @@ console.log('[Kyler Alerts] sweep armed - every 30 min, email to', process.env.N
 // ─── patch 272: overnight janitor ─────────────────────────────────────────────
 const JANITOR_TIME_ET = '06:00';
 const JAN_NLD_MAX = parseInt(process.env.JANITOR_NLD_MAX || '3', 10);   // patch 283: janitor's per-day NLD send limit
+const JAN_AGEOUT_DAYS = parseInt(process.env.JANITOR_AGEOUT_DAYS || '30', 10);   // patch 284: auto write-off age
 let janitorLastRunDate = null;
 const JAN_INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','MO','NE','OK','TN'];
 const JAN_NLD_STATES    = ['UT','MT','WY','AZ','NV','OK','NE','ND','IA','NM'];
@@ -8116,6 +8117,25 @@ async function janitorRun() {
       }
     }
   } catch (e) { console.error('[Janitor] run error:', e.message); lines.push('Janitor error: ' + e.message); }
+
+  // patch 284: auto write-off - any lead past JAN_AGEOUT_DAYS with no final
+  // outcome is dead. Approval-queue items, billables and locked leads survive.
+  try {
+    const aged = await pool.query(`
+      UPDATE leads SET status='buyer_rejected', buyer_status='Rejected',
+        notes='Rejected — no buyer update in ${JAN_AGEOUT_DAYS}+ days',
+        raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('aged_out', true,
+          'buyer_disposition', jsonb_build_object('source','aged_out','status','Rejected','note','Rejected — no buyer update in ${JAN_AGEOUT_DAYS}+ days','synced_at',NOW(),'confirmed_at',NOW()))
+      WHERE status='forwarded' AND COALESCE(vertical,'')<>'SSDI'
+        AND COALESCE(raw->>'excluded','')<>'true' AND billable IS NOT TRUE
+        AND COALESCE(raw->>'billable_locked','')<>'true'
+        AND COALESCE(raw->'buyer_disposition'->>'awaiting_approval','')<>'true'
+        AND NOT EXISTS (SELECT 1 FROM billable_queue q WHERE q.lead_id = leads.id AND q.status='pending')
+        AND COALESCE(buyer_status,'') NOT IN ('Signed','Retained','Rejected','Returned','Test')
+        AND received_at < NOW() - make_interval(days => ${JAN_AGEOUT_DAYS})
+      RETURNING id`);
+    if (aged.rows.length) lines.push(`auto write-off: ${aged.rows.length} lead(s) over ${JAN_AGEOUT_DAYS} days with no outcome -> Rejected`);
+  } catch (e) { lines.push('auto write-off error: ' + e.message); }
 
   if (lines.length || skippedPA.length) {
     let html = `<p><b>Overnight janitor</b> - recovered ${recovered} lead(s).</p><ul>` +
@@ -8273,6 +8293,7 @@ console.log('[Outreach] contact store ready - GET/PUT /outreach/contacts');
 // email per day, and only when there is something to chase.
 const CHASE_NO_DISPO_DAYS = parseInt(process.env.CHASE_NO_DISPO_DAYS || '3', 10);
 const CHASE_STUCK_DAYS    = parseInt(process.env.CHASE_STUCK_DAYS || '10', 10);
+const CHASE_MAX_DAYS      = parseInt(process.env.CHASE_MAX_DAYS || '14', 10);   // patch 284: chase emails only cover leads this fresh
 let chaseLastSent = null;
 async function staleChaseSweep() {
   try {
@@ -8295,7 +8316,8 @@ async function staleChaseSweep() {
          AND (COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')) NOT ILIKE '%test%'
          AND ( (COALESCE(buyer_status,'') = ''  AND received_at < NOW() - make_interval(days => $1))
             OR (COALESCE(buyer_status,'') <> '' AND received_at < NOW() - make_interval(days => $2)) )
-       ORDER BY received_at ASC LIMIT 60`, [CHASE_NO_DISPO_DAYS, CHASE_STUCK_DAYS]);
+         AND received_at >= NOW() - make_interval(days => $3)
+       ORDER BY received_at ASC LIMIT 60`, [CHASE_NO_DISPO_DAYS, CHASE_STUCK_DAYS, CHASE_MAX_DAYS]);
     if (!r.rows.length) { chaseLastSent = etDate; return; }
     const fmt = d => new Date(d).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: '2-digit', day: '2-digit' });
     const row = l => `<tr><td>#${l.id}</td><td>${(l.first_name || '') + ' ' + (l.last_name || '')}</td><td>${l.campaign}</td><td>${l.publisher_sub || ''}</td><td>${fmt(l.received_at)}</td><td><b>${l.days}d</b></td><td>${l.no_dispo ? '<i>never dispositioned</i>' : (l.buyer_status + (l.notes ? ' — ' + l.notes : ''))}</td></tr>`;
