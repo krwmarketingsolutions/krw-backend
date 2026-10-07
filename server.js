@@ -3486,7 +3486,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
 
   // Per-state cap (Kyler, Sep 23): Pennsylvania has no buyer but 003, so it is limited to a few a day.
   // Counted on delivered leads for this campaign today (Eastern). Past the cap the lead is stored and held.
-  const NYC_STATE_CAPS = { PA: parseInt(process.env.NYC_PA_DAILY_CAP || '3', 10) };
+  const NYC_STATE_CAPS = { PA: parseInt(process.env.NYC_PA_DAILY_CAP || '8', 10) };   // patch 307: was 3 - PA sells to CH/LT now that 003 is off
   if (NYC_STATE_CAPS[leadState] != null) {
     const sc = await pool.query(
       `SELECT COUNT(*)::int AS n FROM leads WHERE campaign='mva-nyc-split' AND state=$1 AND status IN ('forwarded','buyer_rejected','pending')
