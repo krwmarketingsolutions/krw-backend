@@ -132,6 +132,25 @@ console.log('[Auth] patch 288 - admin login ' + (DASH_PASSWORD ? 'ENABLED' : 'OF
             ', portal key ' + (PORTAL_KEY ? 'set' : 'NOT set (set PORTAL_API_KEY)'));
 // ── end patch 288 auth ───────────────────────────────────────────────────────
 
+// --- patch 295: one place where a login token becomes the API key ------------
+// 32 endpoints in this file check req.headers['x-api-key'] by hand. Rather
+// than edit all of them, a verified admin token is translated into the key
+// once, before any route sees the request. readToken() has already checked
+// the HMAC and the expiry, so this grants nothing a caller did not prove.
+app.use((req, res, next) => {
+  try {
+    const sent = (req.headers['x-api-key'] || '').trim();
+    if (!sent && API_KEY) {
+      const t = readToken(_bearer(req));
+      if (t && t.role === 'admin') req.headers['x-api-key'] = API_KEY;
+    }
+  } catch (e) { /* never block a request over this */ }
+  next();
+});
+console.log('[Auth] patch 295 - admin login token now works on every endpoint');
+// --- end patch 295 -----------------------------------------------------------
+
+
 function requireLeadKey(req, res, next) {
   const key = (req.headers['x-api-key'] || req.query.api_key || '').trim();
   // Accept either the lead key or the main key
@@ -8353,9 +8372,11 @@ async function orEnsureTable() {
   orTableReady = true;
 }
 function orAuth(req, res) {
-  const key = req.headers['x-api-key'] || req.query.api_key || '';
-  if (key !== (process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29')) { res.status(401).json({ ok: false, error: 'Invalid API key' }); return false; }
-  return true;
+  // patch 295: same rule as every other admin route - key or login token.
+  // The old hardcoded fallback key is gone; it was rotated and is public.
+  if (callerRole(req) === 'admin') return true;
+  res.status(401).json({ ok: false, error: 'Unauthorized' });
+  return false;
 }
 app.get('/outreach/contacts', async (req, res) => {
   if (!orAuth(req, res)) return;
