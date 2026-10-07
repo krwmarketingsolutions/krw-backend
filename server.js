@@ -8834,6 +8834,180 @@ console.log('[Outreach] sequence engine ready (patch 287) - sending ' +
   (OZ_SEND_ON() && OZ_FROM() ? 'ENABLED as ' + OZ_FROM() : 'OFF until OUTREACH_SEND=true and OUTREACH_FROM are set'));
 // ─── end patch 287 ────────────────────────────────────────────────────────────
 
+// ─── patch 291: watch the inbox for replies and stop those sequences ──────────
+// Read-only IMAP. Never sends, deletes, moves or marks anything read.
+// Degrades to a no-op if the package or the credentials are missing, so a
+// problem here can never take the rest of the server down.
+let ImapFlow = null;
+try { ImapFlow = require('imapflow').ImapFlow; }
+catch (e) { console.log('[Replies] imapflow not installed - reply watching is OFF'); }
+
+const REPLY_ON       = () => String(process.env.REPLY_WATCH || 'true').toLowerCase() !== 'false';
+const REPLY_USER     = () => process.env.GMAIL_USER || '';
+const REPLY_PASS     = () => process.env.GMAIL_PASS || '';
+const REPLY_LOOKBACK = () => parseInt(process.env.REPLY_LOOKBACK_DAYS || '3', 10);
+const replyArmed     = () => !!(ImapFlow && REPLY_ON() && REPLY_USER() && REPLY_PASS());
+
+let replyReady = false;
+async function replyEnsure() {
+  if (replyReady) return;
+  await pool.query(`CREATE TABLE IF NOT EXISTS outreach_replies (
+    id SERIAL PRIMARY KEY,
+    contact_id BIGINT, from_email TEXT NOT NULL, subject TEXT,
+    received_at TIMESTAMPTZ, detected_at TIMESTAMPTZ DEFAULT NOW(),
+    message_uid TEXT UNIQUE, matched BOOLEAN DEFAULT false)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS outreach_reply_state (
+    k TEXT PRIMARY KEY, v TEXT, updated_at TIMESTAMPTZ DEFAULT NOW())`);
+  replyReady = true;
+}
+async function replyGet(k, d) {
+  await replyEnsure();
+  const r = await pool.query('SELECT v FROM outreach_reply_state WHERE k=$1', [k]);
+  return r.rows.length ? r.rows[0].v : d;
+}
+async function replySet(k, v) {
+  await replyEnsure();
+  await pool.query(`INSERT INTO outreach_reply_state (k,v,updated_at) VALUES ($1,$2,NOW())
+                    ON CONFLICT (k) DO UPDATE SET v=EXCLUDED.v, updated_at=NOW()`, [k, String(v)]);
+}
+function replyAddrOf(h) {
+  // "Kurt London <kurt@firm.com>" -> kurt@firm.com
+  const s = String(h && h.address ? h.address : h || '');
+  const m = s.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+  return m ? m[0].toLowerCase() : '';
+}
+
+async function scanReplies() {
+  if (!replyArmed()) {
+    return { armed: false, reason: !ImapFlow ? 'imapflow not installed'
+      : !REPLY_ON() ? 'REPLY_WATCH is false'
+      : 'GMAIL_USER / GMAIL_PASS not set' };
+  }
+  await replyEnsure();
+  // who are we listening for
+  await orEnsureTable();
+  const contacts = (await pool.query('SELECT id, data FROM outreach_contacts')).rows
+    .map(r => Object.assign({}, r.data, { id: Number(r.id) }));
+  const byEmail = {};
+  for (const c of contacts) {
+    const v = String(c.contact || '').trim();
+    if (v.indexOf('@') > 0) byEmail[v.toLowerCase()] = c;
+  }
+  if (!Object.keys(byEmail).length) return { armed: true, checked: 0, matched: 0, note: 'no contacts with an email' };
+
+  const sinceIso = await replyGet('last_scan_at', null);
+  const since = sinceIso ? new Date(sinceIso) : new Date(Date.now() - REPLY_LOOKBACK() * 86400000);
+
+  const client = new ImapFlow({
+    host: 'imap.gmail.com', port: 993, secure: true,
+    auth: { user: REPLY_USER(), pass: REPLY_PASS() },
+    logger: false, emitLogs: false
+  });
+  const found = [];
+  let checked = 0;
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX');          // read-only use
+    try {
+      for await (const msg of client.fetch({ since }, { envelope: true, uid: true })) {
+        checked++;
+        const env = msg.envelope || {};
+        const from = replyAddrOf((env.from && env.from[0]) || '');
+        if (!from) continue;
+        const c = byEmail[from];
+        if (!c) continue;
+        const uid = String(msg.uid) + '@' + (env.date ? new Date(env.date).getTime() : '0');
+        const ins = await pool.query(
+          `INSERT INTO outreach_replies (contact_id, from_email, subject, received_at, message_uid, matched)
+           VALUES ($1,$2,$3,$4,$5,true) ON CONFLICT (message_uid) DO NOTHING RETURNING id`,
+          [c.id, from, String(env.subject || '').slice(0, 300), env.date || null, uid]);
+        if (!ins.rows.length) continue;                          // already handled
+        found.push({ contact_id: c.id, name: c.name, email: from, subject: env.subject || '' });
+      }
+    } finally { lock.release(); }
+  } catch (e) {
+    console.error('[Replies] scan failed:', e.message);
+    await replySet('last_error', e.message.slice(0, 300));
+    return { armed: true, error: e.message.slice(0, 200) };
+  } finally {
+    try { await client.logout(); } catch (e) {}
+  }
+
+  // mark them on the board and stop their sequences
+  for (const f of found) {
+    await pool.query(
+      `UPDATE outreach_contacts SET data = data || jsonb_build_object(
+         'emailStatus','replied',
+         'lastContact', to_char((NOW() AT TIME ZONE 'America/New_York')::date,'YYYY-MM-DD'),
+         'stage', CASE WHEN COALESCE(data->>'stage','') IN ('cold','contacted') THEN 'responded'
+                       ELSE COALESCE(data->>'stage','responded') END),
+         updated_at = NOW()
+       WHERE id=$1`, [f.contact_id]);
+    try {
+      await pool.query(`UPDATE outreach_sequence_state SET status='stopped', stop_reason='they replied', updated_at=NOW()
+                         WHERE contact_id=$1 AND status='active'`, [f.contact_id]);
+      await pool.query(`UPDATE outreach_drafts SET status='skipped', error='they replied'
+                         WHERE contact_id=$1 AND status IN ('pending','approved')`, [f.contact_id]);
+    } catch (e) { /* sequence tables only exist once patch 287 is deployed */ }
+  }
+
+  await replySet('last_scan_at', new Date().toISOString());
+  await replySet('last_error', '');
+
+  if (found.length) {
+    const rows = found.map(f =>
+      '<tr><td style="padding:4px 10px"><b>' + String(f.name || '').replace(/</g, '&lt;') + '</b></td>' +
+      '<td style="padding:4px 10px">' + f.email + '</td>' +
+      '<td style="padding:4px 10px">' + String(f.subject).slice(0, 80).replace(/</g, '&lt;') + '</td></tr>').join('');
+    await sendEmailNotification(
+      found.length + ' outreach repl' + (found.length === 1 ? 'y' : 'ies'),
+      '<p>' + found.length + ' contact' + (found.length === 1 ? '' : 's') +
+      ' replied. Their sequences are stopped and they are marked Responded on the board.</p>' +
+      '<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">' + rows + '</table>');
+  }
+  return { armed: true, checked, matched: found.length, replies: found };
+}
+
+app.post('/outreach/replies/scan', async (req, res) => {
+  if (!orAuth(req, res)) return;
+  try { res.json(Object.assign({ ok: true }, await scanReplies())); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.get('/outreach/replies/status', async (req, res) => {
+  if (!orAuth(req, res)) return;
+  try {
+    await replyEnsure();
+    const n = await pool.query('SELECT COUNT(*)::int c FROM outreach_replies WHERE matched');
+    res.json({ ok: true,
+      armed: replyArmed(),
+      watching: REPLY_USER() || null,
+      imapflow_installed: !!ImapFlow,
+      last_scan_at: await replyGet('last_scan_at', null),
+      last_error: (await replyGet('last_error', '')) || null,
+      replies_detected_total: n.rows[0].c });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.get('/outreach/replies/log', async (req, res) => {
+  if (!orAuth(req, res)) return;
+  try {
+    await replyEnsure();
+    const r = await pool.query(`SELECT * FROM outreach_replies ORDER BY detected_at DESC LIMIT 100`);
+    res.json({ ok: true, replies: r.rows });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+setInterval(() => {
+  if (!replyArmed()) return;
+  scanReplies().then(r => { if (r && r.matched) console.log('[Replies] matched', r.matched); })
+               .catch(e => console.error('[Replies] poll failed:', e.message));
+}, 15 * 60 * 1000);
+
+console.log('[Replies] reply watcher ' + (replyArmed()
+  ? 'ARMED on ' + REPLY_USER() + ' (every 15 min, read-only)'
+  : 'OFF - ' + (!ImapFlow ? 'imapflow not installed' : !REPLY_ON() ? 'REPLY_WATCH=false' : 'GMAIL_USER/GMAIL_PASS not set')));
+// ─── end patch 291 ────────────────────────────────────────────────────────────
+
+
 
 
 // ─── patch 279: stale-lead chase list ─────────────────────────────────────────
