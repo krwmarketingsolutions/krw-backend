@@ -6064,11 +6064,20 @@ async function pollLairdLeadsSheet() {
   }
 }
 
-// Start polling 30 seconds after boot (offset from KA poller), then every hour
-setTimeout(() => {
-  pollLairdLeadsSheet();
-  setInterval(pollLairdLeadsSheet, LAIRD_POLL_INTERVAL_MS);
-}, 30000);
+// patch 306: poller OFF by default. The sheet is private (anonymous CSV
+// export returns a Google login page, which the parser then chewed on every
+// hour) and the Laird line has been inactive since June. Set LAIRD_POLL=true
+// on Railway to re-arm - and share the sheet with link-view or the service
+// account first, or it will just fail politely again.
+if (process.env.LAIRD_POLL === 'true') {
+  setTimeout(() => {
+    pollLairdLeadsSheet();
+    setInterval(pollLairdLeadsSheet, LAIRD_POLL_INTERVAL_MS);
+  }, 30000);
+  console.log('[Laird Sheet Poll] armed - hourly (LAIRD_POLL=true)');
+} else {
+  console.log('[Laird Sheet Poll] OFF (patch 306) - set LAIRD_POLL=true on Railway to re-arm; manual: GET /debug-poll-laird');
+}
 // ── Manual Laird sheet poll trigger ──────────────────────────────────────────
 app.get('/debug-poll-laird', requireKey, async (req, res) => {
   try {
