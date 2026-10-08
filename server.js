@@ -2731,6 +2731,13 @@ function aliasPub(pubId) {
 
 // ── MVA Buyer Tiers ───────────────────────────────────────────────────────────
 // Add new buyers here. Order = priority (Tier 1 first).
+// patch 318 (Kyler, Oct 8): NLD is PAUSED as a buyer. No lead goes to NLD
+// from any live path (nyc-split ladders, funnel waterfall Tier 1, NLD Ping,
+// janitor retries, manual resends) while this is true - LT-Intake takes
+// what NLD would have taken. Unpause with NLD_PAUSED=false on Railway or a
+// later patch.
+const NLD_PAUSED = (process.env.NLD_PAUSED || 'true') === 'true';
+
 const MVA_BUYERS = [
 
   // ── Tier 1: NLD CPA (campaign 31080) ──────────────────────────────────────
@@ -2740,7 +2747,7 @@ const MVA_BUYERS = [
   // protection already used everywhere else in this system.
   {
     name:   'NLD CPA',
-    states: ['UT','MT','WY','AZ','CA','NV','OK','NE','ND','IA','NM'], // NLD only accepts these states (PA removed, CA added - Kyler, Sep 15; this is the array MVA_BUYERS.find() actually uses, previous fix to a different unused variable never touched this)
+    states: NLD_PAUSED ? [] : ['UT','MT','WY','AZ','CA','NV','OK','NE','ND','IA','NM'], // patch 318: empty while NLD is paused. NLD only accepts these states (PA removed, CA added - Kyler, Sep 15; this is the array MVA_BUYERS.find() actually uses)
     async post(b, publisherSub) {
       const stateCode = (b.state || b.incident_state || '').toUpperCase().trim();
       const incidentStateFull = US_STATE_FULL_NAMES[stateCode] || b.incident_state || null;
@@ -3003,6 +3010,7 @@ function toUsDate(v) {
 }
 
 async function forwardToNldPing(b, publisherSub) {
+  if (NLD_PAUSED) return { routed: false, reason: 'nld_paused' };   // patch 318
   const zip = b.zip_code || b.zip;
   const stateCode = (b.state || '').toUpperCase().trim();
   // These two are resolved server-side regardless of caller — NLD_LP_URL's
@@ -3429,7 +3437,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const NYC_LADDER = [
     { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
     { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
+    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: !NLD_PAUSED,          states: NLD_ONLY_STATES },   // patch 318
     { name: 'MVA-003-LT', priority: 3, group: '003',    cap: 5,    payout: 1700, enabled: false,                states: 'ALL' },   // patch 305: 003 off
   ];
 
@@ -3442,7 +3450,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const LEADBLOOM_LADDER = [
     { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
     { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: true,                 states: NLD_ONLY_STATES },
+    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: !NLD_PAUSED,          states: NLD_ONLY_STATES },   // patch 318
     { name: 'CH-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2250, enabled: true,                        states: 'ALL' },
     { name: 'LT-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },
   ];
@@ -3456,7 +3464,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // a Leadbloom lead. Everyone else keeps the shared ladder above.
   const LB_ONLY_LADDER = [
     { name: 'LT-Intake', priority: 1, group: 'lb5050', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },
-    { name: 'NLD CPA',   priority: 1, group: 'lb5050', cap: 10,   payout: 2000, enabled: true,                        states: NLD_ONLY_STATES },
+    { name: 'NLD CPA',   priority: 1, group: 'lb5050', cap: 10,   payout: 2000, enabled: !NLD_PAUSED,                 states: NLD_ONLY_STATES },   // patch 318
   ];
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
@@ -8351,14 +8359,14 @@ async function janitorRun() {
         // patch 317 (Kyler, Oct 8): Leadbloom rides LT + NLD only - CH never
         // sees its leads, even on janitor retries. Rough 50/50 by whichever
         // has fewer accepted today.
-        const wantNld = JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX;
+        const wantNld = !NLD_PAUSED && JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX;   // patch 318
         const wantLt  = !!process.env.LT_INTAKE_PASS;
         if (wantNld && wantLt) { if (nldToday <= ltToday) rungs.push('NLD CPA', 'LT-Intake'); else rungs.push('LT-Intake', 'NLD CPA'); }
         else if (wantNld) rungs.push('NLD CPA');
         else if (wantLt)  rungs.push('LT-Intake');
       } else {
       if (JAN_INTAKE_STATES.includes(st)) janPushIntake();
-      if (JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX) rungs.push('NLD CPA');   // patch 283
+      if (!NLD_PAUSED && JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX) rungs.push('NLD CPA');   // patch 283 + 318
       // patch 305 (Kyler, Oct 7): 003 is off for EVERY publisher (extends
       // patch 302, which was Leadbloom-only). Stuck out-of-state leads fall
       // back to CH/LT without the state filter.
@@ -8468,14 +8476,14 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     };
     if (isLeadbloom) {
       // patch 317 (Kyler, Oct 8): Leadbloom resends go to LT and NLD only.
-      const wantNld = NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10;
+      const wantNld = !NLD_PAUSED && NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10;   // patch 318
       const wantLt  = !!process.env.LT_INTAKE_PASS;
       if (wantNld && wantLt) { if (nldToday <= ltToday) rungs.push('NLD CPA', 'LT-Intake'); else rungs.push('LT-Intake', 'NLD CPA'); }
       else if (wantNld) rungs.push('NLD CPA');
       else if (wantLt)  rungs.push('LT-Intake');
     } else {
     if (JAN_INTAKE_STATES.includes(st)) pushIntake();
-    if (NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10) rungs.push('NLD CPA');
+    if (!NLD_PAUSED && NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10) rungs.push('NLD CPA');   // patch 318
     // patch 305: 003 is off for every publisher - out-of-state leads fall
     // back to CH/LT without the state filter.
     if (!JAN_INTAKE_STATES.includes(st)) pushIntake();
