@@ -8624,6 +8624,35 @@ app.post('/outreach/contacts/add', async (req, res) => {
   } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
 });
 
+// patch 314: dashboard-editable outreach templates (intro/follow/bump emails
+// plus the LinkedIn follow-up text). Stored server side so they follow Kyler
+// across desktop and phone. Shape per template: { s: subject, b: body }.
+app.get('/outreach/templates', async (req, res) => {
+  if (!orAuth(req, res)) return;
+  try {
+    await replyEnsure();
+    const out = {};
+    for (const k of ['intro', 'follow', 'bump', 'li_follow']) {
+      const v = await replyGet('oztpl_' + k, '');
+      if (v) { try { out[k] = JSON.parse(v); } catch (e) {} }
+    }
+    res.json({ ok: true, templates: out });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/outreach/templates', async (req, res) => {
+  if (!orAuth(req, res)) return;
+  try {
+    await replyEnsure();
+    const t = (req.body || {}).templates || {};
+    for (const k of ['intro', 'follow', 'bump', 'li_follow']) {
+      if (t[k] && typeof t[k] === 'object' && (t[k].b || t[k].s)) {
+        await replySet('oztpl_' + k, JSON.stringify({ s: String(t[k].s || '').slice(0, 300), b: String(t[k].b || '').slice(0, 4000) }));
+      }
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 // one-time seed (flag stored so a deleted contact is never re-created on redeploy)
 async function orSeedOnce(flag, contacts) {
   await pool.query(`CREATE TABLE IF NOT EXISTS krw_seed_flags (flag TEXT PRIMARY KEY, done_at TIMESTAMPTZ DEFAULT NOW())`);
@@ -9142,6 +9171,7 @@ async function scanReplies() {
     await pool.query(
       `UPDATE outreach_contacts SET data = data || jsonb_build_object(
          'emailStatus','replied',
+         'followup','',
          'lastContact', to_char((NOW() AT TIME ZONE 'America/New_York')::date,'YYYY-MM-DD'),
          'stage', CASE WHEN COALESCE(data->>'stage','') IN ('cold','contacted') THEN 'responded'
                        ELSE COALESCE(data->>'stage','responded') END),
@@ -9176,6 +9206,25 @@ async function scanReplies() {
 // The agent emails drafts FROM this same Gmail account, so they sit in
 // [Gmail]/Sent Mail with subject "LinkedIn draft: <name> | <firm>". Each one
 // becomes (or refreshes) a board contact tagged LinkedIn.
+// patch 314: pull the drafted message text out of the agent's email so the
+// board's "Copy message" button has something to copy.
+function liExtractDraft(source) {
+  try {
+    let s = source ? source.toString('utf8') : '';
+    let cut = s.indexOf('\r\n\r\n'); if (cut < 0) cut = s.indexOf('\n\n');
+    if (cut < 0) return '';
+    const head = s.slice(0, cut), bodyRaw = s.slice(cut).trim();
+    let body = bodyRaw;
+    if (/content-transfer-encoding:\s*base64/i.test(head)) {
+      try { body = Buffer.from(bodyRaw.replace(/\s+/g, ''), 'base64').toString('utf8'); } catch (e) {}
+    } else if (/content-transfer-encoding:\s*quoted-printable/i.test(head)) {
+      body = bodyRaw.replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/gi, function (m, h) { return String.fromCharCode(parseInt(h, 16)); });
+    }
+    const ix = body.search(/draft message:/i);
+    if (ix < 0) return '';
+    return body.slice(ix).replace(/^draft message:\s*/i, '').trim().slice(0, 4000);
+  } catch (e) { return ''; }
+}
 async function scanLinkedInDrafts() {
   if (!replyArmed()) return { armed: false };
   await replyEnsure();
@@ -9192,7 +9241,7 @@ async function scanLinkedInDrafts() {
     await client.connect();
     const lock = await client.getMailboxLock('[Gmail]/Sent Mail');
     try {
-      for await (const msg of client.fetch({ since }, { envelope: true, uid: true })) {
+      for await (const msg of client.fetch({ since }, { envelope: true, uid: true, source: true })) {
         const subj = String((msg.envelope || {}).subject || '');
         // patch 312: two subject shapes are in the wild -
         //   "LinkedIn draft: <name> | <firm>"                          (old)
@@ -9215,16 +9264,19 @@ async function scanLinkedInDrafts() {
           .toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
         const existing = await pool.query(
           `SELECT id FROM outreach_contacts WHERE lower(data->>'name') = lower($1) LIMIT 1`, [name]);
+        const liMsg = liExtractDraft(msg.source);   // patch 314
         if (existing.rows.length) {
           await pool.query(
             `UPDATE outreach_contacts SET data = data
                || jsonb_build_object('liDraftAt', $2::text)
+               || CASE WHEN $3::text <> '' THEN jsonb_build_object('liMessage', $3::text) ELSE '{}'::jsonb END
                || CASE WHEN COALESCE(data->>'source','') = '' THEN '{"source":"LinkedIn"}'::jsonb ELSE '{}'::jsonb END,
-               updated_at = NOW() WHERE id = $1`, [Number(existing.rows[0].id), day]);
+               updated_at = NOW() WHERE id = $1`, [Number(existing.rows[0].id), day, liMsg || '']);
           refreshed++;
         } else {
-          await orUpsertContact({ name, company, role: 'buyer', vertical: 'MVA', stage: 'cold',
-            source: 'LinkedIn', liDraftAt: day, notes: 'LinkedIn draft ready (emailed ' + day + ')' });
+          await orUpsertContact(Object.assign({ name, company, role: 'buyer', vertical: 'MVA', stage: 'cold',
+            source: 'LinkedIn', liDraftAt: day, notes: 'LinkedIn draft ready (emailed ' + day + ')' },
+            liMsg ? { liMessage: liMsg } : {}));
           added++;
         }
       }
@@ -9352,6 +9404,26 @@ async function sendDailyBrief(slot) {
      WHERE sent_at IS NULL AND type <> 'brief' AND subject IS NOT NULL AND html IS NOT NULL
      ORDER BY created_at ASC LIMIT 40`);
   const chase = slot === 'pm' ? await buildChaseSection() : '';
+  // patch 314: Friday evening LinkedIn outreach recap
+  let liRecap = '';
+  try {
+    const dowPT = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'short' });
+    if (slot === 'pm' && dowPT === 'Fri') {
+      const rows = (await pool.query(`SELECT data FROM outreach_contacts WHERE data->>'source' = 'LinkedIn'`)).rows.map(r => r.data);
+      const since = Date.now() - 7 * 86400000;
+      const inWeek = d => d && new Date(d).getTime() >= since;
+      const adv = ['responded', 'intalks', 'meeting', 'ready'];
+      const sent = rows.filter(c => inWeek(c.sentAt)).length;
+      const resp = rows.filter(c => adv.includes(c.stage) && inWeek(c.lastContact)).length;
+      const talks = rows.filter(c => c.stage === 'intalks').length;
+      const meets = rows.filter(c => c.stage === 'meeting').length;
+      const quiet = rows.filter(c => c.stage === 'contacted' && c.sentAt && !inWeek(c.sentAt)).length;
+      liRecap = `<h3>LinkedIn outreach this week</h3><p>${sent} messaged, ${resp} responded` +
+        (sent ? ` (${Math.round(100 * resp / sent)}% response)` : '') +
+        `. ${talks} in talks, ${meets} meeting${meets === 1 ? '' : 's'} set. ` +
+        (quiet ? `${quiet} gone quiet (messaged over a week ago, no response) — worth a follow up.` : 'Nobody has gone quiet.') + `</p>`;
+    }
+  } catch (e) { console.error('[Daily Brief] LinkedIn recap error:', e.message); }
   const t = s.rows[0];
   let html = `<p><b>Today so far (PT):</b> ${t.total} MVA lead${t.total === 1 ? '' : 's'} in, ` +
              `${t.delivered} delivered, ${t.rejected} rejected, $${parseFloat(t.revenue).toFixed(0)} billable revenue. ` +
@@ -9361,7 +9433,8 @@ async function sendDailyBrief(slot) {
       alerts.rows.map(a => `<p><b>${a.subject}</b></p>${a.html}`).join('');
   }
   if (chase) html += chase;
-  if (!alerts.rows.length && !chase) html += '<p>No alerts. Nothing is waiting on you beyond the approval queue.</p>';
+  if (liRecap) html += liRecap;
+  if (!alerts.rows.length && !chase && !liRecap) html += '<p>No alerts. Nothing is waiting on you beyond the approval queue.</p>';
   const label = slot === 'am' ? 'Morning' : 'Evening';
   await sendEmailNotification(`KRW brief — ${label}`, html);
   if (alerts.rows.length) {
