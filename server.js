@@ -9194,8 +9194,19 @@ async function scanLinkedInDrafts() {
     try {
       for await (const msg of client.fetch({ since }, { envelope: true, uid: true })) {
         const subj = String((msg.envelope || {}).subject || '');
-        if (subj.indexOf('LinkedIn draft:') !== 0) continue;
-        const rest = subj.slice('LinkedIn draft:'.length).trim();
+        // patch 312: two subject shapes are in the wild -
+        //   "LinkedIn draft: <name> | <firm>"                          (old)
+        //   "NEW LINKDN CONNECTION - SEND THIS MESSAGE | <name> | <firm>" (current)
+        let rest = null;
+        if (subj.indexOf('LinkedIn draft:') === 0) {
+          rest = subj.slice('LinkedIn draft:'.length).trim();
+        } else if (subj.toUpperCase().indexOf('NEW LINKDN CONNECTION') === 0 || subj.toUpperCase().indexOf('NEW LINKEDIN CONNECTION') === 0) {
+          const firstPipe = subj.indexOf('|');
+          if (firstPipe < 0) continue;
+          rest = subj.slice(firstPipe + 1).trim();
+        } else {
+          continue;
+        }
         const parts = rest.split('|').map(s => s.trim()).filter(Boolean);
         const name = parts[0] || '';
         const company = parts[1] || '';
