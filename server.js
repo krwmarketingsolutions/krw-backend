@@ -3449,7 +3449,16 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // patch 305 (Kyler, Oct 7): 003 is OFF for EVERYONE. Every publisher rides
   // the same ladder: CH/LT (intake states) -> NLD -> CH/LT (any state).
   // NYC_LADDER above is no longer selected; its 003 entry is also disabled.
-  const LADDER_FOR_PUB = LEADBLOOM_LADDER;
+  // patch 317 (Kyler, Oct 8): Leadbloom goes to LT-Intake and NLD ONLY,
+  // 50/50. Both sit on the same rung so the same-rung sort below does the
+  // split; in a state NLD doesn't cover, LT takes the lead alone, and a
+  // rejection by one falls to the other in the same request. CH never sees
+  // a Leadbloom lead. Everyone else keeps the shared ladder above.
+  const LB_ONLY_LADDER = [
+    { name: 'LT-Intake', priority: 1, group: 'lb5050', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },
+    { name: 'NLD CPA',   priority: 1, group: 'lb5050', cap: 10,   payout: 2000, enabled: true,                        states: NLD_ONLY_STATES },
+  ];
+  const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
   if (missing.length) {
     return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
@@ -3521,6 +3530,21 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const todayCount = {}, lastAt = {};
   for (const r of countRes.rows) { todayCount[r.buyer] = r.n; lastAt[r.buyer] = r.last_at ? new Date(r.last_at).getTime() : 0; }
 
+  // patch 317: Leadbloom's 50/50 balances Leadbloom's own sends for the day.
+  // The campaign-wide counts above still drive the caps and everyone else's
+  // tiebreak - LT takes NYC volume too, and counting that against LT would
+  // starve its side of the Leadbloom split.
+  const lbCount = {}, lbLast = {};
+  if (PUB === 'KRW-LEADBLOOM-MVA') {
+    const lbRes = await pool.query(
+      `SELECT raw->>'buyer_name' AS buyer, COUNT(*)::int AS n, MAX(received_at) AS last_at
+       FROM leads
+       WHERE campaign='mva-nyc-split' AND status='forwarded' AND publisher_sub='KRW-LEADBLOOM-MVA'
+         AND (received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date
+       GROUP BY raw->>'buyer_name'`);
+    for (const r of lbRes.rows) { lbCount[r.buyer] = r.n; lbLast[r.buyer] = r.last_at ? new Date(r.last_at).getTime() : 0; }
+  }
+
   // NLD needs more fields than anyone else. Rather than bouncing the lead
   // with a 400 when NLD happens to be next, NLD is simply skipped for this
   // lead if its extra fields can't be satisfied, and the lead moves on.
@@ -3548,10 +3572,13 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   }).sort((a, b2) => {
     if (a.priority !== b2.priority) return a.priority - b2.priority;
     // same rung: the buyer with fewer accepted today goes first; on a tie,
-    // whoever did NOT get the most recent one - this is the 50/50
-    const ca = todayCount[a.name] || 0, cb = todayCount[b2.name] || 0;
+    // whoever did NOT get the most recent one - this is the 50/50.
+    // patch 317: Leadbloom balances its own sends, not the campaign's.
+    const tc = PUB === 'KRW-LEADBLOOM-MVA' ? lbCount : todayCount;
+    const la = PUB === 'KRW-LEADBLOOM-MVA' ? lbLast : lastAt;
+    const ca = tc[a.name] || 0, cb = tc[b2.name] || 0;
     if (ca !== cb) return ca - cb;
-    return (lastAt[a.name] || 0) - (lastAt[b2.name] || 0);
+    return (la[a.name] || 0) - (la[b2.name] || 0);
   });
   // patch 299: a buyer can appear on both its state rung and the nationwide
   // overflow rung. Keep only its first (best-priority) appearance so the
@@ -8320,12 +8347,23 @@ async function janitorRun() {
         if (process.env.LT_INTAKE_PASS && ltToday < chToday) rungs.push('LT-Intake', 'CH-Intake');
         else { rungs.push('CH-Intake'); if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake'); }
       };
+      if (rowPub === 'KRW-LEADBLOOM-MVA') {
+        // patch 317 (Kyler, Oct 8): Leadbloom rides LT + NLD only - CH never
+        // sees its leads, even on janitor retries. Rough 50/50 by whichever
+        // has fewer accepted today.
+        const wantNld = JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX;
+        const wantLt  = !!process.env.LT_INTAKE_PASS;
+        if (wantNld && wantLt) { if (nldToday <= ltToday) rungs.push('NLD CPA', 'LT-Intake'); else rungs.push('LT-Intake', 'NLD CPA'); }
+        else if (wantNld) rungs.push('NLD CPA');
+        else if (wantLt)  rungs.push('LT-Intake');
+      } else {
       if (JAN_INTAKE_STATES.includes(st)) janPushIntake();
       if (JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX) rungs.push('NLD CPA');   // patch 283
       // patch 305 (Kyler, Oct 7): 003 is off for EVERY publisher (extends
       // patch 302, which was Leadbloom-only). Stuck out-of-state leads fall
       // back to CH/LT without the state filter.
       if (!JAN_INTAKE_STATES.includes(st)) janPushIntake();
+      }
       if (!rungs.length) { lines.push(`lead ${row.id} ${row.first_name || ''} ${row.last_name || ''} | ${st} | no eligible buyer today - left as is`); continue; }
 
       attempted++;
@@ -8428,11 +8466,20 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
       if (process.env.LT_INTAKE_PASS && ltToday < chToday) rungs.push('LT-Intake', 'CH-Intake');
       else { rungs.push('CH-Intake'); if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake'); }
     };
+    if (isLeadbloom) {
+      // patch 317 (Kyler, Oct 8): Leadbloom resends go to LT and NLD only.
+      const wantNld = NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10;
+      const wantLt  = !!process.env.LT_INTAKE_PASS;
+      if (wantNld && wantLt) { if (nldToday <= ltToday) rungs.push('NLD CPA', 'LT-Intake'); else rungs.push('LT-Intake', 'NLD CPA'); }
+      else if (wantNld) rungs.push('NLD CPA');
+      else if (wantLt)  rungs.push('LT-Intake');
+    } else {
     if (JAN_INTAKE_STATES.includes(st)) pushIntake();
     if (NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10) rungs.push('NLD CPA');
     // patch 305: 003 is off for every publisher - out-of-state leads fall
     // back to CH/LT without the state filter.
     if (!JAN_INTAKE_STATES.includes(st)) pushIntake();
+    }
     const plan = rungs.filter((x, i) => rungs.indexOf(x) === i);   // dedupe, order kept
     if (!plan.length) return res.status(409).json({ ok: false, error: 'No eligible buyer right now (caps reached)', state: st });
 
