@@ -8632,7 +8632,7 @@ app.get('/outreach/templates', async (req, res) => {
   try {
     await replyEnsure();
     const out = {};
-    for (const k of ['intro', 'follow', 'bump', 'li_follow']) {
+    for (const k of ['intro', 'intro_a', 'intro_d', 'follow', 'bump', 'li_follow']) {   // patch 315: A/B intro variants
       const v = await replyGet('oztpl_' + k, '');
       if (v) { try { out[k] = JSON.parse(v); } catch (e) {} }
     }
@@ -8644,7 +8644,7 @@ app.post('/outreach/templates', async (req, res) => {
   try {
     await replyEnsure();
     const t = (req.body || {}).templates || {};
-    for (const k of ['intro', 'follow', 'bump', 'li_follow']) {
+    for (const k of ['intro', 'intro_a', 'intro_d', 'follow', 'bump', 'li_follow']) {   // patch 315: A/B intro variants
       if (t[k] && typeof t[k] === 'object' && (t[k].b || t[k].s)) {
         await replySet('oztpl_' + k, JSON.stringify({ s: String(t[k].s || '').slice(0, 300), b: String(t[k].b || '').slice(0, 4000) }));
       }
