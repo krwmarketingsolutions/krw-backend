@@ -9172,6 +9172,62 @@ async function scanReplies() {
   return { armed: true, checked, matched: found.length, replies: found };
 }
 
+// patch 310: track the LinkedIn draft agent's output on the Outreach board.
+// The agent emails drafts FROM this same Gmail account, so they sit in
+// [Gmail]/Sent Mail with subject "LinkedIn draft: <name> | <firm>". Each one
+// becomes (or refreshes) a board contact tagged LinkedIn.
+async function scanLinkedInDrafts() {
+  if (!replyArmed()) return { armed: false };
+  await replyEnsure();
+  await orEnsureTable();
+  const sinceIso = await replyGet('li_drafts_last_scan', null);
+  const since = sinceIso ? new Date(sinceIso) : new Date(Date.now() - 7 * 86400000);
+  const client = new ImapFlow({
+    host: 'imap.gmail.com', port: 993, secure: true,
+    auth: { user: REPLY_USER(), pass: REPLY_PASS() },
+    logger: false, emitLogs: false
+  });
+  let added = 0, refreshed = 0;
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock('[Gmail]/Sent Mail');
+    try {
+      for await (const msg of client.fetch({ since }, { envelope: true, uid: true })) {
+        const subj = String((msg.envelope || {}).subject || '');
+        if (subj.indexOf('LinkedIn draft:') !== 0) continue;
+        const rest = subj.slice('LinkedIn draft:'.length).trim();
+        const parts = rest.split('|').map(s => s.trim()).filter(Boolean);
+        const name = parts[0] || '';
+        const company = parts[1] || '';
+        if (!name) continue;
+        const day = new Date((msg.envelope && msg.envelope.date) || Date.now())
+          .toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+        const existing = await pool.query(
+          `SELECT id FROM outreach_contacts WHERE lower(data->>'name') = lower($1) LIMIT 1`, [name]);
+        if (existing.rows.length) {
+          await pool.query(
+            `UPDATE outreach_contacts SET data = data
+               || jsonb_build_object('liDraftAt', $2::text)
+               || CASE WHEN COALESCE(data->>'source','') = '' THEN '{"source":"LinkedIn"}'::jsonb ELSE '{}'::jsonb END,
+               updated_at = NOW() WHERE id = $1`, [Number(existing.rows[0].id), day]);
+          refreshed++;
+        } else {
+          await orUpsertContact({ name, company, role: 'buyer', vertical: 'MVA', stage: 'cold',
+            source: 'LinkedIn', liDraftAt: day, notes: 'LinkedIn draft ready (emailed ' + day + ')' });
+          added++;
+        }
+      }
+    } finally { lock.release(); }
+    await replySet('li_drafts_last_scan', new Date(Date.now() - 3600000).toISOString());
+    if (added || refreshed) console.log(`[LI Drafts] board sync: ${added} added, ${refreshed} refreshed`);
+  } catch (e) {
+    console.error('[LI Drafts] scan failed:', e.message);
+  } finally {
+    try { await client.logout(); } catch (e) {}
+  }
+  return { armed: true, added, refreshed };
+}
+
 app.post('/outreach/replies/scan', async (req, res) => {
   if (!orAuth(req, res)) return;
   try { res.json(Object.assign({ ok: true }, await scanReplies())); }
@@ -9204,6 +9260,7 @@ setInterval(() => {
   if (!replyArmed()) return;
   scanReplies().then(r => { if (r && r.matched) console.log('[Replies] matched', r.matched); })
                .catch(e => console.error('[Replies] poll failed:', e.message));
+  scanLinkedInDrafts().catch(e => console.error('[LI Drafts] poll failed:', e.message));   // patch 310
 }, 15 * 60 * 1000);
 
 console.log('[Replies] reply watcher ' + (replyArmed()
