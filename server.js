@@ -8517,6 +8517,54 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// ─── patch 324: attach a late TrustedForm cert and forward to one buyer ───────
+app.post('/leads/:id/attach-cert-and-send', requireKey, async (req, res) => {
+  try {
+    const { cert, buyer } = req.body || {};
+    const ALLOWED = ['NLD CPA', 'LT-Intake', 'CH-Intake', 'MVA-003-LT'];
+    if (!cert || !/^https:\/\/cert\.trustedform\.com\/[a-z0-9]+/i.test(String(cert)))
+      return res.status(400).json({ ok: false, error: 'a valid trustedform_cert_url is required' });
+    if (!ALLOWED.includes(buyer))
+      return res.status(400).json({ ok: false, error: 'buyer must be one of ' + ALLOWED.join(', ') });
+    const q = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.id]);
+    if (!q.rows[0]) return res.status(404).json({ ok: false, error: 'Lead not found' });
+    const row = q.rows[0];
+    if (row.status === 'forwarded') return res.status(409).json({ ok: false, error: 'Lead is already forwarded - refusing to double-send' });
+    if (row.billable === true)      return res.status(409).json({ ok: false, error: 'Lead is billable - refusing to touch it' });
+    if ((row.vertical || '') !== 'MVA') return res.status(400).json({ ok: false, error: 'Only MVA leads can be sent here' });
+    const st = janState(row.state);
+    if (st === 'CA' || st === 'CO') return res.status(400).json({ ok: false, error: st + ' is blocked company-wide' });
+
+    // attach the cert to the stored lead first, so it is recorded even if the buyer declines
+    await pool.query(
+      `UPDATE leads SET raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('trustedform_cert_url',$1::text,'trusted_form_cert_url',$1::text) WHERE id=$2`,
+      [String(cert), row.id]);
+    const b = Object.assign({}, row.raw || {}, {
+      first_name: row.first_name, last_name: row.last_name, phone: row.phone, email: row.email,
+      state: st, trustedform_cert_url: String(cert), trusted_form_cert_url: String(cert) });
+
+    let out;
+    try { out = await janSend(buyer, b, st, row.id, row.publisher_sub || ''); }
+    catch (e) { out = { result: { error: e.message }, accepted: false }; }
+    console.log(`[AttachCertSend] ${out.accepted ? '✓' : '✕'} ${buyer} | lead ${row.id} | ${st}`);
+
+    if (out.accepted) {
+      await pool.query(
+        `UPDATE leads SET status='forwarded', buyer_status='Accepted', buyer_error=NULL,
+           buyer_response = COALESCE(buyer_response,'{}'::jsonb) || $1::jsonb,
+           raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_name',$2::text,'manual_cert_send', jsonb_build_object('at', NOW(), 'buyer', $2::text)) WHERE id=$3`,
+        [JSON.stringify({ manual_cert_send: out.result }), buyer, row.id]);
+      return res.json({ ok: true, result: 'success', buyer, krw_id: row.id, response: out.result });
+    }
+    await pool.query(
+      `UPDATE leads SET raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('manual_cert_send', jsonb_build_object('at', NOW(), 'buyer', $1::text, 'note', 'buyer did not accept')) WHERE id=$2`,
+      [buyer, row.id]);
+    return res.json({ ok: false, result: 'rejected', buyer, krw_id: row.id, response: out.result });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
 // ─── end patch 272 ────────────────────────────────────────────────────────────
 
 // ─── patch 274: weekly publisher reports ──────────────────────────────────────
