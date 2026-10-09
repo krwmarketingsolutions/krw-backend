@@ -9601,7 +9601,7 @@ function bsMapHeader(rows) {
     if ((phone < 0 && vendor < 0) || status < 0) continue;
     return { headerRow: i, phone, status, vendor,
       date: find(/^(DATE|SENT|SUBMISSION DATE|DATE SENT|DATE SUBMITTED)$/, /DATE/), first: find(/^FIRST/, /FIRST/), last: find(/^LAST/, /LAST/), name: find(/^(NAME|FULL NAME|CLIENT|LEAD NAME|LEAD)$/),
-      notes: find(/^STAGE UPDATES$/, /^STATUS NOTES$/, /^REASON$/, /^NOTES?$/, /^COMMENTS?$/, /STAGE|REASON|NOTE|COMMENT/), calls: find(/^CALLED_COUNT$/), lastcall: find(/^LAST_LOCAL_CALL_TIME$/), invoice: find(/INVOICE/), billable: find(/^BILLABLE$/), signed: find(/^SIGNED$/), secphrase: find(/^SECURITY[_ ]?PHRASE$/, /SECURITY.?PHRASE/), state: find(/^(STATE|PROVINCE)$/), email: find(/^(EMAIL|E-?MAIL|EMAIL ADDRESS)$/, /EMAIL/) };
+      notes: find(/^STAGE UPDATES$/, /^STATUS NOTES$/, /^REASON$/, /^NOTES?$/, /^COMMENTS?$/, /STAGE|REASON|NOTE|COMMENT/), calls: find(/^CALLED_COUNT$/), lastcall: find(/^LAST_LOCAL_CALL_TIME$/), invoice: find(/INVOICE/), billable: find(/^BILLABLE$/), signed: find(/^SIGNED$/), secphrase: find(/^SECURITY[_ ]?PHRASE$/, /SECURITY.?PHRASE/), state: find(/^(STATE|PROVINCE)$/), email: find(/^(EMAIL|E-?MAIL|EMAIL ADDRESS)$/, /EMAIL/), sourceid: find(/^SOURCE[_ ]?ID$/, /SOURCE.?ID/) };  // patch 321
   }
   return null;
 }
@@ -9692,6 +9692,7 @@ async function bsScanOne(cfg, trigger) {
           billableFlag: map.billable > -1 && bsNorm(r[map.billable]) ? bsNorm(r[map.billable]) : (signedYes ? 'yes' : ''), vendor: map.vendor > -1 ? bsNorm(r[map.vendor]) : '',
           name: map.name > -1 ? bsNorm(r[map.name]) : [bsNorm(r[map.first]), bsNorm(r[map.last])].filter(Boolean).join(' '),
           secphrase: map.secphrase > -1 ? bsNorm(r[map.secphrase]) : '', state: map.state > -1 ? bsNorm(r[map.state]) : '', email: map.email > -1 ? bsNorm(r[map.email]) : '',
+          sourceid: map.sourceid > -1 ? bsNorm(r[map.sourceid]) : '',  // patch 321: VDCL = Josh's transfer
         };
       }).filter(r => r.phone || /KRW-\d+/i.test(r.vendor)));
     }
@@ -9717,7 +9718,7 @@ async function bsScanOne(cfg, trigger) {
         if (!lead) {
           rep.unmatched++;
           // patch 320: KramMarketing MVA transfers -> Josh's standalone MVA line
-          if (/kram/i.test(r.secphrase || '')) {
+          if (/^vdcl$/i.test(r.sourceid || '') || /kram/i.test(r.secphrase || '')) {   // patch 321: VDCL = Josh's MVA transfer
             try { await bsUpsertKramMva(client, r); rep.kram = (rep.kram || 0) + 1; }
             catch (e) { console.error('[Buyer Sheets] KramMVA upsert failed for', r.phone, e.message); }
           }
