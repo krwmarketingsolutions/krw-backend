@@ -9632,6 +9632,10 @@ function kramClassify(r) {
 async function bsUpsertKramMva(client, r) {
   if (!r.phone) return 'skipped';
   const cls = kramClassify(r);
+  // patch 323: never surface a law-firm name or our buyer/routing to the publisher.
+  // A matching note drops to the bare status; safe claimant reasons are kept.
+  const EXPOSE_BUYER = /law\s*firm|lawfirm|lead\s*tree|\blt[- ]?intake\b|\bnld\b|mva[- ]?003|\b003\b|ch[- ]?intake|email\s*agency|lar[- ]?mva/i;
+  if (cls && EXPOSE_BUYER.test(cls.note || '')) cls.note = cls.status;
   const nm = String(r.name || '').trim().split(/\s+/).filter(Boolean);
   const first = nm.length ? nm[0] : '';
   const last  = nm.length > 1 ? nm.slice(1).join(' ') : '';
