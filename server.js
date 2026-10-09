@@ -644,7 +644,9 @@ app.get('/leads/feed', requirePortalKey, async (req, res) => {
               raw->>'buyer_name' as buyer_name,
               COALESCE(NULLIF(raw->>'case_description',''), NULLIF(raw->>'summary',''), NULLIF(raw->>'description','')) as case_description,
               COALESCE(NULLIF(raw->>'injury',''), raw->>'physical_injury') as injury,
-              raw->>'incident_date' as incident_date, raw->>'county' as county
+              raw->>'incident_date' as incident_date, raw->>'county' as county,
+              raw->'buyer_disposition'->>'status' as disp_status,
+              raw->'buyer_disposition'->>'note'   as disp_note
        FROM leads ${wc} ORDER BY received_at DESC LIMIT $${i}`, params);
     res.json({ ok:true, count:r.rows.length, leads:portalStrip(req, r.rows) });   // patch 288
   } catch(err) { res.status(500).json({ error:err.message }); }
@@ -9599,7 +9601,7 @@ function bsMapHeader(rows) {
     if ((phone < 0 && vendor < 0) || status < 0) continue;
     return { headerRow: i, phone, status, vendor,
       date: find(/^(DATE|SENT|SUBMISSION DATE|DATE SENT|DATE SUBMITTED)$/, /DATE/), first: find(/^FIRST/, /FIRST/), last: find(/^LAST/, /LAST/), name: find(/^(NAME|FULL NAME|CLIENT|LEAD NAME|LEAD)$/),
-      notes: find(/^STAGE UPDATES$/, /^STATUS NOTES$/, /^REASON$/, /^NOTES?$/, /^COMMENTS?$/, /STAGE|REASON|NOTE|COMMENT/), calls: find(/^CALLED_COUNT$/), lastcall: find(/^LAST_LOCAL_CALL_TIME$/), invoice: find(/INVOICE/), billable: find(/^BILLABLE$/), signed: find(/^SIGNED$/) };
+      notes: find(/^STAGE UPDATES$/, /^STATUS NOTES$/, /^REASON$/, /^NOTES?$/, /^COMMENTS?$/, /STAGE|REASON|NOTE|COMMENT/), calls: find(/^CALLED_COUNT$/), lastcall: find(/^LAST_LOCAL_CALL_TIME$/), invoice: find(/INVOICE/), billable: find(/^BILLABLE$/), signed: find(/^SIGNED$/), secphrase: find(/^SECURITY[_ ]?PHRASE$/, /SECURITY.?PHRASE/), state: find(/^(STATE|PROVINCE)$/), email: find(/^(EMAIL|E-?MAIL|EMAIL ADDRESS)$/, /EMAIL/) };
   }
   return null;
 }
@@ -9613,6 +9615,56 @@ function bsClassify(cfg, r) {
   if (BS_REJECT.test(st) || BS_REJECT.test(notes)) return { kind: 'rejected', status: 'Rejected', note: 'Rejected — ' + (notes || st).replace(/^rejected\s*[-–:]?\s*/i, '') };
   if (BS_OPEN.test(st) || BS_OPEN.test(notes)) return { kind: 'open', status: 'Open — in outreach', note: 'Open — ' + (notes || st) };
   return { kind: 'other', status: 'Pending', note: 'In outreach — ' + (notes || st) };
+}
+
+// ── patch 320: KramMarketing MVA transfers (Josh's standalone line) ──────────
+const KRAM_MVA_PUB = 'KRW-JOSHUA-MVA';
+function kramClassify(r) {
+  const code = String(r.status || '').toUpperCase().trim();
+  const note = (r.notes || '').trim();
+  const REJECT = { NQ:'Not qualified', NI:'Not interested', ATTY:'Attorney represented', DNC:'Do not call', LANGBA:'Language barrier', WN:'Wrong number' };
+  const OPENC  = { A:'Answering machine', DAIR:'Dead air', NANQUE:'No answer', NA:'No answer', B:'Busy', N:'New', NEW:'New', CALLBK:'Callback' };
+  if (REJECT[code]) return { kind:'rejected', status:'Rejected', note:'Rejected — ' + REJECT[code] + (note ? ': ' + note : '') };
+  if (OPENC[code])  return { kind:'open',     status:'Open — in outreach', note:'Open — ' + OPENC[code].toLowerCase() + (note ? ': ' + note : '') };
+  // unknown VICIdial code: keep it open so Josh keeps working it, carry the reason
+  return { kind:'open', status:'Open — in outreach', note:'Open — ' + (note || code || 'in outreach') };
+}
+async function bsUpsertKramMva(client, r) {
+  if (!r.phone) return 'skipped';
+  const cls = kramClassify(r);
+  const nm = String(r.name || '').trim().split(/\s+/).filter(Boolean);
+  const first = nm.length ? nm[0] : '';
+  const last  = nm.length > 1 ? nm.slice(1).join(' ') : '';
+  const recv  = r.date || new Date().toISOString();
+  const leadStatus = cls.kind === 'rejected' ? 'buyer_rejected' : 'forwarded';
+  // Josh's MVA publisher line (idempotent - its own portal_id keeps SSDI separate)
+  await client.query(
+    `INSERT INTO publishers (pub_id, name, portal_id, active) VALUES ($1,$2,$1,true) ON CONFLICT (pub_id) DO NOTHING`,
+    [KRAM_MVA_PUB, 'Joshua Duran — MVA Transfers']);
+  const existing = (await client.query(
+    `SELECT id, raw FROM leads WHERE publisher_sub=$1 AND RIGHT(regexp_replace(phone,'\D','','g'),10)=$2 ORDER BY received_at DESC LIMIT 1`,
+    [KRAM_MVA_PUB, r.phone])).rows[0];
+  if (!existing) {
+    await client.query(
+      `INSERT INTO leads (received_at, campaign, vertical, status, first_name, last_name, email, phone, state, buyer_status, notes, publisher_sub, raw)
+       VALUES ($1::timestamptz,'mva-transfer','MVA',$2::text,$3,$4,$5,$6,$7,$8::text,$9::text,$10,
+         jsonb_build_object('buyer_name','LT-Intake-transfer','source','josh_mva_transfer','transfer_source','KramMarketing','lt_dialer_status',$11::text,
+           'buyer_disposition', jsonb_build_object('source','lt_transfer','status',$8::text,'note',$9::text,'sheet_status',$11::text,'synced_at',NOW(),'confirmed_at',NOW())))`,
+      [recv, leadStatus, first, last, r.email || '', r.phone, r.state || '', cls.status, cls.note, KRAM_MVA_PUB, String(r.status || '')]);
+    return 'inserted';
+  }
+  const prev = (existing.raw && existing.raw.buyer_disposition) || {};
+  if (prev.status === cls.status && prev.note === cls.note) {
+    await client.query(`UPDATE leads SET raw = jsonb_set(COALESCE(raw,'{}'::jsonb), '{buyer_disposition,confirmed_at}', to_jsonb(NOW()), true) WHERE id=$1::int`, [existing.id]);
+    return 'confirmed';
+  }
+  await client.query(
+    `UPDATE leads SET status=$1::text, buyer_status=$2::text, notes=$3::text,
+       raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('lt_dialer_status',$5::text,
+         'buyer_disposition', jsonb_build_object('source','lt_transfer','status',$2::text,'note',$3::text,'sheet_status',$5::text,'synced_at',NOW(),'confirmed_at',NOW()))
+     WHERE id=$4::int`,
+    [leadStatus, cls.status, cls.note, existing.id, String(r.status || '')]);
+  return 'updated';
 }
 
 // ── scan ──
@@ -9639,6 +9691,7 @@ async function bsScanOne(cfg, trigger) {
           date: map.date > -1 ? bsParseDate(r[map.date]) : null, invoice: map.invoice > -1 ? bsNorm(r[map.invoice]) : '',
           billableFlag: map.billable > -1 && bsNorm(r[map.billable]) ? bsNorm(r[map.billable]) : (signedYes ? 'yes' : ''), vendor: map.vendor > -1 ? bsNorm(r[map.vendor]) : '',
           name: map.name > -1 ? bsNorm(r[map.name]) : [bsNorm(r[map.first]), bsNorm(r[map.last])].filter(Boolean).join(' '),
+          secphrase: map.secphrase > -1 ? bsNorm(r[map.secphrase]) : '', state: map.state > -1 ? bsNorm(r[map.state]) : '', email: map.email > -1 ? bsNorm(r[map.email]) : '',
         };
       }).filter(r => r.phone || /KRW-\d+/i.test(r.vendor)));
     }
@@ -9661,7 +9714,15 @@ async function bsScanOne(cfg, trigger) {
            VALUES ($1::text,$2::text,$3::text,$4::text,$5::timestamptz,$6::text,$7::int,$8::text,NOW(),NOW())
            ON CONFLICT (buyer_key, phone) DO UPDATE SET sheet_status=EXCLUDED.sheet_status, sheet_notes=EXCLUDED.sheet_notes, sheet_date=COALESCE(EXCLUDED.sheet_date, buyer_sheet_rows.sheet_date), invoice=EXCLUDED.invoice, lead_id=COALESCE(EXCLUDED.lead_id, buyer_sheet_rows.lead_id), kind=EXCLUDED.kind, last_seen=NOW()`,
           [cfg.key, r.phone || r.vendor, r.status, r.notes, r.date, r.invoice, lead ? lead.id : null, cls ? cls.kind : 'blank']);
-        if (!lead) { rep.unmatched++; continue; }
+        if (!lead) {
+          rep.unmatched++;
+          // patch 320: KramMarketing MVA transfers -> Josh's standalone MVA line
+          if (/kram/i.test(r.secphrase || '')) {
+            try { await bsUpsertKramMva(client, r); rep.kram = (rep.kram || 0) + 1; }
+            catch (e) { console.error('[Buyer Sheets] KramMVA upsert failed for', r.phone, e.message); }
+          }
+          continue;
+        }
         rep.matched++;
         if (!cls || !cfg.enabled) { rep.skipped++; continue; }
         // patch 281: a lead written off as aged-out (30+ days, no buyer update) stays
@@ -9703,7 +9764,7 @@ async function bsScanOne(cfg, trigger) {
   } catch (err) { rep.error = err.message; }
   await pool.query(`INSERT INTO buyer_sheet_scans (buyer_key, ok, error, rows, matched, unmatched, updated, queued, modified_time, tab, trigger) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
     [cfg.key, rep.ok, rep.error, rep.rows, rep.matched, rep.unmatched, rep.updated, rep.queued, rep.modified, rep.tab, trigger]).catch(() => {});
-  console.log(`[Buyer Sheets] ${rep.ok ? '✓' : '✕'} ${cfg.label} (${trigger}) | ${rep.error || `${rep.rows} rows, ${rep.matched} matched, ${rep.unmatched} unmatched, ${rep.updated} updated, ${rep.queued} queued`}`);
+  console.log(`[Buyer Sheets] ${rep.ok ? '✓' : '✕'} ${cfg.label} (${trigger}) | ${rep.error || `${rep.rows} rows, ${rep.matched} matched, ${rep.unmatched} unmatched, ${rep.updated} updated, ${rep.queued} queued${rep.kram ? ', ' + rep.kram + ' kram-mva' : ''}`}`);
   return rep;
 }
 async function bsScanAll(trigger, onlyKey) {
