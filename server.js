@@ -3465,8 +3465,8 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // rejection by one falls to the other in the same request. CH never sees
   // a Leadbloom lead. Everyone else keeps the shared ladder above.
   const LB_ONLY_LADDER = [
-    { name: 'LT-Intake', priority: 1, group: 'lb5050', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },
-    { name: 'NLD CPA',   priority: 1, group: 'lb5050', cap: 10,   payout: 2000, enabled: !NLD_PAUSED,                 states: NLD_ONLY_STATES },   // patch 318
+    { name: 'NLD CPA',   priority: 1, group: 'nld',     cap: 10,   payout: 2000, enabled: !NLD_PAUSED,                 states: NLD_ONLY_STATES },   // patch 326: NLD first for its states
+    { name: 'LT-Intake', priority: 2, group: 'lt-rest', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },            // patch 326: LT catches non-NLD states + NLD rejects
   ];
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
@@ -8389,10 +8389,8 @@ async function janitorRun() {
         // sees its leads, even on janitor retries. Rough 50/50 by whichever
         // has fewer accepted today.
         const wantNld = !NLD_PAUSED && JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX;   // patch 318
-        const wantLt  = !!process.env.LT_INTAKE_PASS;
-        if (wantNld && wantLt) { if (nldToday <= ltToday) rungs.push('NLD CPA', 'LT-Intake'); else rungs.push('LT-Intake', 'NLD CPA'); }
-        else if (wantNld) rungs.push('NLD CPA');
-        else if (wantLt)  rungs.push('LT-Intake');
+        if (wantNld) rungs.push('NLD CPA');                        // patch 326: NLD first for its states
+        if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake');   // patch 326: LT catches the rest
       } else {
       if (JAN_INTAKE_STATES.includes(st)) janPushIntake();
       if (!NLD_PAUSED && JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX) rungs.push('NLD CPA');   // patch 283 + 318
@@ -8506,10 +8504,8 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     if (isLeadbloom) {
       // patch 317 (Kyler, Oct 8): Leadbloom resends go to LT and NLD only.
       const wantNld = !NLD_PAUSED && NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10;   // patch 318
-      const wantLt  = !!process.env.LT_INTAKE_PASS;
-      if (wantNld && wantLt) { if (nldToday <= ltToday) rungs.push('NLD CPA', 'LT-Intake'); else rungs.push('LT-Intake', 'NLD CPA'); }
-      else if (wantNld) rungs.push('NLD CPA');
-      else if (wantLt)  rungs.push('LT-Intake');
+      if (wantNld) rungs.push('NLD CPA');                        // patch 326: NLD first for its states
+      if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake');   // patch 326: LT catches the rest
     } else {
     if (JAN_INTAKE_STATES.includes(st)) pushIntake();
     if (!NLD_PAUSED && NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10) rungs.push('NLD CPA');   // patch 318
