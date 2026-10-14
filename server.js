@@ -7578,6 +7578,33 @@ app.get('/billable-queue', requireKey, async (req, res) => {
   }
 });
 
+// patch 325: manually add a billable (hand-added signed cases, no postback)
+app.post('/billable-queue/manual', requireKey, async (req, res) => {
+  try {
+    const { cid, publisher_sub, amount, status, note, lead_id } = req.body || {};
+    const phone = String(cid || '').replace(/\D/g, '').slice(-10);
+    if (phone.length !== 10) return res.status(400).json({ ok: false, error: 'cid (10-digit phone) required' });
+    if (!publisher_sub) return res.status(400).json({ ok: false, error: 'publisher_sub required' });
+    const amt = Number(amount);
+    if (!(amt > 0)) return res.status(400).json({ ok: false, error: 'amount must be a positive number' });
+    const st = ['pending', 'held', 'approved'].includes(status) ? status : 'pending';
+    const dup = await pool.query(
+      `SELECT id, status, amount FROM billable_queue WHERE RIGHT(regexp_replace(cid,'\D','','g'),10)=$1 AND publisher_sub=$2 LIMIT 1`,
+      [phone, publisher_sub]);
+    if (dup.rows.length) return res.status(409).json({ ok: false, error: 'already in queue for this publisher', existing: dup.rows[0] });
+    const raw = JSON.stringify({ source: 'manual_add', note: note || null, added_at: new Date().toISOString() });
+    const r = await pool.query(
+      `INSERT INTO billable_queue (cid, amount, publisher_sub, lead_id, status, raw) VALUES ($1,$2,$3,$4,$5,$6::jsonb) RETURNING id, status`,
+      [phone, amt, publisher_sub, lead_id || null, st, raw]);
+    // If approved and tied to a real lead, mark that lead billable too
+    if (st === 'approved' && lead_id) {
+      await pool.query(`UPDATE leads SET billable=true, revenue=COALESCE(revenue,0)+$1 WHERE id=$2`, [amt, lead_id]).catch(()=>{});
+    }
+    console.log(`[Billable Manual] + q${r.rows[0].id} ${publisher_sub} ${phone} $${amt} (${st})`);
+    return res.json({ ok: true, id: r.rows[0].id, status: r.rows[0].status, cid: phone, publisher_sub, amount: amt });
+  } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // Admin-only: Approve - marks billable_queue approved AND updates the real
 // lead record (billable=true, revenue=amount), which is what the publisher
 // portal actually reads from.
