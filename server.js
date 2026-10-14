@@ -54,7 +54,7 @@ const pool     = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { r
 const _crypto288 = require('crypto');
 const DASH_PASSWORD = process.env.DASH_PASSWORD || '';
 const PORTAL_KEY    = process.env.PORTAL_API_KEY || '';
-const TOKEN_TTL_MS  = 12 * 60 * 60 * 1000;
+const TOKEN_TTL_MS  = 30 * 24 * 60 * 60 * 1000;   // patch 327: 30 days (was 12h) - stop mid-task logouts
 
 function _tokenSecret() {
   // Signing secret is derived, never shipped anywhere.
