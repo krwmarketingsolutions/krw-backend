@@ -670,6 +670,47 @@ app.post('/leads/:id/billable', requireKey, async (req, res) => {
 });
 
 
+// patch 328: set a lead's disposition by hand (buyer told Kyler directly, no sheet/postback)
+app.post('/leads/:id/disposition', requireKey, async (req, res) => {
+  try {
+    const { disposition, note, amount } = req.body || {};
+    const d = String(disposition || '').toLowerCase().trim();
+    const ALLOWED = ['signed', 'pending', 'open', 'rejected'];
+    if (!ALLOWED.includes(d)) return res.status(400).json({ ok: false, error: 'disposition must be one of ' + ALLOWED.join(', ') });
+    const q = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.id]);
+    if (!q.rows[0]) return res.status(404).json({ ok: false, error: 'Lead not found' });
+    const row = q.rows[0];
+    if (row.raw && row.raw.billable_locked === true) return res.status(409).json({ ok: false, error: 'Lead is billable_locked - refusing to change it' });
+
+    let buyerStatus, notes, status = row.status, billable = row.billable, setRevenue = false, revenue = row.revenue;
+    if (d === 'signed') {
+      buyerStatus = 'Signed'; notes = note || 'Signed - retained by buyer'; billable = true; status = 'forwarded';
+      if (amount != null && Number(amount) >= 0) { setRevenue = true; revenue = Number(amount); }
+    } else if (d === 'pending') {
+      buyerStatus = 'Pending - ' + (note || 'signature'); notes = 'In outreach'; billable = false;
+    } else if (d === 'open') {
+      buyerStatus = 'Open - in outreach'; notes = note || 'Open - in outreach'; billable = false;
+    } else { // rejected
+      buyerStatus = 'Rejected'; notes = 'Rejected' + (note ? ' - ' + note : ''); billable = false; status = 'buyer_rejected';
+    }
+
+    const dispoJson = JSON.stringify({ source: 'manual', status: buyerStatus, note: notes, by: 'admin', synced_at: new Date().toISOString(), confirmed_at: new Date().toISOString() });
+    if (setRevenue) {
+      await pool.query(
+        `UPDATE leads SET buyer_status=$1, notes=$2, status=$3, billable=$4, revenue=$5,
+           raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', $6::jsonb) WHERE id=$7`,
+        [buyerStatus, notes, status, billable, revenue, dispoJson, row.id]);
+    } else {
+      await pool.query(
+        `UPDATE leads SET buyer_status=$1, notes=$2, status=$3, billable=$4,
+           raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', $5::jsonb) WHERE id=$6`,
+        [buyerStatus, notes, status, billable, dispoJson, row.id]);
+    }
+    console.log(`[Disposition] lead ${row.id} ${row.publisher_sub || ''} -> ${d} (billable=${billable}${setRevenue ? ', $' + revenue : ''})`);
+    return res.json({ ok: true, id: row.id, disposition: d, buyer_status: buyerStatus, billable, revenue: setRevenue ? revenue : row.revenue });
+  } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // Full single lead incl. the raw payload the publisher posted - admin dashboard drawer only.
 // The feed stays light (5,000 rows); the detail is fetched one lead at a time on open.
 app.get('/leads/detail/:id', requireKey, async (req, res) => {
