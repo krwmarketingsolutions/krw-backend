@@ -9573,6 +9573,13 @@ async function sendDailyBrief(slot) {
      ON CONFLICT (day, type, key) DO NOTHING RETURNING id`, [day, slot]);
   if (!claim.rows.length) return;
 
+  // patch 330: refresh buyer-sheet dispositions right before the morning brief,
+  // so the team's updates are in before it sends (Kyler, Oct 16).
+  if (slot === 'am') {
+    try { await bsScanAll('morning brief'); }
+    catch (e) { console.error('[Daily Brief] pre-brief scan failed:', e.message); }
+  }
+
   const s = await pool.query(
     `SELECT COUNT(*)::int AS total,
             COUNT(*) FILTER (WHERE status='forwarded')::int AS delivered,
