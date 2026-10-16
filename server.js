@@ -1278,6 +1278,20 @@ app.post('/publishers', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
+// patch 329: set a publisher's flat per-lead payout_rate (portal pays this on each billable lead)
+app.post('/publishers/:pub_id/payout-rate', requireKey, async (req, res) => {
+  try {
+    const rate = Number((req.body || {}).payout_rate);
+    if (!(rate >= 0)) return res.status(400).json({ ok: false, error: 'payout_rate must be a non-negative number' });
+    const r = await pool.query(
+      'UPDATE publishers SET payout_rate=$1 WHERE pub_id=$2 RETURNING pub_id, name, payout_rate',
+      [rate, req.params.pub_id]);
+    if (!r.rows.length) return res.status(404).json({ ok: false, error: 'Publisher not found' });
+    console.log(`[Publisher] ${req.params.pub_id} payout_rate -> $${rate}`);
+    res.json({ ok: true, publisher: r.rows[0] });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.delete('/publishers/:pub_id', requireKey, async (req, res) => {
   try {
     await pool.query('UPDATE publishers SET active=false WHERE pub_id=$1', [req.params.pub_id]);
