@@ -2832,7 +2832,7 @@ const MVA_BUYERS = [
         address:        b.address,
         city:           b.city,
         state:          stateCode,
-        zip_code:       b.zip_code || b.zip,
+        zip_code:       cleanNldZip(b.zip_code || b.zip),
         ip_address:     b.ip_address,
         user_agent:     b.user_agent || undefined,
         landing_page_url: b.landing_page_url,
@@ -8360,6 +8360,9 @@ async function janCountToday(buyer) {
   return r.rows[0].n;
 }
 
+// patch 333: NLD rejects malformed zips; keep digits and take the first 5 so a
+// recoverable typo still lands at NLD, and a truly bad one falls through as before.
+function cleanNldZip(z){ var d=String(z==null?'':z).replace(/\D/g,''); return d.length>=5 ? d.slice(0,5) : (z==null?'':z); }
 async function janSend(buyer, b, st, leadId, pub) {
   const full = US_STATE_FULL_NAMES[st] || st;
   const strip = o => { Object.keys(o).forEach(k => { if (o[k] === undefined || o[k] === null || o[k] === '') delete o[k]; }); return o; };
@@ -8367,7 +8370,7 @@ async function janSend(buyer, b, st, leadId, pub) {
     const p = strip({ lp_campaign_id: '31080', lp_supplier_id: '110928', lp_key: 'ke21sx0koi7dld',
       lp_subid1: aliasPub(pub) || '', first_name: b.first_name, last_name: b.last_name, email: b.email,
       phone: String(b.phone || '').replace(/\D/g, ''), date_of_birth: convertDateToISO(b.date_of_birth),
-      address: b.address, city: b.city, state: st, zip_code: b.zip_code || b.zip, ip_address: b.ip_address,
+      address: b.address, city: b.city, state: st, zip_code: cleanNldZip(b.zip_code || b.zip), ip_address: b.ip_address,
       landing_page_url: b.landing_page_url, trustedform_cert_url: b.trustedform_cert_url || undefined,
       jornaya_leadid: b.jornaya_leadid || undefined, incident_state: full, incident_date: toUsDate(b.incident_date),   // patch 298
       have_attorney: b.have_attorney, at_fault: b.at_fault, settlement: b.settlement, cited: b.cited,
@@ -8536,7 +8539,8 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     const q = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.id]);
     if (!q.rows[0]) return res.status(404).json({ ok: false, error: 'Lead not found' });
     const row = q.rows[0];
-    if (row.status === 'forwarded') return res.status(409).json({ ok: false, error: 'Lead is already forwarded - refusing to double-send' });
+    const force = (req.body && req.body.force) === true;   // patch 333
+    if (row.status === 'forwarded' && !force) return res.status(409).json({ ok: false, error: 'Lead is already forwarded - refusing to double-send' });
     if (row.billable === true) return res.status(409).json({ ok: false, error: 'Lead is billable - refusing to touch it' });
     if ((row.vertical || '') !== 'MVA') return res.status(400).json({ ok: false, error: 'Only MVA ladder leads can be re-sent here' });
 
@@ -8568,7 +8572,8 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     // back to CH/LT without the state filter.
     if (!JAN_INTAKE_STATES.includes(st)) pushIntake();
     }
-    const plan = rungs.filter((x, i) => rungs.indexOf(x) === i);   // dedupe, order kept
+    let plan = rungs.filter((x, i) => rungs.indexOf(x) === i);   // dedupe, order kept
+    if (Array.isArray(req.body && req.body.only)) plan = plan.filter(x => req.body.only.includes(x));   // patch 333: restrict to named buyers
     if (!plan.length) return res.status(409).json({ ok: false, error: 'No eligible buyer right now (caps reached)', state: st });
 
     const attempts = [];
