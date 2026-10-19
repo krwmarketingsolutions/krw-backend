@@ -3494,7 +3494,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const NYC_LADDER = [
     { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
     { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: !NLD_PAUSED,          states: NLD_ONLY_STATES },   // patch 318
+    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2250, enabled: !NLD_PAUSED,          states: NLD_ONLY_STATES },   // patch 318
     { name: 'MVA-003-LT', priority: 3, group: '003',    cap: 5,    payout: 1700, enabled: false,                states: 'ALL' },   // patch 305: 003 off
   ];
 
@@ -3507,7 +3507,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const LEADBLOOM_LADDER = [
     { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
     { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2000, enabled: !NLD_PAUSED,          states: NLD_ONLY_STATES },   // patch 318
+    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2250, enabled: !NLD_PAUSED,          states: NLD_ONLY_STATES },   // patch 318
     { name: 'CH-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2250, enabled: true,                        states: 'ALL' },
     { name: 'LT-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },
   ];
@@ -3520,7 +3520,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // rejection by one falls to the other in the same request. CH never sees
   // a Leadbloom lead. Everyone else keeps the shared ladder above.
   const LB_ONLY_LADDER = [
-    { name: 'NLD CPA',   priority: 1, group: 'nld',     cap: 10,   payout: 2000, enabled: !NLD_PAUSED,                 states: NLD_ONLY_STATES },   // patch 326: NLD first for its states
+    { name: 'NLD CPA',   priority: 1, group: 'nld',     cap: 10,   payout: 2250, enabled: !NLD_PAUSED,                 states: NLD_ONLY_STATES },   // patch 326: NLD first for its states
     { name: 'LT-Intake', priority: 2, group: 'lt-rest', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },            // patch 326: LT catches non-NLD states + NLD rejects
   ];
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
@@ -9670,7 +9670,7 @@ const BS_NOT_BILLABLE_FLAG = /^(no|n|false|not billable|non-billable)$/i;
 // and becomes leads.revenue on approval). enabled false = read for the Home box
 // only, never write anything.
 const BUYER_SHEETS = [
-  { key: 'nld-mva',   label: 'NLD CPA',    buyer: 'NLD CPA',    vertical: 'MVA', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'MVA CPA Leads - New', amount: 2000, enabled: true },
+  { key: 'nld-mva',   label: 'NLD CPA',    buyer: 'NLD CPA',    vertical: 'MVA', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'MVA CPA Leads - New', amount: 2250, enabled: true /* patch 331: NLD $2000 -> $2250 */ },
   // Rideshare leads carry no buyer_name on the record, so this tab matches by campaign instead
   { key: 'nld-ride',  label: 'NLD Rideshare', buyer: 'CH-AD',   vertical: 'Rideshare', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'Rideshare', campaigns: ['rideshare-tb'], amount: 1800, enabled: true },
   // LT's sheet (patch 273): Adam's team moved to dated tabs ("9.16-10.1" dialer
