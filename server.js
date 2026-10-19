@@ -7633,6 +7633,27 @@ app.get('/billable-queue', requireKey, async (req, res) => {
   }
 });
 
+// patch 334: mark a buyer's approved billables as paid (clears them from owed)
+app.post('/billable-queue/mark-paid', requireKey, async (req, res) => {
+  try {
+    const buyer = String((req.body || {}).buyer || '').trim();
+    if (!buyer) return res.status(400).json({ ok: false, error: 'buyer required' });
+    const { from, to } = req.body || {};
+    const where = ["status='approved'", "raw->>'buyer' = $1"];
+    const params = [buyer];
+    let i = 2;
+    if (from) { where.push('received_at >= $' + (i++)); params.push(from); }
+    if (to)   { where.push('received_at <= $' + (i++)); params.push(to); }
+    const r = await pool.query(
+      "UPDATE billable_queue SET status='paid', resolved_at=NOW(), " +
+      "raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('paid_at', NOW()) " +
+      "WHERE " + where.join(' AND ') + " RETURNING id, amount", params);
+    const amount = r.rows.reduce((s, x) => s + parseFloat(x.amount || 0), 0);
+    console.log('[Billable Paid] ' + buyer + ' -> ' + r.rows.length + ' case(s), $' + amount);
+    return res.json({ ok: true, buyer, count: r.rows.length, amount });
+  } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+});
+
 // patch 325: manually add a billable (hand-added signed cases, no postback)
 app.post('/billable-queue/manual', requireKey, async (req, res) => {
   try {
