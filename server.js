@@ -7629,6 +7629,12 @@ function fsVertical(campaign) {
 }
 const FS_MVA_SIDE = ['mva', 'rideshare', 'roblox', 'roundup'];
 function fsIsMva(campaign) { return FS_MVA_SIDE.indexOf(fsVertical(campaign)) > -1; }
+/* patch 341: a hand-entered invoice row has no lead and therefore no campaign,
+   so it carries its own vertical in raw. */
+function fsRowIsMva(r) {
+  if (r && r.invoice_only) return String(r.vertical || 'mva').toLowerCase() !== 'ssdi';
+  return fsIsMva(r ? r.campaign : null);
+}
 
 function fsNum(v) { const n = parseFloat(v); return isFinite(n) ? n : 0; }
 function fsDays(a, b) {
@@ -7664,18 +7670,21 @@ app.get('/funding-summary', requireKey, async (req, res) => {
               bq.due_date, bq.terms_days, bq.resolved_at,
               COALESCE(NULLIF(TRIM(bq.raw->>'buyer'),''),'Unknown') AS buyer,
               l.campaign, l.state, l.first_name, l.last_name,
-              l.received_at AS lead_at
+              l.received_at AS lead_at,
+              (bq.raw->>'invoice_only' = 'true') AS invoice_only,
+              bq.raw->>'vertical' AS vertical, bq.raw->>'name' AS manual_name
          FROM billable_queue bq
          LEFT JOIN leads l ON l.id = bq.lead_id
         WHERE bq.status IN ('approved','paid','pending','held')
         ORDER BY bq.received_at DESC`);
 
-    const rows = all.rows.filter(r => fsIsMva(r.campaign));
+    const rows = all.rows.filter(fsRowIsMva);
 
     const readyMap = {}, invMap = {}, paidMap = {}, payMap = {}, laneMap = {}, floatMap = {};
     const unconf = { pending: { total: 0, count: 0 }, held: { total: 0, count: 0 } };
     const unconfBuyer = {};
     const wkMap = {}, moMap = {}, pnlBuyer = {}, pnlPub = {};
+    const manualOnly = { count: 0, total: 0, no_cost: 0, no_cost_total: 0 };
     let paidWindowTotal = 0;
     const paidSince = new Date(today.getTime() - weeks * 7 * 86400000);
 
@@ -7745,12 +7754,23 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         p.count++; p.amount += rate;
       }
 
-      const lk = pub + ' → ' + r.buyer;
+      /* A hand-entered row only belongs in P&L and margin once its publisher
+         cost is known; at zero cost it would read as 100% profit. */
+      const fsCostKnown = !r.invoice_only || (!!r.publisher_sub && rate > 0);
+      if (r.invoice_only) {
+        manualOnly.count++; manualOnly.total += amt;
+        if (!fsCostKnown) { manualOnly.no_cost++; manualOnly.no_cost_total += amt; }
+      }
+
+      if (fsCostKnown) {
+            const lk = pub + ' → ' + r.buyer;
       const L = laneMap[lk] || (laneMap[lk] = {
         lane: lk, publisher: pub, buyer: r.buyer, vertical: fsVertical(r.campaign),
         count: 0, buyer_pays: 0, publisher_gets: 0
       });
       L.count++; L.buyer_pays += amt; L.publisher_gets += rate;
+
+      }
 
       const f = fsDays(r.lead_at, r.signed_at);
       if (f !== null && f >= 0 && f <= 365) {
@@ -7758,6 +7778,7 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         fm.total += f; fm.count++;
       }
 
+      if (!fsCostKnown) return;
       /* ── P&L: earned on the signed date, approved and paid only ── */
       if (r.signed_at) {
         const bump = (m, k) => {
@@ -7893,6 +7914,13 @@ app.get('/funding-summary', requireKey, async (req, res) => {
       by_buyer,
       payables: { total: +payables_total.toFixed(2), by_publisher: payables_by_publisher },
       net_position: +((ready_total + awaiting_total) - payables_total).toFixed(2),
+      manual_only: {
+        count: manualOnly.count, total: +manualOnly.total.toFixed(2),
+        no_cost: manualOnly.no_cost, no_cost_total: +manualOnly.no_cost_total.toFixed(2),
+        note: manualOnly.no_cost
+          ? (manualOnly.no_cost + ' hand-entered case(s) have no matching lead, so no publisher cost is known. They count in what buyers owe but are left out of P&L and margin.')
+          : 'Hand-entered rows have their publisher resolved, so they are included in P&L.'
+      },
       margins,
       conversion,
       float: { overall_days: floatOverall, cases: floatCases, by_publisher: float_by_publisher },
@@ -7977,6 +8005,136 @@ app.post('/billable-queue/invoice', requireKey, async (req, res) => {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// ══════════════════════════════════════════════════════
+//  patch 341: invoice-sheet-only billables
+//  billable_queue rows with lead_id NULL. Leads are read to resolve the
+//  publisher (so P&L has a real cost) but never written, so no portal changes.
+// ══════════════════════════════════════════════════════
+
+/* A deploy can briefly run two instances, and two concurrent imports would each
+   see "not present" and both insert. A unique index makes that impossible at the
+   database rather than relying on the check-then-write above it. */
+async function initInvoiceItemsGuard() {
+  try {
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_bq_invoice_only_once
+        ON billable_queue (RIGHT(regexp_replace(cid,'\\D','','g'),10), (raw->>'buyer'))
+        WHERE raw->>'invoice_only' = 'true';
+    `);
+    console.log('[Invoice Items] duplicate guard ready');
+  } catch (err) { console.error('[Invoice Items] guard init failed:', err.message); }
+}
+
+/* Find which publisher sent this phone number. SELECT only. */
+async function fsPublisherForPhone(phone) {
+  try {
+    const r = await pool.query(
+      `SELECT publisher_sub, campaign FROM leads
+        WHERE RIGHT(regexp_replace(COALESCE(phone,''),'\\D','','g'),10) = $1
+          AND COALESCE(NULLIF(TRIM(publisher_sub),''),'') <> ''
+        ORDER BY received_at DESC LIMIT 1`, [phone]);
+    return r.rows[0] || null;
+  } catch (err) { return null; }
+}
+
+app.post('/invoice-items', requireKey, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const items = Array.isArray(b.items) ? b.items : [b];
+    if (!items.length) return res.status(400).json({ ok: false, error: 'no items' });
+
+    const added = [], skipped = [];
+    for (const it of items) {
+      const buyer = String(it.buyer || '').trim();
+      const phone = String(it.cid || it.phone || '').replace(/\D/g, '').slice(-10);
+      const amt = Number(it.amount);
+      if (!buyer)              { skipped.push({ item: it, why: 'buyer required' }); continue; }
+      if (phone.length !== 10) { skipped.push({ item: it, why: 'cid must be a 10 digit phone' }); continue; }
+      if (!(amt > 0))          { skipped.push({ item: it, why: 'amount must be positive' }); continue; }
+
+      /* The same phone and buyer twice is a double count of what is owed. */
+      const dup = await pool.query(
+        `SELECT id, status FROM billable_queue
+          WHERE RIGHT(regexp_replace(cid,'\\D','','g'),10) = $1
+            AND COALESCE(NULLIF(TRIM(raw->>'buyer'),''),'') = $2 LIMIT 1`,
+        [phone, buyer]);
+      if (dup.rows.length) { skipped.push({ cid: phone, buyer, why: 'already recorded', existing: dup.rows[0] }); continue; }
+
+      /* Resolve the publisher from the lead so the P&L carries a real cost. */
+      const match = it.publisher_sub ? null : await fsPublisherForPhone(phone);
+      const pub = it.publisher_sub || (match && match.publisher_sub) || null;
+
+      try {
+      const r = await pool.query(
+        `INSERT INTO billable_queue (cid, amount, publisher_sub, lead_id, status, raw)
+         VALUES ($1,$2,$3,NULL,'approved',$4::jsonb) RETURNING id`,
+        [phone, amt, pub, JSON.stringify({
+          buyer: buyer, invoice_only: true, vertical: String(it.vertical || 'mva'),
+          source: 'invoice_manual', name: it.name || null, note: it.note || null,
+          publisher_resolved_from: match ? 'lead_phone_match' : (it.publisher_sub ? 'supplied' : null),
+          added_at: new Date().toISOString()
+        })]);
+      added.push({ id: r.rows[0].id, cid: phone, buyer, amount: amt, name: it.name || null, publisher_sub: pub });
+      } catch (e) {
+        if (e && e.code === '23505') { skipped.push({ cid: phone, buyer, why: 'already recorded' }); continue; }
+        throw e;
+      }
+    }
+    const total = added.reduce((s, a) => s + a.amount, 0);
+    const noPub = added.filter(a => !a.publisher_sub).length;
+    console.log('[Invoice Items] +' + added.length + ' row(s), $' + total +
+                ', ' + noPub + ' without a publisher, ' + skipped.length + ' skipped');
+    return res.json({ ok: true, added, skipped, count: added.length,
+                      total: +total.toFixed(2), without_publisher: noPub });
+  } catch (err) {
+    console.error('[invoice-items]', err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* One-time baseline Kyler confirmed 2026-10-20. Only rows marked Signed.
+   Idempotent on cid+buyer, so a redeploy cannot double what a buyer owes. */
+async function fsSeedBaseline20261020() {
+  const seed = [
+    { buyer: 'NLD CPA',   amount: 2250, cid: '3149130092', name: 'Graves' },
+    { buyer: 'NLD CPA',   amount: 2250, cid: '5615814335', name: 'Daley' },
+    { buyer: 'NLD CPA',   amount: 2250, cid: '2692172777', name: 'Ziegert' },
+    { buyer: 'NLD CPA',   amount: 2250, cid: '8315215562', name: 'Priolo' },
+    { buyer: 'NLD CPA',   amount: 2250, cid: '5619058517', name: 'Edwards' },
+    { buyer: 'LT-Intake', amount: 2500, cid: '5516559276', name: 'Loukia Altenor' },
+    { buyer: 'LT-Intake', amount: 2500, cid: '2533311718', name: 'Trudy Halverson' }
+  ];
+  try {
+    let added = 0, noPub = 0;
+    for (const s of seed) {
+      const dup = await pool.query(
+        `SELECT 1 FROM billable_queue
+          WHERE RIGHT(regexp_replace(cid,'\\D','','g'),10) = $1
+            AND COALESCE(NULLIF(TRIM(raw->>'buyer'),''),'') = $2 LIMIT 1`,
+        [s.cid, s.buyer]);
+      if (dup.rows.length) continue;
+      const match = await fsPublisherForPhone(s.cid);
+      const pub = match ? match.publisher_sub : null;
+      if (!pub) noPub++;
+      try {
+      await pool.query(
+        `INSERT INTO billable_queue (cid, amount, publisher_sub, lead_id, status, raw)
+         VALUES ($1,$2,$3,NULL,'approved',$4::jsonb)`,
+        [s.cid, s.amount, pub, JSON.stringify({
+          buyer: s.buyer, invoice_only: true, vertical: 'mva', source: 'baseline_2026_10_20',
+          name: s.name, note: 'Signed; baseline import 2026-10-20',
+          publisher_resolved_from: match ? 'lead_phone_match' : null,
+          added_at: new Date().toISOString()
+        })]);
+      added++;
+      } catch (e) { if (!(e && e.code === '23505')) throw e; }
+    }
+    if (added) console.log('[Invoice Baseline] imported ' + added + ' signed case(s), ' + noPub + ' without a publisher');
+    else console.log('[Invoice Baseline] already present, nothing imported');
+  } catch (err) { console.error('[Invoice Baseline] failed:', err.message); }
+}
+initInvoiceItemsGuard().then(fsSeedBaseline20261020);
 
 app.get('/billable-queue', requireKey, async (req, res) => {
   try {
