@@ -7651,15 +7651,27 @@ app.get('/funding-summary', requireKey, async (req, res) => {
     const weeks = Math.max(1, Math.min(52, parseInt(req.query.weeks || '8', 10) || 8));
     const today = fsToday();
 
+    /* patch 342: the rates Kyler maintains live on publishers.payout_rate (what
+       POST /publishers/:pub_id/payout-rate writes and what the portal pays
+       from). publisher_campaigns is largely unset, so reading only that table
+       returned 0 for everyone and the P&L reported 100% margin. */
     const rateRows = await pool.query(
       `SELECT pub_id, campaign, COALESCE(payout_rate,0)::float AS payout_rate
          FROM publisher_campaigns WHERE active = true`);
+    const flatRows = await pool.query(
+      `SELECT pub_id, COALESCE(payout_rate,0)::float AS payout_rate FROM publishers`);
+    const flatRate = {};
+    flatRows.rows.forEach(r => { flatRate[r.pub_id] = fsNum(r.payout_rate); });
+
     const rateFor = (pub, campaign) => {
       if (!pub) return 0;
+      if (flatRate[pub] > 0) return flatRate[pub];              // flat per-publisher rate
       const mine = rateRows.rows.filter(r => r.pub_id === pub);
       if (!mine.length) return 0;
-      const exact = mine.find(r => r.campaign === campaign);
-      return fsNum((exact || mine[0]).payout_rate);
+      const exact = mine.find(r => r.campaign === campaign);    // campaign-specific
+      if (exact && fsNum(exact.payout_rate) > 0) return fsNum(exact.payout_rate);
+      const any = mine.find(r => fsNum(r.payout_rate) > 0);     // any active row
+      return any ? fsNum(any.payout_rate) : 0;
     };
 
     /* patch 338: pending and held are read too, so money a buyer has reported
