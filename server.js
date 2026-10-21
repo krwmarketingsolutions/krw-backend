@@ -7648,8 +7648,18 @@ function fsToday() { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }
 // patch 338: held/pending + P&L
 app.get('/funding-summary', requireKey, async (req, res) => {
   try {
-    const weeks = Math.max(1, Math.min(52, parseInt(req.query.weeks || '8', 10) || 8));
+    /* patch 343: rolling window on the signed date. Default 'all' on purpose -
+       a filtered default would hide older uninvoiced cases, and money out of
+       sight is money that does not get chased. */
+    const RANGE_DAYS = { week: 7, biweek: 14, month: 30 };
+    const range = ['week', 'biweek', 'month', 'all'].indexOf(String(req.query.range || 'all')) > -1
+      ? String(req.query.range || 'all') : 'all';
+    const rangeDays = RANGE_DAYS[range] || null;
+    const weeks = rangeDays
+      ? Math.max(1, Math.round(rangeDays / 7))
+      : Math.max(1, Math.min(52, parseInt(req.query.weeks || '8', 10) || 8));
     const today = fsToday();
+    const rangeSince = rangeDays ? new Date(today.getTime() - rangeDays * 86400000) : null;
 
     /* patch 342: the rates Kyler maintains live on publishers.payout_rate (what
        POST /publishers/:pub_id/payout-rate writes and what the portal pays
@@ -7690,10 +7700,12 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         WHERE bq.status IN ('approved','paid','pending','held')
         ORDER BY bq.received_at DESC`);
 
-    const rows = all.rows.filter(fsRowIsMva);
+    const rows = all.rows.filter(fsRowIsMva).filter(r =>
+      !rangeSince || (r.signed_at && new Date(r.signed_at) >= rangeSince));
 
     const readyMap = {}, invMap = {}, paidMap = {}, payMap = {}, laneMap = {}, floatMap = {};
     const unconf = { pending: { total: 0, count: 0 }, held: { total: 0, count: 0 } };
+    const ownedDetail = {};
     const unconfBuyer = {};
     const wkMap = {}, moMap = {}, pnlBuyer = {}, pnlPub = {};
     const manualOnly = { count: 0, total: 0, no_cost: 0, no_cost_total: 0 };
@@ -7764,6 +7776,26 @@ app.get('/funding-summary', requireKey, async (req, res) => {
       if (r.status === 'approved') {
         const p = payMap[pub] || (payMap[pub] = { publisher: pub, count: 0, amount: 0 });
         p.count++; p.amount += rate;
+
+        /* patch 343: the lead-level breakdown behind this buyer's owed figure. */
+        const dAge = fsDays(r.signed_at, today);
+        let dOver = false, dOverDays = 0;
+        if (r.invoiced_at && r.due_date) {
+          const o = fsDays(new Date(r.due_date), today);
+          dOverDays = o !== null && o > 0 ? Math.floor(o) : 0;
+          dOver = dOverDays > 0;
+        }
+        (ownedDetail[r.buyer] || (ownedDetail[r.buyer] = [])).push({
+          id: r.id, cid: r.cid,
+          name: r.manual_name || [r.first_name, r.last_name].filter(Boolean).join(' ') || null,
+          state: r.state || null, publisher_sub: pub,
+          amount: +amt.toFixed(2), payout: +rate.toFixed(2), margin: +(amt - rate).toFixed(2),
+          cost_known: fsCostKnown,
+          signed_at: r.signed_at, days_since_signed: dAge === null ? null : Math.floor(dAge),
+          invoiced: !!r.invoiced_at, invoice_id: r.invoice_id || null,
+          due_date: r.due_date || null, overdue: dOver, days_overdue: dOverDays,
+          source: r.invoice_only ? 'manual' : 'sheet'
+        });
       }
 
       /* A hand-entered row only belongs in P&L and margin once its publisher
@@ -7818,26 +7850,34 @@ app.get('/funding-summary', requireKey, async (req, res) => {
 
     const buyers = {};
     const touch = (name) => buyers[name] || (buyers[name] = {
-      buyer: name, ready: 0, ready_count: 0, invoiced_unpaid: 0,
-      overdue: 0, paid_window: 0, pending: 0, held: 0, total_owed: 0
+      buyer: name, ready: 0, ready_count: 0, invoiced_unpaid: 0, invoiced_count: 0,
+      overdue: 0, overdue_count: 0, paid_window: 0, paid_count: 0,
+      pending: 0, held: 0, unconfirmed_count: 0, total_owed: 0
     });
     ready_by_buyer.forEach(b => { const x = touch(b.buyer); x.ready = b.amount; x.ready_count = b.count; });
     by_invoice.forEach(v => {
       const x = touch(v.buyer);
       x.invoiced_unpaid += v.amount;
-      if (v.overdue) x.overdue += v.amount;
+      x.invoiced_count += v.count;
+      if (v.overdue) { x.overdue += v.amount; x.overdue_count += v.count; }
     });
-    Object.values(paidMap).forEach(p => { touch(p.buyer).paid_window = +p.amount.toFixed(2); });
+    Object.values(paidMap).forEach(p => {
+      const x = touch(p.buyer); x.paid_window = +p.amount.toFixed(2); x.paid_count = p.count;
+    });
     Object.values(unconfBuyer).forEach(u => {
       const x = touch(u.buyer);
       x.pending = +u.pending.toFixed(2);
       x.held = +u.held.toFixed(2);
+      x.unconfirmed_count = u.count;
     });
     const by_buyer = Object.values(buyers).map(x => ({
       ...x,
       invoiced_unpaid: +x.invoiced_unpaid.toFixed(2),
       overdue: +x.overdue.toFixed(2),
       total_owed: +(x.ready + x.invoiced_unpaid).toFixed(2),
+      cases: x.ready_count + x.invoiced_count,
+      detail: (ownedDetail[x.buyer] || []).slice().sort((a, b) =>
+        (b.days_since_signed || 0) - (a.days_since_signed || 0)),
       unconfirmed: +(x.pending + x.held).toFixed(2)
     })).sort((a, b) => (b.total_owed - a.total_owed) || (b.unconfirmed - a.unconfirmed));
 
@@ -7903,6 +7943,8 @@ app.get('/funding-summary', requireKey, async (req, res) => {
       ok: true,
       as_of: new Date().toISOString(),
       window_weeks: weeks,
+      range: range,
+      range_days: rangeDays,
       scope: 'mva',
       ready_to_invoice: { total: +ready_total.toFixed(2), by_buyer: ready_by_buyer },
       awaiting_payment: {
