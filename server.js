@@ -7725,6 +7725,11 @@ app.get('/funding-summary', requireKey, async (req, res) => {
       const rate = rateFor(r.publisher_sub, r.campaign);
       const amt = fsNum(r.amount);
 
+      /* patch 345: declared here, above every use. A hand-entered row only
+         belongs in P&L and margin once its publisher cost is known; at zero
+         cost it would read as 100% profit. */
+      const fsCostKnown = !r.invoice_only || (!!r.publisher_sub && rate > 0);
+
       /* ── Not yours yet: reported by a buyer, not approved by you ── */
       if (r.status === 'pending' || r.status === 'held') {
         unconf[r.status].total += amt;
@@ -7744,7 +7749,7 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         b.cases.push({
           id: r.id, cid: r.cid, amount: amt, publisher_sub: pub,
           signed_at: r.signed_at, first_name: r.first_name, last_name: r.last_name,
-          state: r.state, days_since_signed: age === null ? null : Math.floor(age)
+          state: r.state, days_since_signed: age === null ? null : Math.max(0, Math.floor(age))
         });
       }
 
@@ -7791,16 +7796,13 @@ app.get('/funding-summary', requireKey, async (req, res) => {
           state: r.state || null, publisher_sub: pub,
           amount: +amt.toFixed(2), payout: +rate.toFixed(2), margin: +(amt - rate).toFixed(2),
           cost_known: fsCostKnown,
-          signed_at: r.signed_at, days_since_signed: dAge === null ? null : Math.floor(dAge),
+          signed_at: r.signed_at, days_since_signed: dAge === null ? null : Math.max(0, Math.floor(dAge)),
           invoiced: !!r.invoiced_at, invoice_id: r.invoice_id || null,
           due_date: r.due_date || null, overdue: dOver, days_overdue: dOverDays,
           source: r.invoice_only ? 'manual' : 'sheet'
         });
       }
 
-      /* A hand-entered row only belongs in P&L and margin once its publisher
-         cost is known; at zero cost it would read as 100% profit. */
-      const fsCostKnown = !r.invoice_only || (!!r.publisher_sub && rate > 0);
       if (r.invoice_only) {
         manualOnly.count++; manualOnly.total += amt;
         if (!fsCostKnown) { manualOnly.no_cost++; manualOnly.no_cost_total += amt; }
