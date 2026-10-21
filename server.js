@@ -8271,6 +8271,7 @@ app.get('/billable-queue', requireKey, async (req, res) => {
               l.first_name, l.last_name, l.state, l.vertical, l.campaign, l.phone AS lead_phone
        FROM billable_queue bq
        LEFT JOIN leads l ON l.id = bq.lead_id
+       WHERE COALESCE(bq.raw->>'voided','') <> 'true'   -- patch 349: hide voided here too
        ORDER BY bq.received_at DESC`
     );
     const counts = { pending: 0, approved: 0, held: 0 };
