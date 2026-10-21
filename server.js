@@ -8281,24 +8281,48 @@ app.get('/billable-queue', requireKey, async (req, res) => {
   }
 });
 
-// patch 334: mark a buyer's approved billables as paid (clears them from owed)
+// patch 348: mark billables paid by id, by invoice, or by buyer.
+// Since patch 346 a pending or held case is owed, so paying one must not
+// require approval first - the old route filtered on status='approved' and
+// silently skipped them. Marking paid writes no lead and approves nothing, so
+// no publisher portal changes either way.
 app.post('/billable-queue/mark-paid', requireKey, async (req, res) => {
   try {
-    const buyer = String((req.body || {}).buyer || '').trim();
-    if (!buyer) return res.status(400).json({ ok: false, error: 'buyer required' });
-    const { from, to } = req.body || {};
-    const where = ["status='approved'", "raw->>'buyer' = $1"];
-    const params = [buyer];
-    let i = 2;
-    if (from) { where.push('received_at >= $' + (i++)); params.push(from); }
-    if (to)   { where.push('received_at <= $' + (i++)); params.push(to); }
+    const b = req.body || {};
+    const where = ["status <> 'paid'", "COALESCE(raw->>'voided','') <> 'true'"];
+    const params = [];
+    let i = 1, scope;
+
+    if (Array.isArray(b.ids) && b.ids.length) {
+      const ids = b.ids.map(n => parseInt(n, 10)).filter(n => isFinite(n));
+      if (!ids.length) return res.status(400).json({ ok: false, error: 'ids contained no valid numbers' });
+      params.push(ids); where.push('id = ANY($' + (i++) + '::int[])');
+      scope = ids.length + ' case(s)';
+    } else if (b.invoice_id) {
+      params.push(String(b.invoice_id).trim()); where.push('invoice_id = $' + (i++));
+      scope = 'invoice ' + b.invoice_id;
+    } else if (b.buyer) {
+      params.push(String(b.buyer).trim());
+      where.push("COALESCE(NULLIF(TRIM(raw->>'buyer'),''),'') = $" + (i++));
+      scope = 'buyer ' + b.buyer;
+      if (b.from) { params.push(b.from); where.push('received_at >= $' + (i++)); }
+      if (b.to)   { params.push(b.to);   where.push('received_at <= $' + (i++)); }
+    } else {
+      return res.status(400).json({ ok: false, error: 'pass ids, invoice_id, or buyer' });
+    }
+
     const r = await pool.query(
       "UPDATE billable_queue SET status='paid', resolved_at=NOW(), " +
       "raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('paid_at', NOW()) " +
-      "WHERE " + where.join(' AND ') + " RETURNING id, amount", params);
-    const amount = r.rows.reduce((s, x) => s + parseFloat(x.amount || 0), 0);
-    console.log('[Billable Paid] ' + buyer + ' -> ' + r.rows.length + ' case(s), $' + amount);
-    return res.json({ ok: true, buyer, count: r.rows.length, amount });
+      'WHERE ' + where.join(' AND ') +
+      " RETURNING id, amount, raw->>'buyer' AS buyer", params);
+
+    const amount = +r.rows.reduce((s, x) => s + parseFloat(x.amount || 0), 0).toFixed(2);
+    if (!r.rows.length) {
+      return res.status(404).json({ ok: false, error: 'nothing owed matched ' + scope, count: 0, amount: 0 });
+    }
+    console.log('[Billable Paid] ' + scope + ' -> ' + r.rows.length + ' case(s), $' + amount);
+    return res.json({ ok: true, scope, count: r.rows.length, amount, ids: r.rows.map(x => x.id) });
   } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
 });
 
