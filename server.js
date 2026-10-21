@@ -7639,12 +7639,12 @@ function fsDays(a, b) {
 function fsToday() { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }
 
 // ── GET /funding-summary ──────────────────────────────
+// patch 338: held/pending + P&L
 app.get('/funding-summary', requireKey, async (req, res) => {
   try {
     const weeks = Math.max(1, Math.min(52, parseInt(req.query.weeks || '8', 10) || 8));
     const today = fsToday();
 
-    // Publisher payout rates, resolved in JS to avoid join fan-out.
     const rateRows = await pool.query(
       `SELECT pub_id, campaign, COALESCE(payout_rate,0)::float AS payout_rate
          FROM publisher_campaigns WHERE active = true`);
@@ -7656,7 +7656,8 @@ app.get('/funding-summary', requireKey, async (req, res) => {
       return fsNum((exact || mine[0]).payout_rate);
     };
 
-    // Every signed case with its lead, newest first.
+    /* patch 338: pending and held are read too, so money a buyer has reported
+       but you have not approved is visible instead of silently missing. */
     const all = await pool.query(
       `SELECT bq.id, bq.cid, bq.status, bq.amount::float AS amount, bq.publisher_sub,
               bq.received_at AS signed_at, bq.invoice_id, bq.invoiced_at,
@@ -7666,28 +7667,46 @@ app.get('/funding-summary', requireKey, async (req, res) => {
               l.received_at AS lead_at
          FROM billable_queue bq
          LEFT JOIN leads l ON l.id = bq.lead_id
-        WHERE bq.status IN ('approved','paid')
+        WHERE bq.status IN ('approved','paid','pending','held')
         ORDER BY bq.received_at DESC`);
 
-    // MVA side only. SSDI and unclassified stay out entirely.
     const rows = all.rows.filter(r => fsIsMva(r.campaign));
 
     const readyMap = {}, invMap = {}, paidMap = {}, payMap = {}, laneMap = {}, floatMap = {};
+    const unconf = { pending: { total: 0, count: 0 }, held: { total: 0, count: 0 } };
+    const unconfBuyer = {};
+    const wkMap = {}, moMap = {}, pnlBuyer = {}, pnlPub = {};
     let paidWindowTotal = 0;
     const paidSince = new Date(today.getTime() - weeks * 7 * 86400000);
+
+    const weekStart = (d) => {
+      const x = new Date(d); x.setHours(0, 0, 0, 0);
+      const dow = (x.getDay() + 6) % 7;           // Monday = 0
+      x.setDate(x.getDate() - dow);
+      return x.toISOString().slice(0, 10);
+    };
+    const monthStart = (d) => new Date(d).toISOString().slice(0, 7);
 
     rows.forEach(r => {
       const pub = r.publisher_sub || 'Unknown';
       const rate = rateFor(r.publisher_sub, r.campaign);
       const amt = fsNum(r.amount);
 
-      // ── Ready to invoice: approved, never invoiced ──
+      /* ── Not yours yet: reported by a buyer, not approved by you ── */
+      if (r.status === 'pending' || r.status === 'held') {
+        unconf[r.status].total += amt;
+        unconf[r.status].count++;
+        const u = unconfBuyer[r.buyer] || (unconfBuyer[r.buyer] =
+          { buyer: r.buyer, pending: 0, held: 0, count: 0 });
+        u[r.status] += amt; u.count++;
+        return;   // excluded from payables, margin, float and P&L
+      }
+
       if (r.status === 'approved' && !r.invoiced_at) {
         const b = readyMap[r.buyer] || (readyMap[r.buyer] =
           { buyer: r.buyer, count: 0, amount: 0, oldest_days: 0, cases: [] });
         const age = fsDays(r.signed_at, today);
-        b.count++;
-        b.amount += amt;
+        b.count++; b.amount += amt;
         if (age !== null && age > b.oldest_days) b.oldest_days = Math.floor(age);
         b.cases.push({
           id: r.id, cid: r.cid, amount: amt, publisher_sub: pub,
@@ -7696,7 +7715,6 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         });
       }
 
-      // ── Awaiting payment: invoiced, not yet paid ──
       if (r.status === 'approved' && r.invoiced_at) {
         const key = r.invoice_id || ('no-id-' + r.id);
         const v = invMap[key] || (invMap[key] = {
@@ -7704,8 +7722,7 @@ app.get('/funding-summary', requireKey, async (req, res) => {
           invoiced_at: r.invoiced_at, due_date: r.due_date,
           days_outstanding: 0, days_overdue: 0, overdue: false
         });
-        v.count++;
-        v.amount += amt;
+        v.count++; v.amount += amt;
         const out = fsDays(r.invoiced_at, today);
         v.days_outstanding = out === null ? 0 : Math.floor(out);
         if (r.due_date) {
@@ -7715,7 +7732,6 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         }
       }
 
-      // ── Paid inside the window ──
       if (r.status === 'paid') {
         const when = r.resolved_at || r.signed_at;
         if (when && new Date(when) >= paidSince) {
@@ -7724,13 +7740,11 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         }
       }
 
-      // ── Payables: publisher cost on everything still owed to us ──
       if (r.status === 'approved') {
         const p = payMap[pub] || (payMap[pub] = { publisher: pub, count: 0, amount: 0 });
         p.count++; p.amount += rate;
       }
 
-      // ── Margin per publisher -> buyer lane, across all signed history ──
       const lk = pub + ' → ' + r.buyer;
       const L = laneMap[lk] || (laneMap[lk] = {
         lane: lk, publisher: pub, buyer: r.buyer, vertical: fsVertical(r.campaign),
@@ -7738,11 +7752,22 @@ app.get('/funding-summary', requireKey, async (req, res) => {
       });
       L.count++; L.buyer_pays += amt; L.publisher_gets += rate;
 
-      // ── Float: lead arriving to case signed ──
       const f = fsDays(r.lead_at, r.signed_at);
       if (f !== null && f >= 0 && f <= 365) {
         const fm = floatMap[pub] || (floatMap[pub] = { publisher: pub, total: 0, count: 0 });
         fm.total += f; fm.count++;
+      }
+
+      /* ── P&L: earned on the signed date, approved and paid only ── */
+      if (r.signed_at) {
+        const bump = (m, k) => {
+          const e = m[k] || (m[k] = { key: k, revenue: 0, cost: 0, profit: 0, cases: 0 });
+          e.revenue += amt; e.cost += rate; e.profit += (amt - rate); e.cases++;
+        };
+        bump(wkMap, weekStart(r.signed_at));
+        bump(moMap, monthStart(r.signed_at));
+        bump(pnlBuyer, r.buyer);
+        bump(pnlPub, pub);
       }
     });
 
@@ -7758,11 +7783,10 @@ app.get('/funding-summary', requireKey, async (req, res) => {
     const overdue_total = by_invoice.filter(v => v.overdue).reduce((s, v) => s + v.amount, 0);
     const oldest_overdue = by_invoice.reduce((m, v) => Math.max(m, v.days_overdue || 0), 0);
 
-    // Per-buyer rollup for the dashboard table.
     const buyers = {};
     const touch = (name) => buyers[name] || (buyers[name] = {
       buyer: name, ready: 0, ready_count: 0, invoiced_unpaid: 0,
-      overdue: 0, paid_window: 0, total_owed: 0
+      overdue: 0, paid_window: 0, pending: 0, held: 0, total_owed: 0
     });
     ready_by_buyer.forEach(b => { const x = touch(b.buyer); x.ready = b.amount; x.ready_count = b.count; });
     by_invoice.forEach(v => {
@@ -7771,12 +7795,18 @@ app.get('/funding-summary', requireKey, async (req, res) => {
       if (v.overdue) x.overdue += v.amount;
     });
     Object.values(paidMap).forEach(p => { touch(p.buyer).paid_window = +p.amount.toFixed(2); });
+    Object.values(unconfBuyer).forEach(u => {
+      const x = touch(u.buyer);
+      x.pending = +u.pending.toFixed(2);
+      x.held = +u.held.toFixed(2);
+    });
     const by_buyer = Object.values(buyers).map(x => ({
       ...x,
       invoiced_unpaid: +x.invoiced_unpaid.toFixed(2),
       overdue: +x.overdue.toFixed(2),
-      total_owed: +(x.ready + x.invoiced_unpaid).toFixed(2)
-    })).sort((a, b) => b.total_owed - a.total_owed);
+      total_owed: +(x.ready + x.invoiced_unpaid).toFixed(2),
+      unconfirmed: +(x.pending + x.held).toFixed(2)
+    })).sort((a, b) => (b.total_owed - a.total_owed) || (b.unconfirmed - a.unconfirmed));
 
     const payables_by_publisher = Object.values(payMap)
       .map(p => ({ publisher: p.publisher, count: p.count, amount: +p.amount.toFixed(2) }))
@@ -7800,7 +7830,6 @@ app.get('/funding-summary', requireKey, async (req, res) => {
       .map(f => ({ publisher: f.publisher, days: +(f.total / f.count).toFixed(1), cases: f.count }))
       .sort((a, b) => b.cases - a.cases);
 
-    // Conversion: MVA leads sent vs signed, inside the window.
     const conv = await pool.query(
       `SELECT COALESCE(NULLIF(TRIM(l.publisher_sub),''),'Unknown') AS publisher,
               COALESCE(l.campaign,'') AS campaign,
@@ -7818,12 +7847,24 @@ app.get('/funding-summary', requireKey, async (req, res) => {
     conv.rows.filter(r => fsIsMva(r.campaign)).forEach(r => {
       const c = convMap[r.publisher] || (convMap[r.publisher] =
         { publisher: r.publisher, leads_sent: 0, signed: 0 });
-      c.leads_sent += r.leads_sent;
-      c.signed += r.signed;
+      c.leads_sent += r.leads_sent; c.signed += r.signed;
     });
     const conversion = Object.values(convMap).map(c => ({
       ...c, rate: c.leads_sent ? +((c.signed / c.leads_sent) * 100).toFixed(1) : 0
     })).sort((a, b) => b.leads_sent - a.leads_sent);
+
+    const tidy = (m, limit) => Object.values(m)
+      .map(e => ({
+        key: e.key, cases: e.cases,
+        revenue: +e.revenue.toFixed(2), cost: +e.cost.toFixed(2), profit: +e.profit.toFixed(2),
+        margin_pct: e.revenue ? +((e.profit / e.revenue) * 100).toFixed(1) : 0
+      }))
+      .sort((a, b) => (a.key < b.key ? 1 : -1))
+      .slice(0, limit);
+
+    const pnlTotals = Object.values(pnlBuyer).reduce(
+      (t, e) => ({ revenue: t.revenue + e.revenue, cost: t.cost + e.cost, profit: t.profit + e.profit, cases: t.cases + e.cases }),
+      { revenue: 0, cost: 0, profit: 0, cases: 0 });
 
     res.json({
       ok: true,
@@ -7837,6 +7878,14 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         oldest_overdue_days: oldest_overdue,
         by_invoice
       },
+      unconfirmed: {
+        total: +(unconf.pending.total + unconf.held.total).toFixed(2),
+        pending: { total: +unconf.pending.total.toFixed(2), count: unconf.pending.count },
+        held: { total: +unconf.held.total.toFixed(2), count: unconf.held.count },
+        by_buyer: Object.values(unconfBuyer).map(u => ({
+          buyer: u.buyer, pending: +u.pending.toFixed(2), held: +u.held.toFixed(2), count: u.count
+        })).sort((a, b) => (b.pending + b.held) - (a.pending + a.held))
+      },
       paid_recent: {
         total: +paidWindowTotal.toFixed(2),
         by_buyer: Object.values(paidMap).map(p => ({ ...p, amount: +p.amount.toFixed(2) }))
@@ -7846,7 +7895,19 @@ app.get('/funding-summary', requireKey, async (req, res) => {
       net_position: +((ready_total + awaiting_total) - payables_total).toFixed(2),
       margins,
       conversion,
-      float: { overall_days: floatOverall, cases: floatCases, by_publisher: float_by_publisher }
+      float: { overall_days: floatOverall, cases: floatCases, by_publisher: float_by_publisher },
+      pnl: {
+        basis: 'Gross margin on signed cases: buyer revenue minus publisher payout. Excludes ad spend and overhead.',
+        totals: {
+          revenue: +pnlTotals.revenue.toFixed(2), cost: +pnlTotals.cost.toFixed(2),
+          profit: +pnlTotals.profit.toFixed(2), cases: pnlTotals.cases,
+          margin_pct: pnlTotals.revenue ? +((pnlTotals.profit / pnlTotals.revenue) * 100).toFixed(1) : 0
+        },
+        weekly: tidy(wkMap, 12),
+        monthly: tidy(moMap, 6),
+        by_buyer: tidy(pnlBuyer, 20).sort((a, b) => b.profit - a.profit),
+        by_publisher: tidy(pnlPub, 20).sort((a, b) => b.profit - a.profit)
+      }
     });
   } catch (err) {
     console.error('[funding-summary]', err.message);
