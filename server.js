@@ -7698,6 +7698,7 @@ app.get('/funding-summary', requireKey, async (req, res) => {
          FROM billable_queue bq
          LEFT JOIN leads l ON l.id = bq.lead_id
         WHERE bq.status IN ('approved','paid','pending','held')
+          AND COALESCE(bq.raw->>'voided','') <> 'true'
         ORDER BY bq.received_at DESC`);
 
     const rows = all.rows.filter(fsRowIsMva).filter(r =>
@@ -7730,17 +7731,19 @@ app.get('/funding-summary', requireKey, async (req, res) => {
          cost it would read as 100% profit. */
       const fsCostKnown = !r.invoice_only || (!!r.publisher_sub && rate > 0);
 
-      /* ── Not yours yet: reported by a buyer, not approved by you ── */
+      /* patch 346: a buyer sheet marking a case billable is what makes it owed.
+         Approval is about updating the publisher portal, so pending and held
+         are counted here and only noted separately for the portal's sake. */
       if (r.status === 'pending' || r.status === 'held') {
         unconf[r.status].total += amt;
         unconf[r.status].count++;
         const u = unconfBuyer[r.buyer] || (unconfBuyer[r.buyer] =
           { buyer: r.buyer, pending: 0, held: 0, count: 0 });
         u[r.status] += amt; u.count++;
-        return;   // excluded from payables, margin, float and P&L
       }
+      const fsOwed = r.status !== 'paid';
 
-      if (r.status === 'approved' && !r.invoiced_at) {
+      if (fsOwed && !r.invoiced_at) {
         const b = readyMap[r.buyer] || (readyMap[r.buyer] =
           { buyer: r.buyer, count: 0, amount: 0, oldest_days: 0, cases: [] });
         const age = fsDays(r.signed_at, today);
@@ -7753,7 +7756,7 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         });
       }
 
-      if (r.status === 'approved' && r.invoiced_at) {
+      if (fsOwed && r.invoiced_at) {
         const key = r.invoice_id || ('no-id-' + r.id);
         const v = invMap[key] || (invMap[key] = {
           invoice_id: r.invoice_id, buyer: r.buyer, count: 0, amount: 0,
@@ -7778,7 +7781,7 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         }
       }
 
-      if (r.status === 'approved') {
+      if (fsOwed) {
         const p = payMap[pub] || (payMap[pub] = { publisher: pub, count: 0, amount: 0 });
         p.count++; p.amount += rate;
 
@@ -7799,7 +7802,9 @@ app.get('/funding-summary', requireKey, async (req, res) => {
           signed_at: r.signed_at, days_since_signed: dAge === null ? null : Math.max(0, Math.floor(dAge)),
           invoiced: !!r.invoiced_at, invoice_id: r.invoice_id || null,
           due_date: r.due_date || null, overdue: dOver, days_overdue: dOverDays,
-          source: r.invoice_only ? 'manual' : 'sheet'
+          source: r.invoice_only ? 'manual' : 'sheet',
+          approval: r.status,
+          awaiting_approval: (r.status === 'pending' || r.status === 'held')
         });
       }
 
@@ -7954,6 +7959,15 @@ app.get('/funding-summary', requireKey, async (req, res) => {
         overdue_total: +overdue_total.toFixed(2),
         oldest_overdue_days: oldest_overdue,
         by_invoice
+      },
+      awaiting_approval: {
+        note: 'Counted in what the buyer owes. Not yet approved, so the payout is not on the publisher portal.',
+        total: +(unconf.pending.total + unconf.held.total).toFixed(2),
+        pending: { total: +unconf.pending.total.toFixed(2), count: unconf.pending.count },
+        held: { total: +unconf.held.total.toFixed(2), count: unconf.held.count },
+        by_buyer: Object.values(unconfBuyer).map(u => ({
+          buyer: u.buyer, pending: +u.pending.toFixed(2), held: +u.held.toFixed(2), count: u.count
+        })).sort((a, b) => (b.pending + b.held) - (a.pending + a.held))
       },
       unconfirmed: {
         total: +(unconf.pending.total + unconf.held.total).toFixed(2),
@@ -8191,6 +8205,61 @@ async function fsSeedBaseline20261020() {
   } catch (err) { console.error('[Invoice Baseline] failed:', err.message); }
 }
 initInvoiceItemsGuard().then(fsSeedBaseline20261020);
+
+// ══════════════════════════════════════════════════════
+//  patch 346: correct an amount, or take a row off the sheet
+// ══════════════════════════════════════════════════════
+
+/* What a buyer pays on one case. Used when a buyer's CPA changes and existing
+   rows need to catch up. Does not touch the lead or the publisher portal. */
+app.post('/billable-queue/:id/amount', requireKey, async (req, res) => {
+  try {
+    const amt = Number((req.body || {}).amount);
+    if (!(amt > 0)) return res.status(400).json({ ok: false, error: 'amount must be a positive number' });
+    const before = await pool.query('SELECT amount FROM billable_queue WHERE id=$1', [req.params.id]);
+    if (!before.rows[0]) return res.status(404).json({ ok: false, error: 'not found' });
+    const old = parseFloat(before.rows[0].amount || 0);
+    const r = await pool.query(
+      `UPDATE billable_queue
+          SET amount = $1::numeric,
+              raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object(
+                'amount_history', COALESCE(raw->'amount_history','[]'::jsonb) ||
+                  jsonb_build_array(jsonb_build_object('from', $2::text, 'to', $1::text, 'at', NOW()))
+              )
+        WHERE id = $3 RETURNING id, cid, amount, raw->>'buyer' AS buyer`,
+      [amt.toFixed(2), old.toFixed(2), req.params.id]);
+    console.log('[Billable Amount] q' + req.params.id + ' $' + old + ' -> $' + amt);
+    return res.json({ ok: true, item: r.rows[0], previous: old });
+  } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+});
+
+/* Take a row off the invoice sheet without deleting it. The row and its reason
+   stay in the table, so a correction can be looked at later. */
+app.post('/billable-queue/:id/void', requireKey, async (req, res) => {
+  try {
+    const reason = String((req.body || {}).reason || '').trim() || 'voided';
+    const r = await pool.query(
+      `UPDATE billable_queue
+          SET raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object(
+                'voided', true, 'void_reason', $1::text, 'voided_at', NOW())
+        WHERE id = $2 RETURNING id, cid, amount, raw->>'buyer' AS buyer`,
+      [reason, req.params.id]);
+    if (!r.rows[0]) return res.status(404).json({ ok: false, error: 'not found' });
+    console.log('[Billable Void] q' + req.params.id + ' (' + reason + ')');
+    return res.json({ ok: true, item: r.rows[0] });
+  } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+});
+
+/* Undo a void. */
+app.post('/billable-queue/:id/unvoid', requireKey, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE billable_queue SET raw = (COALESCE(raw,'{}'::jsonb) - 'voided' - 'void_reason' - 'voided_at')
+        WHERE id = $1 RETURNING id, cid, amount`, [req.params.id]);
+    if (!r.rows[0]) return res.status(404).json({ ok: false, error: 'not found' });
+    return res.json({ ok: true, item: r.rows[0] });
+  } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+});
 
 app.get('/billable-queue', requireKey, async (req, res) => {
   try {
