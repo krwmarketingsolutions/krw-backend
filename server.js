@@ -3489,39 +3489,27 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // flipped - blocked leads never reach this ladder.
   const INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','CO','MO','NE','OK','TN'];
   const NLD_ONLY_STATES = ['UT','MT','WY','AZ','CA','NV','OK','NE','ND','IA','NM'];
-  // LT-Intake posts to a VICIdial dialer over GET (spec from Adam, Sep 16). It goes live
-  // the moment LT_INTAKE_PASS is set on Railway; until then it is skipped in the ladder.
+  // patch 350 (Kyler, Oct 26): DT-Intake replaces CH-Intake and LT-Intake as
+  // the intake buyer for every MVA publisher. It takes the 13 intake states
+  // plus Arizona ahead of NLD ("give them AZ over NLD"); NLD keeps its other
+  // states; DT catches anything nobody else covers. Leadbloom keeps NLD first
+  // on OK and NE (patch 326) - everyone else sends those to intake first, as
+  // before. CH and LT are never offered a lead on any path; their disposition
+  // sheets keep syncing for leads they already hold. 003 stays off.
+  const DT_ON        = DT_INTAKE_ON();
+  const DT_STATES    = INTAKE_STATES.concat(['AZ']);
+  const DT_LB_STATES = INTAKE_STATES.filter(s => s !== 'OK' && s !== 'NE').concat(['AZ']);
   const NYC_LADDER = [
-    { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
-    { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2250, enabled: !NLD_PAUSED,          states: NLD_ONLY_STATES },   // patch 318
-    { name: 'MVA-003-LT', priority: 3, group: '003',    cap: 5,    payout: 1700, enabled: false,                states: 'ALL' },   // patch 305: 003 off
+    { name: 'DT-Intake',  priority: 1, group: 'intake',          cap: null, payout: 2500, enabled: DT_ON,       states: DT_STATES },
+    { name: 'NLD CPA',    priority: 2, group: 'nld',             cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
+    { name: 'DT-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2500, enabled: DT_ON,       states: 'ALL' },
+    { name: 'MVA-003-LT', priority: 4, group: '003',             cap: 5,    payout: 1700, enabled: false,       states: 'ALL' },   // patch 305: 003 off
   ];
-
-  // patch 299 (Kyler, Oct 7): Leadbloom is OFF MVA-003-LT completely. CH and
-  // LT take its out-of-state leads as the bottom rung instead, so nothing on
-  // this line sells at $1,700 and nothing goes undelivered for want of a
-  // nationwide buyer. Order still puts NLD ($2,000) ahead of the out-of-state
-  // intake attempt, so a lead is only pushed outside a buyer's stated states
-  // once the buyer who does cover that state has passed on it.
-  const LEADBLOOM_LADDER = [
-    { name: 'CH-Intake',  priority: 1, group: 'intake', cap: null, payout: 2250, enabled: true,                        states: INTAKE_STATES },
-    { name: 'LT-Intake',  priority: 1, group: 'intake', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: INTAKE_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',    cap: 10,   payout: 2250, enabled: !NLD_PAUSED,          states: NLD_ONLY_STATES },   // patch 318
-    { name: 'CH-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2250, enabled: true,                        states: 'ALL' },
-    { name: 'LT-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },
-  ];
-  // patch 305 (Kyler, Oct 7): 003 is OFF for EVERYONE. Every publisher rides
-  // the same ladder: CH/LT (intake states) -> NLD -> CH/LT (any state).
-  // NYC_LADDER above is no longer selected; its 003 entry is also disabled.
-  // patch 317 (Kyler, Oct 8): Leadbloom goes to LT-Intake and NLD ONLY,
-  // 50/50. Both sit on the same rung so the same-rung sort below does the
-  // split; in a state NLD doesn't cover, LT takes the lead alone, and a
-  // rejection by one falls to the other in the same request. CH never sees
-  // a Leadbloom lead. Everyone else keeps the shared ladder above.
+  const LEADBLOOM_LADDER = NYC_LADDER;   // the shared ladder: NYC, Kevin, everyone but Leadbloom
   const LB_ONLY_LADDER = [
-    { name: 'NLD CPA',   priority: 1, group: 'nld',     cap: 10,   payout: 2250, enabled: !NLD_PAUSED,                 states: NLD_ONLY_STATES },   // patch 326: NLD first for its states
-    { name: 'LT-Intake', priority: 2, group: 'lt-rest', cap: null, payout: 2500, enabled: !!process.env.LT_INTAKE_PASS, states: 'ALL' },            // patch 326: LT catches non-NLD states + NLD rejects
+    { name: 'DT-Intake',  priority: 1, group: 'intake',          cap: null, payout: 2500, enabled: DT_ON,       states: DT_LB_STATES },
+    { name: 'NLD CPA',    priority: 2, group: 'nld',             cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
+    { name: 'DT-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2500, enabled: DT_ON,       states: 'ALL' },
   ];
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
@@ -3740,6 +3728,10 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     },
     'LT-Intake': async () => {
       const r = await sendToLtIntake(b, leadState, leadId);
+      return { result: r.result, accepted: r.accepted };
+    },
+    'DT-Intake': async () => {   // patch 350
+      const r = await sendToDtIntake(b, leadState, leadId, PUB);
       return { result: r.result, accepted: r.accepted };
     },
   };
@@ -6676,7 +6668,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     // Email Agency and LAR-MVA-CPA dropped as MVA buyers; CH-Intake (was
     // "MVA-Intake") and LT-Intake (new intake buyer, posting spec pending)
     // added (Kyler, Sep 16).
-    const mvaKnownBuyers = ['NLD CPA', 'MVA-003-LT', 'CH-Intake', 'LT-Intake'];
+    const mvaKnownBuyers = ['NLD CPA', 'MVA-003-LT', 'CH-Intake', 'LT-Intake', 'DT-Intake'];   // patch 350
     for (const b of mvaKnownBuyers) mva.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
     // De-dupe by phone per publisher for display purposes only (Kyler, Sep 1)
     // - a real duplicate-dial issue was found inflating raw counts. This
@@ -6854,9 +6846,10 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // CH-Intake and LT-Intake are drawn as buyer nodes; their live routing
         // is wired separately once Kyler confirms the split (Sep 16).
         // patch 308: MVA-003-LT removed - 003 is off for every publisher (patch 305)
-        'KRW-KANTHONY-RS':  ['CH-Intake', 'LT-Intake', 'NLD CPA'],
-        [LEADBLOOM_PUB_ID]: ['CH-Intake', 'LT-Intake', 'NLD CPA'],
-        'KRW-NYC-MVA':      ['CH-Intake', 'LT-Intake', 'NLD CPA'],
+        // patch 350: DT-Intake replaces CH/LT as the intake buyer for everyone
+        'KRW-KANTHONY-RS':  ['DT-Intake', 'NLD CPA'],
+        [LEADBLOOM_PUB_ID]: ['DT-Intake', 'NLD CPA'],
+        'KRW-NYC-MVA':      ['DT-Intake', 'NLD CPA'],
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Signed (TD)'], // Fields Law paused - this line now routes via Trackdrive
@@ -7091,6 +7084,107 @@ async function sendToLtIntake(b, leadState, leadId) {
   return { accepted, result: { status: accepted ? 'success' : 'error', message: text.slice(0, 300), http: r.status }, url: masked };
 }
 
+// ─── DT-Intake (patch 350, Oct 26) ───────────────────────────────────────────
+// GoHighLevel inbound webhook. Payload mirrors the sample they sent; extra
+// keys (krwId, trustedFormCertUrl, consentTimestamp) ride along so their CRM
+// can carry our reference. No publisher ID ever goes out - leadSource is the
+// brand only. Env on Railway:
+//   DT_INTAKE_ENABLED  default true  - "false" removes DT from every ladder
+//   DT_INTAKE_WEBHOOK  default the URL below
+const DT_INTAKE_WEBHOOK_DEFAULT = 'https://services.leadconnectorhq.com/hooks/e35fEKrl9gkdsZYGbQJZ/webhook-trigger/092e51f3-2598-43b8-b04b-712d1ae1f8c2';
+function DT_INTAKE_ON() { return (process.env.DT_INTAKE_ENABLED || 'true') !== 'false'; }
+function dtIsoDate(v) {
+  const s = String(v == null ? '' : v).trim(); if (!s) return undefined;
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if (m) return m[1] + '-' + m[2].padStart(2, '0') + '-' + m[3].padStart(2, '0');
+  m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
+  if (m) { const y = m[3].length === 2 ? '20' + m[3] : m[3]; return y + '-' + m[1].padStart(2, '0') + '-' + m[2].padStart(2, '0'); }
+  const t = Date.parse(s); return isNaN(t) ? s : new Date(t).toISOString().slice(0, 10);
+}
+function dtYesNo(v, dflt) { const s = String(v == null ? '' : v).trim().toLowerCase(); if (!s) return dflt; if (/^(y|yes|true|1)$/.test(s)) return 'Yes'; if (/^(n|no|false|0)$/.test(s)) return 'No'; return v; }
+function dtIntakePayload(b, leadState, leadId, pub) {
+  const digits = String(b.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  const atFault = String(b.at_fault || '').trim().toLowerCase();
+  const fault = /^(no|n|false|0)$/.test(atFault) ? 'Another Driver' : /^(yes|y|true|1)$/.test(atFault) ? 'I Was at Fault' : /partial/.test(atFault) ? 'I Was Partially at Fault' : 'Not Sure';
+  const summary = String(b.summary || '');
+  const sumType = (summary.split(/\s*[·|]\s*/)[0] || '').trim();
+  const accidentType = b.accident_type || (/\b(truck|semi|commercial|18[- ]wheeler)\b/i.test(summary + ' ' + (b.injury || '')) ? 'Truck / Commercial Vehicle Accident'
+    : /\b(uber|lyft|rideshare)\b/i.test(summary) ? 'Rideshare (Uber / Lyft)' : /\bmotorcycle\b/i.test(summary) ? 'Motorcycle Accident'
+    : /\bpedestrian\b/i.test(summary) ? 'Pedestrian Struck by Vehicle' : /\b(bicycle|bike)\b/i.test(summary) ? 'Bicycle Accident'
+    : /hit[- ]and[- ]run/i.test(summary) ? 'Hit-and-Run' : (sumType && /accident|collision/i.test(sumType) ? sumType : 'Car Accident'));
+  const treated = dtYesNo(b.doctor_treatment, undefined);
+  const caseFacts = [b.case_description || b.description || b.case_facts || null, summary || null, b.injury ? 'Injury: ' + b.injury : null].filter(Boolean).join(' | ').slice(0, 1500) || undefined;
+  const p = {
+    firstName: b.first_name, lastName: b.last_name,
+    phone: digits.length === 10 ? '+1' + digits : String(b.phone || ''),
+    email: b.email, city: b.city || undefined, state: leadState,
+    dateOfAccident: dtIsoDate(b.incident_date),
+    accidentType, role: b.role || undefined, fault,
+    policeReport: dtYesNo(b.police_report, 'Not Sure'),
+    injured: dtYesNo(b.physical_injury, b.injury ? 'Yes' : 'Not Sure'),
+    injuries: b.injury || undefined,
+    medicalTreatment: b.medical_treatment || (treated === 'Yes' ? 'Yes' : treated === 'No' ? 'Not Yet' : undefined),
+    hospitalizedOrSurgery: dtYesNo(b.hospitalized || b.surgery, undefined),
+    otherDriverInsured: dtYesNo(b.other_driver_insured || b.defendant_insured, 'Unknown'),
+    clientInsured: dtYesNo(b.client_insured || b.has_insurance, undefined),
+    alreadyHiredAttorney: dtYesNo(b.have_attorney, 'No'),
+    caseFacts,
+    leadSource: pub === 'KRW-LEADBLOOM-MVA' ? 'LeadBloom' : 'KRW',
+    campaign: 'MVA Web Intake',
+    krwId: leadId != null ? 'KRW-' + leadId : undefined,
+    trustedFormCertUrl: b.trustedform_cert_url || undefined,
+    consentTimestamp: new Date().toISOString(),
+  };
+  Object.keys(p).forEach(k => { if (p[k] === undefined || p[k] === null || p[k] === '') delete p[k]; });
+  return p;
+}
+async function sendToDtIntake(b, leadState, leadId, pub) {
+  if (!DT_INTAKE_ON()) throw new Error('DT-Intake is disabled (DT_INTAKE_ENABLED=false)');
+  const url = process.env.DT_INTAKE_WEBHOOK || DT_INTAKE_WEBHOOK_DEFAULT;
+  const p = dtIntakePayload(b, leadState, leadId, pub);
+  const r = await postJSON(url, p);
+  let out; try { out = JSON.parse(r.body); } catch (e) { out = { status: r.status, raw: String(r.body || '').slice(0, 300) }; }
+  const accepted = r.status >= 200 && r.status < 300 && !(out && String(out.status || '').toLowerCase() === 'error');
+  console.log(`[DT-Intake] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} | http ${r.status} ${String(r.body || '').slice(0, 100)}`);
+  return { accepted, result: { status: accepted ? 'success' : 'error', http: r.status, message: (out && (out.message || out.msg)) || (accepted ? 'accepted' : String(r.body || '').slice(0, 200)), raw: out }, sent: p };
+}
+
+// Manual / test: POST { krw_id } re-sends an existing lead to DT-Intake.
+// { test: true, phone } posts a fake "Test" lead so they can see one land.
+app.post('/leads/forward-to-dt-intake', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29', process.env.LEAD_API_KEY || 'krwleads2026secure'];
+  const bearerOk = typeof callerRole === 'function' && callerRole(req) === 'admin';
+  if (!validKeys.includes(key) && !bearerOk) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  const { krw_id, test, phone } = req.body || {};
+  try {
+    if (test === true) {
+      const b = { first_name: 'Test', last_name: 'KRW-TEST', phone: phone || '5550001234', email: 'test@krwmarketingsolutions.com', city: 'Austin',
+        incident_date: new Date().toISOString().slice(0, 10), at_fault: 'No', have_attorney: 'No', physical_injury: 'Yes', doctor_treatment: 'Yes',
+        injury: 'TEST LEAD - please disregard', summary: 'TEST LEAD · sent by KRW to confirm delivery · not a real claimant' };
+      const r = await sendToDtIntake(b, 'TX', null, 'KRW-TEST');
+      return res.json({ ok: r.accepted, test: true, sent: r.sent, response: r.result });
+    }
+    if (!krw_id) return res.status(400).json({ ok: false, error: 'krw_id required (or { test: true, phone })' });
+    const q = await pool.query('SELECT * FROM leads WHERE id=$1', [krw_id]);
+    if (!q.rows[0]) return res.status(404).json({ ok: false, error: 'Lead not found' });
+    const row = q.rows[0];
+    if (row.billable === true) return res.status(409).json({ ok: false, error: 'Lead is billable - refusing to touch it' });
+    const b = Object.assign({}, row.raw || {}); b.phone = b.phone || row.phone; b.first_name = b.first_name || row.first_name; b.last_name = b.last_name || row.last_name; b.email = b.email || row.email;
+    const st = (row.state || b.state || '').toUpperCase();
+    const r = await sendToDtIntake(b, st, row.id, row.publisher_sub);
+    if (r.accepted) {
+      await pool.query(`UPDATE leads SET status='forwarded', buyer_status='Accepted', buyer_error=NULL,
+          buyer_response = COALESCE(buyer_response,'{}'::jsonb) || $1::jsonb,
+          raw = COALESCE(raw,'{}'::jsonb) || $2::jsonb WHERE id=$3`,
+        [JSON.stringify({ manual_forward: { buyer: 'DT-Intake', response: r.result, at: new Date().toISOString() } }),
+         JSON.stringify({ buyer_name: 'DT-Intake', manual_forward: true, manual_forward_at: new Date().toISOString() }), row.id]);
+    }
+    return res.json({ ok: r.accepted, krw_id: row.id, sent: r.sent, response: r.result });
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
 // Manual / test: POST { krw_id } re-sends an existing lead to LT-Intake and returns what
 // the dialer said. Does not touch routing; marks the lead only if the dialer accepted it.
 app.post('/leads/forward-to-lt-intake', async (req, res) => {
@@ -7229,7 +7323,7 @@ async function logRejectedPost(campaign, pub, b, why) {
 // A state outside the intake list is stored and HELD, not forwarded, so it
 // shows on the dashboard and the publisher's portal as not delivered.
 const MVA_INTAKE_PUB    = 'LA-HI-MVA';
-const MVA_INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','CO','MO','NE','OK','TN'];
+const MVA_INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','CO','MO','NE','OK','TN','AZ'];   // patch 350: DT buys AZ
 
 app.post('/leads/mva-intake', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
@@ -7301,7 +7395,7 @@ app.post('/leads/mva-intake', async (req, res) => {
      GROUP BY 1`);
   const today = {}, lastAt = {};
   cnt.rows.forEach(r => { today[r.buyer] = r.n; lastAt[r.buyer] = r.last_at ? new Date(r.last_at).getTime() : 0; });
-  const ladder = [{ name: 'CH-Intake', enabled: true }, { name: 'LT-Intake', enabled: Boolean(process.env.LT_INTAKE_PASS) }]
+  const ladder = [{ name: 'DT-Intake', enabled: DT_INTAKE_ON() }]   // patch 350: DT replaces CH/LT on this line
     .filter(x => x.enabled)
     .sort((a, c) => ((today[a.name] || 0) - (today[c.name] || 0)) || ((lastAt[a.name] || 0) - (lastAt[c.name] || 0)));
 
@@ -7316,6 +7410,7 @@ app.post('/leads/mva-intake', async (req, res) => {
       return { result: out, accepted: out.status === 'success' || (r.status >= 200 && r.status < 300) };
     },
     'LT-Intake': async () => { const r = await sendToLtIntake(b, leadState, leadId); return { result: r.result, accepted: r.accepted }; },
+    'DT-Intake': async () => { const r = await sendToDtIntake(b, leadState, leadId, MVA_INTAKE_PUB); return { result: r.result, accepted: r.accepted }; },   // patch 350
   };
 
   const attempts = []; let buyerName = null, result = {}, accepted = false;
@@ -7389,24 +7484,24 @@ app.post('/leads/mva-leadbloom2', async (req, res) => {
     console.log(`[Leadbloom2] held ${b.first_name} ${b.last_name} | ${leadState} | ${why}`);
     return res.json({ ok: false, result: 'held', message: why, krw_id: leadId });
   }
-  if (Boolean(process.env.LT_INTAKE_PASS) === false) {
-    const why = 'Buyer not configured (LT_INTAKE_PASS)';
+  if (!DT_INTAKE_ON()) {   // patch 350: this line now goes to DT-Intake
+    const why = 'Buyer not configured (DT_INTAKE_ENABLED=false)';
     await pool.query("UPDATE leads SET status='received', buyer_error=$1 WHERE id=$2", [why, leadId]);
     return res.json({ ok: false, result: 'held', message: why, krw_id: leadId });
   }
 
   let accepted = false, result = {};
   try {
-    const r = await sendToLtIntake(b, leadState, leadId);
+    const r = await sendToDtIntake(b, leadState, leadId, 'KRW-LEADBLOOM2-MVA');   // patch 350
     accepted = r.accepted; result = r.result;
   } catch (err) { result = { status: 'error', message: err.message }; }
   await pool.query(
     `UPDATE leads SET status=$1, buyer_status=$2, buyer_response=$3::jsonb, billable=false, revenue=0,
        raw = COALESCE(raw,'{}'::jsonb) || $4::jsonb WHERE id=$5`,
     [accepted ? 'forwarded' : 'buyer_rejected', accepted ? 'Accepted' : 'Rejected', JSON.stringify({ final: result }),
-     JSON.stringify({ buyer_name: 'LT-Intake', routing_attempts: ['LT-Intake:' + (accepted ? 'accepted' : 'rejected')] }), leadId]);
-  console.log(`[Leadbloom2] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} | -> LT-Intake`);
-  return res.json({ ok: accepted, result: accepted ? 'success' : 'rejected', message: accepted ? 'Lead accepted' : (result.message || 'Lead rejected'), buyer: 'LT-Intake', krw_id: leadId });
+     JSON.stringify({ buyer_name: 'DT-Intake', routing_attempts: ['DT-Intake:' + (accepted ? 'accepted' : 'rejected')] }), leadId]);
+  console.log(`[Leadbloom2] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} | -> DT-Intake`);
+  return res.json({ ok: accepted, result: accepted ? 'success' : 'rejected', message: accepted ? 'Lead accepted' : (result.message || 'Lead rejected'), buyer: 'DT-Intake', krw_id: leadId });
 });
 // ─── END MVA-LEADBLOOM2 ──────────────────────────────────────────────────────
 
@@ -8738,8 +8833,8 @@ function pbLeadView(l, payoutRate) {
   // patch 263: never show call-attempt counts (buyer sheets don't log them reliably)
   note = note.replace(/\bcalled\s+\d+\s+times?\b\s*[,;]?\s*/gi, '');
   // patch 263: buyer identifiers never reach a publisher note (backstop on top of clean data)
-  note = note.replace(/\s*\([^)]*(NLD|CH[-\s]?Intake|LT[-\s]?Intake|MVA[-\s]?003|LAR)[^)]*\)/gi, '');
-  note = note.replace(/\b(NLD(\s+(CPA|Rideshare))?|CH-Intake|LT-Intake|MVA-003(-LT)?|LAR-MVA-CPA)\b(\s*sheet)?/gi, '');
+  note = note.replace(/\s*\([^)]*(NLD|CH[-\s]?Intake|LT[-\s]?Intake|DT[-\s]?Intake|MVA[-\s]?003|LAR)[^)]*\)/gi, '');
+  note = note.replace(/\b(NLD(\s+(CPA|Rideshare))?|CH-Intake|LT-Intake|DT-Intake|MVA-003(-LT)?|LAR-MVA-CPA)\b(\s*sheet)?/gi, '');   // patch 350
   note = note.replace(/\s{2,}/g, ' ').replace(/\s+([,.;])/g, '$1').replace(/^[\s,—-]+|[\s,—-]+$/g, '');
   v.notes = note || null;
   return portalScrub(v);
@@ -9116,6 +9211,10 @@ async function janSend(buyer, b, st, leadId, pub) {
     const r = await sendToLtIntake(b, st, leadId);
     return { result: r.result, accepted: r.accepted };
   }
+  if (buyer === 'DT-Intake') {   // patch 350
+    const r = await sendToDtIntake(b, st, leadId, pub);
+    return { result: r.result, accepted: r.accepted };
+  }
   return { result: { error: 'unknown buyer' }, accepted: false };
 }
 
@@ -9150,26 +9249,18 @@ async function janitorRun() {
       const pub = row.raw && row.raw.publisher_sub ? row.raw.publisher_sub : null;
       const rowPub = (await pool.query('SELECT publisher_sub FROM leads WHERE id=$1', [row.id])).rows[0].publisher_sub;
 
+      // patch 350: DT-Intake replaces CH/LT on every retry path. Intake
+      // states + AZ go to DT first (Leadbloom: NLD keeps OK/NE first, patch
+      // 326); NLD takes its other states; DT catches the rest.
       const rungs = [];
-      const janPushIntake = () => {
-        if (process.env.LT_INTAKE_PASS && ltToday < chToday) rungs.push('LT-Intake', 'CH-Intake');
-        else { rungs.push('CH-Intake'); if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake'); }
-      };
-      if (rowPub === 'KRW-LEADBLOOM-MVA') {
-        // patch 317 (Kyler, Oct 8): Leadbloom rides LT + NLD only - CH never
-        // sees its leads, even on janitor retries. Rough 50/50 by whichever
-        // has fewer accepted today.
-        const wantNld = !NLD_PAUSED && JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX;   // patch 318
-        if (wantNld) rungs.push('NLD CPA');                        // patch 326: NLD first for its states
-        if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake');   // patch 326: LT catches the rest
-      } else {
-      if (JAN_INTAKE_STATES.includes(st)) janPushIntake();
-      if (!NLD_PAUSED && JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX) rungs.push('NLD CPA');   // patch 283 + 318
-      // patch 305 (Kyler, Oct 7): 003 is off for EVERY publisher (extends
-      // patch 302, which was Leadbloom-only). Stuck out-of-state leads fall
-      // back to CH/LT without the state filter.
-      if (!JAN_INTAKE_STATES.includes(st)) janPushIntake();
-      }
+      const dtOn = DT_INTAKE_ON();
+      const wantNld = !NLD_PAUSED && JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX;   // patch 318
+      const dtFirst = rowPub === 'KRW-LEADBLOOM-MVA'
+        ? (st === 'AZ' || (JAN_INTAKE_STATES.includes(st) && st !== 'OK' && st !== 'NE'))
+        : (st === 'AZ' || JAN_INTAKE_STATES.includes(st));
+      if (dtOn && dtFirst) rungs.push('DT-Intake');
+      if (wantNld) rungs.push('NLD CPA');
+      if (dtOn && !rungs.includes('DT-Intake')) rungs.push('DT-Intake');
       if (!rungs.length) { lines.push(`lead ${row.id} ${row.first_name || ''} ${row.last_name || ''} | ${st} | no eligible buyer today - left as is`); continue; }
 
       attempted++;
@@ -9268,23 +9359,17 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     const chToday = await janCountToday('CH-Intake');
     const ltToday = await janCountToday('LT-Intake');
 
+    // patch 350: DT-Intake replaces CH/LT. Intake states + AZ go to DT first
+    // (Leadbloom: NLD keeps OK/NE first); NLD on its other states; DT catches the rest.
     const rungs = [];
-    const pushIntake = () => {
-      if (process.env.LT_INTAKE_PASS && ltToday < chToday) rungs.push('LT-Intake', 'CH-Intake');
-      else { rungs.push('CH-Intake'); if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake'); }
-    };
-    if (isLeadbloom) {
-      // patch 317 (Kyler, Oct 8): Leadbloom resends go to LT and NLD only.
-      const wantNld = !NLD_PAUSED && NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10;   // patch 318
-      if (wantNld) rungs.push('NLD CPA');                        // patch 326: NLD first for its states
-      if (process.env.LT_INTAKE_PASS) rungs.push('LT-Intake');   // patch 326: LT catches the rest
-    } else {
-    if (JAN_INTAKE_STATES.includes(st)) pushIntake();
-    if (!NLD_PAUSED && NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10) rungs.push('NLD CPA');   // patch 318
-    // patch 305: 003 is off for every publisher - out-of-state leads fall
-    // back to CH/LT without the state filter.
-    if (!JAN_INTAKE_STATES.includes(st)) pushIntake();
-    }
+    const dtOn = DT_INTAKE_ON();
+    const wantNld = !NLD_PAUSED && NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10;   // patch 318
+    const dtFirst = isLeadbloom
+      ? (st === 'AZ' || (JAN_INTAKE_STATES.includes(st) && st !== 'OK' && st !== 'NE'))
+      : (st === 'AZ' || JAN_INTAKE_STATES.includes(st));
+    if (dtOn && dtFirst) rungs.push('DT-Intake');
+    if (wantNld) rungs.push('NLD CPA');
+    if (dtOn) rungs.push('DT-Intake');
     let plan = rungs.filter((x, i) => rungs.indexOf(x) === i);   // dedupe, order kept
     if (Array.isArray(req.body && req.body.only)) plan = plan.filter(x => req.body.only.includes(x));   // patch 333: restrict to named buyers
     if (!plan.length) return res.status(409).json({ ok: false, error: 'No eligible buyer right now (caps reached)', state: st });
@@ -9318,7 +9403,7 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
 app.post('/leads/:id/attach-cert-and-send', requireKey, async (req, res) => {
   try {
     const { cert, buyer } = req.body || {};
-    const ALLOWED = ['NLD CPA', 'LT-Intake', 'CH-Intake', 'MVA-003-LT'];
+    const ALLOWED = ['NLD CPA', 'DT-Intake', 'LT-Intake', 'CH-Intake', 'MVA-003-LT'];   // patch 350
     if (!cert || !/^https:\/\/cert\.trustedform\.com\/[a-z0-9]+/i.test(String(cert)))
       return res.status(400).json({ ok: false, error: 'a valid trustedform_cert_url is required' });
     if (!ALLOWED.includes(buyer))
@@ -10380,7 +10465,7 @@ const BS_SCAN_TIMES = ['08:00', '11:00', '13:00', '15:00', '21:00'];   // Americ
 const BS_WEEKEND_SCAN_TIMES = ['11:00', '17:00'];   // patch 279: weekend scans so portals stay current
 const BS_BILLABLE = /\b(signed|retained|retainer|billable|converted|conversion|accepted by firm|hired|closed won)\b/i;
 const BS_REJECT   = /\b(reject\w*|not qualified|unqualified|dq|disqualif\w*|unresponsive|wrong number|stop|dnc|duplicate|dupe|not viable|no injury|no insurance|out of state|outside|declin\w*|dead|closed lost|lost|returned|opted out|not interested|no contact|never (made|answered)|unable to reach)\b/i;
-const BS_OPEN     = /\b(chase|outreach|attempt|contacted|in progress|working|scheduled|pending|under review|reviewing|callback|call back|open|waiting)\b|answering machine|voice ?mail|left (message|vm)|no answer|\bbusy\b|\bringing\b|\bcalled\b|^new$/i;
+const BS_OPEN     = /\b(chase|outreach|attempt|contacted|in progress|working|scheduled|pending|under review|reviewing|callback|call back|open|waiting)\b|answering machine|voice ?mail|left (message|vm)|no answer|\bbusy\b|\bringing\b|\bcalled\b|^new$|^new lead$/i;   // patch 350: DT's first stage
 const BS_NOT_BILLABLE_FLAG = /^(no|n|false|not billable|non-billable)$/i;
 
 // One entry per sheet/tab. tab null = first tab that has a phone column and a
@@ -10397,6 +10482,9 @@ const BUYER_SHEETS = [
   { key: 'lt-intake', label: 'LT-Intake',  buyer: 'LT-Intake',  vertical: 'MVA', sheet: '16azBD-YOUB2dQbvLnwCXmPF4ntq0ntug582sJC_vs1Y', tab: null, tabPattern: /^\d{1,2}\.\d{1,2}/, amount: 2500, enabled: true },
   // Chad's intake sheet carries MVA plus his Roblox and Rideshare rows; MVA matches by buyer, the others by campaign
   { key: 'ch-intake', label: 'CH-Intake',  buyer: 'CH-Intake',  vertical: 'MVA', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, campaigns: ['roblox-mt','roblox-chad','rideshare-chad'], amount: 2250, enabled: true },
+  // patch 350: DT-Intake's auto-updated pipeline sheet (lead_id / status / name / phone / received_date / retainer_date / reason / updated_at).
+  // Statuses: New Lead, Contacted, Signed (billable), Unresponsive, Not Qualified, Duplicate. Matched by phone.
+  { key: 'dt-intake', label: 'DT-Intake',  buyer: 'DT-Intake',  vertical: 'MVA', sheet: '1_pvfSFxsvK0saUvwQFmG0YHG7f4ySs0TysywLqhzRBQ', tab: null, amount: 2500, enabled: true },
   { key: 'mva-003',   label: 'MVA-003-LT', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1700, enabled: true },
 ];
 
