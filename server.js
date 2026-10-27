@@ -675,7 +675,7 @@ app.post('/leads/:id/disposition', requireKey, async (req, res) => {
   try {
     const { disposition, note, amount } = req.body || {};
     const d = String(disposition || '').toLowerCase().trim();
-    const ALLOWED = ['signed', 'pending', 'open', 'rejected'];
+    const ALLOWED = ['signed', 'pending', 'open', 'rejected', 'investigation'];   // patch 354
     if (!ALLOWED.includes(d)) return res.status(400).json({ ok: false, error: 'disposition must be one of ' + ALLOWED.join(', ') });
     const q = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.id]);
     if (!q.rows[0]) return res.status(404).json({ ok: false, error: 'Lead not found' });
@@ -690,6 +690,8 @@ app.post('/leads/:id/disposition', requireKey, async (req, res) => {
       buyerStatus = 'Pending - ' + (note || 'signature'); notes = 'In outreach'; billable = false;
     } else if (d === 'open') {
       buyerStatus = 'Open - in outreach'; notes = note || 'Open - in outreach'; billable = false;
+    } else if (d === 'investigation') {   // patch 354
+      buyerStatus = 'Under Investigation'; notes = note || 'Under investigation - buyer withholding payment pending validity'; billable = false;
     } else { // rejected
       buyerStatus = 'Rejected'; notes = 'Rejected' + (note ? ' - ' + note : ''); billable = false; status = 'buyer_rejected';
     }
