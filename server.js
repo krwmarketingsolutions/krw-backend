@@ -1446,8 +1446,8 @@ app.post('/ssdi/dispo-update', async (req, res) => {
          (call_date, caller_id, caller_name, billable, payout_amount, disposition,
           campaign, vertical, publisher_sub, source_system, call_status_label, raw)
        VALUES
-         ($1, $2, $3, $4, $5, $6, 'SSDI', 'SSDI', $7, 'google_sheet',
-          CASE WHEN $5 IS NOT NULL THEN 'cpa' ELSE
+         ($1, $2, $3, $4, $5::numeric, $6, 'SSDI', 'SSDI', $7, 'google_sheet',   -- patch 355
+          CASE WHEN $5::numeric IS NOT NULL THEN 'cpa' ELSE
             CASE WHEN $8 THEN 'matched' ELSE 'unmatched_publisher' END
           END,
           $9::jsonb)
