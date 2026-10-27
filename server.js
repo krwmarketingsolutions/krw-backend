@@ -7095,7 +7095,7 @@ const DT_INTAKE_WEBHOOK_DEFAULT = 'https://services.leadconnectorhq.com/hooks/e3
 function DT_INTAKE_ON() { return (process.env.DT_INTAKE_ENABLED || 'true') !== 'false'; }
 // patch 351: the states DT-Intake is contracted for. DT_INTAKE_STATES on Railway
 // (comma list, e.g. "GA,TX,MO,FL,IL") overrides without a code change.
-function DT_INTAKE_STATES() { const s = String(process.env.DT_INTAKE_STATES || 'GA,TX,MO,FL').toUpperCase().split(/[,\s]+/).filter(Boolean); return s.length ? s : ['GA','TX','MO','FL']; }
+function DT_INTAKE_STATES() { const s = String(process.env.DT_INTAKE_STATES || 'GA,TX,MO,FL,IL,IN,MN').toUpperCase().split(/[,\s]+/).filter(Boolean); return s.length ? s : ['GA','TX','MO','FL','IL','IN','MN']; }   // patch 352: + IL, IN, MN
 function dtIsoDate(v) {
   const s = String(v == null ? '' : v).trim(); if (!s) return undefined;
   let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if (m) return m[1] + '-' + m[2].padStart(2, '0') + '-' + m[3].padStart(2, '0');
