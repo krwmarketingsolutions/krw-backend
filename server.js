@@ -2637,7 +2637,7 @@ app.post('/leads/mva-email-agency', async (req, res) => {
       jornaya_id:            b.jornaya_leadid      || null,
       trusted_form_cert_url: b.trustedform_cert_url|| null,
       sub_id2:               aliasPub(publisherSub),
-      channel:               (['Facebook','Google','Email','SMS','Display','Native','Other'].includes(b.channel) ? b.channel : 'Facebook'),
+      channel:               chanFromLanding(b.landing_page_url),   // patch 357
       language:              b.language            || 'English',
       // Additional fields if provided
       mva_injury:            b.mva_injury          || null,
@@ -2939,7 +2939,7 @@ const MVA_BUYERS = [
         ip_address:   b.ip_address,
         attorney:     b.have_attorney,
         accident_fault: b.at_fault,
-        channel:      (['Facebook','Google','Email','SMS','Display','Native','Other'].includes(b.channel) ? b.channel : 'Facebook'),
+        channel:      chanFromLanding(b.landing_page_url),   // patch 357
         trusted_form_cert_url: b.trustedform_cert_url || b.trusted_form_cert_url,
         sub_id2:      aliasPub(publisherSub),
       };
@@ -3180,6 +3180,7 @@ app.post('/leads/mva-funnel', async (req, res) => {
   }
 
   const b = req.body || {};
+  b.channel = chanFromLanding(b.landing_page_url);   // patch 357
 
   // patch 266: Kevin Anthony's MVA traffic rides the NYC buyer ladder
   // (CH-Intake / LT-Intake 50/50 -> NLD -> 003) with the same screenings and
@@ -3418,6 +3419,13 @@ const LAR_MVA_PUBLISHER_CODE = 'PUB-KYLER1';
 // + 40 hex chars), and a certificate is SINGLE USE - the same cert on a second
 // lead means recycled consent and is rejected outright.
 const TF_CERT_RE = /^https:\/\/cert\.trustedform\.com\/[0-9a-f]{40}$/i;
+// patch 357: channel reflects where the lead actually came from, read off the landing page URL
+function chanFromLanding(url) {
+  const u = String(url || '').toLowerCase();
+  if (u.indexOf('facebook') >= 0 || u.indexOf('fbclid') >= 0) return 'Facebook';
+  if (u.indexOf('google') >= 0 || u.indexOf('gclid') >= 0) return 'Google';
+  return 'Landing page';
+}
 function tfValid(u) { return typeof u === 'string' && TF_CERT_RE.test(u.trim()); }
 async function tfSeen(u) {
   const r = await pool.query(
@@ -3437,6 +3445,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
 
   const b = req.body || {};
   const leadState = (b.state || b.incident_state || '').toUpperCase().trim();
+  b.channel = chanFromLanding(b.landing_page_url);   // patch 357
   // patch 266/267: this ladder serves NYC (default), Kevin Anthony and both
   // Leadbloom lines - the lead is attributed to whichever of them posted it.
   const LADDER_PUBS = ['KRW-KANTHONY-RS', 'KRW-LEADBLOOM-MVA']; // one Leadbloom account (patch 268)
