@@ -3489,27 +3489,26 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   // flipped - blocked leads never reach this ladder.
   const INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','CO','MO','NE','OK','TN'];
   const NLD_ONLY_STATES = ['UT','MT','WY','AZ','CA','NV','OK','NE','ND','IA','NM'];
-  // patch 350 (Kyler, Oct 26): DT-Intake replaces CH-Intake and LT-Intake as
-  // the intake buyer for every MVA publisher. It takes the 13 intake states
-  // plus Arizona ahead of NLD ("give them AZ over NLD"); NLD keeps its other
-  // states; DT catches anything nobody else covers. Leadbloom keeps NLD first
-  // on OK and NE (patch 326) - everyone else sends those to intake first, as
-  // before. CH and LT are never offered a lead on any path; their disposition
-  // sheets keep syncing for leads they already hold. 003 stays off.
+  // patch 351 (Kyler, Oct 26 evening): DT-Intake is contracted for GA, TX,
+  // MO, FL only. NLD keeps its 11 states (AZ is NLD-first again). CH-Intake
+  // comes back as the catch-all for anything neither of them takes - NLD
+  // rejects and over-cap included - on every publisher, Leadbloom too
+  // (LB_CH_FALLBACK=false on Railway takes Leadbloom back off CH). LT and
+  // 003 stay off. Supersedes the patch 350 ladder.
   const DT_ON        = DT_INTAKE_ON();
-  const DT_STATES    = INTAKE_STATES.concat(['AZ']);
-  const DT_LB_STATES = INTAKE_STATES.filter(s => s !== 'OK' && s !== 'NE').concat(['AZ']);
+  const DT_STATES    = DT_INTAKE_STATES();
+  const CH_FOR_LB    = (process.env.LB_CH_FALLBACK || 'true') !== 'false';
   const NYC_LADDER = [
-    { name: 'DT-Intake',  priority: 1, group: 'intake',          cap: null, payout: 2500, enabled: DT_ON,       states: DT_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',             cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
-    { name: 'DT-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2500, enabled: DT_ON,       states: 'ALL' },
-    { name: 'MVA-003-LT', priority: 4, group: '003',             cap: 5,    payout: 1700, enabled: false,       states: 'ALL' },   // patch 305: 003 off
+    { name: 'DT-Intake',  priority: 1, group: 'intake',   cap: null, payout: 2500, enabled: DT_ON,       states: DT_STATES },
+    { name: 'NLD CPA',    priority: 2, group: 'nld',      cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
+    { name: 'CH-Intake',  priority: 3, group: 'catchall', cap: null, payout: 2250, enabled: true,        states: 'ALL' },
+    { name: 'MVA-003-LT', priority: 4, group: '003',      cap: 5,    payout: 1700, enabled: false,       states: 'ALL' },   // patch 305: 003 off
   ];
   const LEADBLOOM_LADDER = NYC_LADDER;   // the shared ladder: NYC, Kevin, everyone but Leadbloom
   const LB_ONLY_LADDER = [
-    { name: 'DT-Intake',  priority: 1, group: 'intake',          cap: null, payout: 2500, enabled: DT_ON,       states: DT_LB_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',             cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
-    { name: 'DT-Intake',  priority: 3, group: 'intake-overflow', cap: null, payout: 2500, enabled: DT_ON,       states: 'ALL' },
+    { name: 'DT-Intake',  priority: 1, group: 'intake',   cap: null, payout: 2500, enabled: DT_ON,       states: DT_STATES },
+    { name: 'NLD CPA',    priority: 2, group: 'nld',      cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
+    { name: 'CH-Intake',  priority: 3, group: 'catchall', cap: null, payout: 2250, enabled: CH_FOR_LB,   states: 'ALL' },
   ];
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
@@ -6847,9 +6846,10 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // is wired separately once Kyler confirms the split (Sep 16).
         // patch 308: MVA-003-LT removed - 003 is off for every publisher (patch 305)
         // patch 350: DT-Intake replaces CH/LT as the intake buyer for everyone
-        'KRW-KANTHONY-RS':  ['DT-Intake', 'NLD CPA'],
-        [LEADBLOOM_PUB_ID]: ['DT-Intake', 'NLD CPA'],
-        'KRW-NYC-MVA':      ['DT-Intake', 'NLD CPA'],
+        // patch 351: CH-Intake is the catch-all again
+        'KRW-KANTHONY-RS':  ['DT-Intake', 'NLD CPA', 'CH-Intake'],
+        [LEADBLOOM_PUB_ID]: ['DT-Intake', 'NLD CPA', 'CH-Intake'],
+        'KRW-NYC-MVA':      ['DT-Intake', 'NLD CPA', 'CH-Intake'],
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Signed (TD)'], // Fields Law paused - this line now routes via Trackdrive
@@ -7093,6 +7093,9 @@ async function sendToLtIntake(b, leadState, leadId) {
 //   DT_INTAKE_WEBHOOK  default the URL below
 const DT_INTAKE_WEBHOOK_DEFAULT = 'https://services.leadconnectorhq.com/hooks/e35fEKrl9gkdsZYGbQJZ/webhook-trigger/092e51f3-2598-43b8-b04b-712d1ae1f8c2';
 function DT_INTAKE_ON() { return (process.env.DT_INTAKE_ENABLED || 'true') !== 'false'; }
+// patch 351: the states DT-Intake is contracted for. DT_INTAKE_STATES on Railway
+// (comma list, e.g. "GA,TX,MO,FL,IL") overrides without a code change.
+function DT_INTAKE_STATES() { const s = String(process.env.DT_INTAKE_STATES || 'GA,TX,MO,FL').toUpperCase().split(/[,\s]+/).filter(Boolean); return s.length ? s : ['GA','TX','MO','FL']; }
 function dtIsoDate(v) {
   const s = String(v == null ? '' : v).trim(); if (!s) return undefined;
   let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if (m) return m[1] + '-' + m[2].padStart(2, '0') + '-' + m[3].padStart(2, '0');
@@ -7323,7 +7326,7 @@ async function logRejectedPost(campaign, pub, b, why) {
 // A state outside the intake list is stored and HELD, not forwarded, so it
 // shows on the dashboard and the publisher's portal as not delivered.
 const MVA_INTAKE_PUB    = 'LA-HI-MVA';
-const MVA_INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','CO','MO','NE','OK','TN','AZ'];   // patch 350: DT buys AZ
+const MVA_INTAKE_STATES = ['FL','GA','WI','TX','MI','IN','IL','MN','CO','MO','NE','OK','TN'];   // patch 351: back to the 13 intake states
 
 app.post('/leads/mva-intake', async (req, res) => {
   const key = req.headers['x-api-key'] || req.query.api_key || '';
@@ -7395,7 +7398,7 @@ app.post('/leads/mva-intake', async (req, res) => {
      GROUP BY 1`);
   const today = {}, lastAt = {};
   cnt.rows.forEach(r => { today[r.buyer] = r.n; lastAt[r.buyer] = r.last_at ? new Date(r.last_at).getTime() : 0; });
-  const ladder = [{ name: 'DT-Intake', enabled: DT_INTAKE_ON() }]   // patch 350: DT replaces CH/LT on this line
+  const ladder = [{ name: 'DT-Intake', enabled: DT_INTAKE_ON() && DT_INTAKE_STATES().includes(leadState) }, { name: 'CH-Intake', enabled: true }]   // patch 351: DT for its states, CH catches the rest
     .filter(x => x.enabled)
     .sort((a, c) => ((today[a.name] || 0) - (today[c.name] || 0)) || ((lastAt[a.name] || 0) - (lastAt[c.name] || 0)));
 
@@ -9255,12 +9258,10 @@ async function janitorRun() {
       const rungs = [];
       const dtOn = DT_INTAKE_ON();
       const wantNld = !NLD_PAUSED && JAN_NLD_STATES.includes(st) && nldToday < 10 && sentNld < JAN_NLD_MAX;   // patch 318
-      const dtFirst = rowPub === 'KRW-LEADBLOOM-MVA'
-        ? (st === 'AZ' || (JAN_INTAKE_STATES.includes(st) && st !== 'OK' && st !== 'NE'))
-        : (st === 'AZ' || JAN_INTAKE_STATES.includes(st));
-      if (dtOn && dtFirst) rungs.push('DT-Intake');
+      // patch 351: DT on its contracted states, NLD on its states, CH catches the rest
+      if (dtOn && DT_INTAKE_STATES().includes(st)) rungs.push('DT-Intake');
       if (wantNld) rungs.push('NLD CPA');
-      if (dtOn && !rungs.includes('DT-Intake')) rungs.push('DT-Intake');
+      if (rowPub !== 'KRW-LEADBLOOM-MVA' || (process.env.LB_CH_FALLBACK || 'true') !== 'false') rungs.push('CH-Intake');
       if (!rungs.length) { lines.push(`lead ${row.id} ${row.first_name || ''} ${row.last_name || ''} | ${st} | no eligible buyer today - left as is`); continue; }
 
       attempted++;
@@ -9364,12 +9365,10 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     const rungs = [];
     const dtOn = DT_INTAKE_ON();
     const wantNld = !NLD_PAUSED && NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10;   // patch 318
-    const dtFirst = isLeadbloom
-      ? (st === 'AZ' || (JAN_INTAKE_STATES.includes(st) && st !== 'OK' && st !== 'NE'))
-      : (st === 'AZ' || JAN_INTAKE_STATES.includes(st));
-    if (dtOn && dtFirst) rungs.push('DT-Intake');
+    // patch 351: DT on its contracted states, NLD on its states, CH catches the rest
+    if (dtOn && DT_INTAKE_STATES().includes(st)) rungs.push('DT-Intake');
     if (wantNld) rungs.push('NLD CPA');
-    if (dtOn) rungs.push('DT-Intake');
+    if (!isLeadbloom || (process.env.LB_CH_FALLBACK || 'true') !== 'false') rungs.push('CH-Intake');
     let plan = rungs.filter((x, i) => rungs.indexOf(x) === i);   // dedupe, order kept
     if (Array.isArray(req.body && req.body.only)) plan = plan.filter(x => req.body.only.includes(x));   // patch 333: restrict to named buyers
     if (!plan.length) return res.status(409).json({ ok: false, error: 'No eligible buyer right now (caps reached)', state: st });
