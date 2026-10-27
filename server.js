@@ -8862,6 +8862,8 @@ function pbLeadViewBase(l, payoutRate) {
   else if (st === 'rejected' || st === 'error') response = 'Not delivered';
   else response = 'Delivered';
   const raw = l.raw || {};
+  const pubHold = !!raw.pub_hold;   // patch 356: held off publisher payout, still billable for the buyer
+  if (pubHold) response = 'In outreach';
   const dispo = raw.buyer_disposition || {};
   var camp = String(l.campaign || '').toLowerCase();
   var vertical = /ride|lyft|uber/.test(camp) ? 'Rideshare' : /roblox/.test(camp) ? 'Roblox' : /mva/.test(camp) ? 'MVA' : (l.vertical || 'Other');
@@ -8875,8 +8877,8 @@ function pbLeadViewBase(l, payoutRate) {
     injury: raw.injury || raw.physical_injury || null, at_fault: raw.at_fault || null, have_attorney: raw.have_attorney || null,
     case_description: raw.case_description || raw.summary || raw.description || null, county: raw.county || null,
     submitted_status: st, response, notes: safeNotes,
-    updated_at: dispo.confirmed_at || dispo.synced_at || null, billable: !!l.billable,
-    payout: l.billable ? parseFloat(payoutRate || 0) : 0,
+    updated_at: dispo.confirmed_at || dispo.synced_at || null, billable: !!l.billable && !pubHold,
+    payout: (l.billable && !pubHold) ? parseFloat(payoutRate || 0) : 0,
     trustedform: raw.trustedform_cert_url || null,
   };
 }
@@ -8918,6 +8920,22 @@ async function pbSetHidden(req, res, hidden) {
 }
 app.post('/portal/leads/:id/hide',   requireKey, (req, res) => pbSetHidden(req, res, true));
 app.post('/portal/leads/:id/unhide', requirePortalKey, (req, res) => pbSetHidden(req, res, false));
+
+// patch 356: hold a lead off the publisher payout only (still billable for the buyer/dashboard)
+app.post('/leads/:id/pub-hold', requireKey, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ ok: false, error: 'Bad lead id' });
+  const hold = ((req.body || {}).hold !== false);
+  try {
+    const r = await pool.query(
+      `UPDATE leads SET raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('pub_hold', $1::boolean, 'pub_hold_at', NOW())
+       WHERE id = $2 RETURNING id, first_name, last_name, billable`,
+      [hold, id]);
+    if (!r.rows.length) return res.status(404).json({ ok: false, error: 'Lead not found' });
+    console.log(`[Portal] lead ${id} pub_hold -> ${hold}`);
+    res.json({ ok: true, id: id, pub_hold: hold, lead: r.rows[0] });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
 
 // 2. Postback settings
 function pbSettingsView(pub) {
