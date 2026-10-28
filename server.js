@@ -3512,14 +3512,14 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const NYC_LADDER = [
     { name: 'DT-Intake',  priority: 1, group: 'intake',   cap: null, payout: 2500, enabled: DT_ON,       states: DT_STATES },
     { name: 'NLD CPA',    priority: 2, group: 'nld',      cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
-    { name: 'CH-Intake',  priority: 3, group: 'catchall', cap: null, payout: 2250, enabled: true,        states: 'ALL' },
+    { name: 'DT-Intake',  priority: 3, group: 'catchall', cap: null, payout: 2500, enabled: DT_ON,       states: 'ALL' },   // patch 358: CH-Intake off, DT is the catch-all
     { name: 'MVA-003-LT', priority: 4, group: '003',      cap: 5,    payout: 1700, enabled: false,       states: 'ALL' },   // patch 305: 003 off
   ];
   const LEADBLOOM_LADDER = NYC_LADDER;   // the shared ladder: NYC, Kevin, everyone but Leadbloom
   const LB_ONLY_LADDER = [
     { name: 'DT-Intake',  priority: 1, group: 'intake',   cap: null, payout: 2500, enabled: DT_ON,       states: DT_STATES },
     { name: 'NLD CPA',    priority: 2, group: 'nld',      cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
-    { name: 'CH-Intake',  priority: 3, group: 'catchall', cap: null, payout: 2250, enabled: CH_FOR_LB,   states: 'ALL' },
+    { name: 'DT-Intake',  priority: 3, group: 'catchall', cap: null, payout: 2500, enabled: DT_ON,       states: 'ALL' },   // patch 358: CH-Intake off, DT is the catch-all
   ];
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
@@ -6678,7 +6678,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     // Email Agency and LAR-MVA-CPA dropped as MVA buyers; CH-Intake (was
     // "MVA-Intake") and LT-Intake (new intake buyer, posting spec pending)
     // added (Kyler, Sep 16).
-    const mvaKnownBuyers = ['NLD CPA', 'MVA-003-LT', 'CH-Intake', 'LT-Intake', 'DT-Intake'];   // patch 350
+    const mvaKnownBuyers = ['NLD CPA', 'MVA-003-LT', 'CH-Intake', 'DT-Intake'];   // patch 358: LT-Intake removed
     for (const b of mvaKnownBuyers) mva.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
     // De-dupe by phone per publisher for display purposes only (Kyler, Sep 1)
     // - a real duplicate-dial issue was found inflating raw counts. This
@@ -6858,9 +6858,9 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // patch 308: MVA-003-LT removed - 003 is off for every publisher (patch 305)
         // patch 350: DT-Intake replaces CH/LT as the intake buyer for everyone
         // patch 351: CH-Intake is the catch-all again
-        'KRW-KANTHONY-RS':  ['DT-Intake', 'NLD CPA', 'CH-Intake'],
-        [LEADBLOOM_PUB_ID]: ['DT-Intake', 'NLD CPA', 'CH-Intake'],
-        'KRW-NYC-MVA':      ['DT-Intake', 'NLD CPA', 'CH-Intake'],
+        'KRW-KANTHONY-RS':  ['DT-Intake', 'NLD CPA'],   // patch 358: CH-Intake off
+        [LEADBLOOM_PUB_ID]: ['DT-Intake', 'NLD CPA'],   // patch 358
+        'KRW-NYC-MVA':      ['DT-Intake', 'NLD CPA'],   // patch 358
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Signed (TD)'], // Fields Law paused - this line now routes via Trackdrive
@@ -7409,7 +7409,7 @@ app.post('/leads/mva-intake', async (req, res) => {
      GROUP BY 1`);
   const today = {}, lastAt = {};
   cnt.rows.forEach(r => { today[r.buyer] = r.n; lastAt[r.buyer] = r.last_at ? new Date(r.last_at).getTime() : 0; });
-  const ladder = [{ name: 'DT-Intake', enabled: DT_INTAKE_ON() && DT_INTAKE_STATES().includes(leadState) }, { name: 'CH-Intake', enabled: true }]   // patch 351: DT for its states, CH catches the rest
+  const ladder = [{ name: 'DT-Intake', enabled: DT_INTAKE_ON() }]   // patch 359: CH-Intake off, DT catches all
     .filter(x => x.enabled)
     .sort((a, c) => ((today[a.name] || 0) - (today[c.name] || 0)) || ((lastAt[a.name] || 0) - (lastAt[c.name] || 0)));
 
@@ -9290,7 +9290,7 @@ async function janitorRun() {
       // patch 351: DT on its contracted states, NLD on its states, CH catches the rest
       if (dtOn && DT_INTAKE_STATES().includes(st)) rungs.push('DT-Intake');
       if (wantNld) rungs.push('NLD CPA');
-      if (rowPub !== 'KRW-LEADBLOOM-MVA' || (process.env.LB_CH_FALLBACK || 'true') !== 'false') rungs.push('CH-Intake');
+      if (dtOn && !rungs.includes('DT-Intake')) rungs.push('DT-Intake');   // patch 359: DT catches the rest (CH off)
       if (!rungs.length) { lines.push(`lead ${row.id} ${row.first_name || ''} ${row.last_name || ''} | ${st} | no eligible buyer today - left as is`); continue; }
 
       attempted++;
@@ -9397,7 +9397,7 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     // patch 351: DT on its contracted states, NLD on its states, CH catches the rest
     if (dtOn && DT_INTAKE_STATES().includes(st)) rungs.push('DT-Intake');
     if (wantNld) rungs.push('NLD CPA');
-    if (!isLeadbloom || (process.env.LB_CH_FALLBACK || 'true') !== 'false') rungs.push('CH-Intake');
+    if (dtOn && !rungs.includes('DT-Intake')) rungs.push('DT-Intake');   // patch 359: DT catches the rest (CH off)
     let plan = rungs.filter((x, i) => rungs.indexOf(x) === i);   // dedupe, order kept
     if (Array.isArray(req.body && req.body.only)) plan = plan.filter(x => req.body.only.includes(x));   // patch 333: restrict to named buyers
     if (!plan.length) return res.status(409).json({ ok: false, error: 'No eligible buyer right now (caps reached)', state: st });
@@ -9621,7 +9621,7 @@ const OB_SEED = [
       'Contact: Daniel Roche, danielrochelegal@gmail.com. Firm legal name and address still needed for the IO.',
       'Vertical: MVA, exclusive web form leads from Leadbloom, paid per signed retainer.',
       'Price per CPA: $2,500 standard (he offered $2,400 to $2,500). Rate increase in the IO: $2,700 to $3,200 once volume is consistent.',
-      'States: GA, TX, MO, FL, IL, IN, MN (patch 352, Oct 26). AZ went back to NLD. CH-Intake is the catch-all for everything else.',
+      'States: GA, TX, MO, FL, IL, IN, MN (patch 352, Oct 26). AZ went back to NLD. DT-Intake is the catch-all for everything else (patch 358).',
       'Intake: 7 agents, 7 AM to 10 PM PST, 5 minute first contact target. Stack: Level Up Marketing, GoHighLevel.',
       'Volume: told them 10 to 15 leads/day, expecting 5 to 8/day at launch.',
       'Referral: Tom gets $100 per CPA (flat). Net on standard tier: $2,500 - $1,700 Leadbloom - $100 Tom = $700.',
@@ -10632,7 +10632,7 @@ const BUYER_SHEETS = [
   // starts with a date; newest tab's row wins per phone via the existing de-dupe.
   { key: 'lt-intake', label: 'LT-Intake',  buyer: 'LT-Intake',  vertical: 'MVA', sheet: '16azBD-YOUB2dQbvLnwCXmPF4ntq0ntug582sJC_vs1Y', tab: null, tabPattern: /^\d{1,2}\.\d{1,2}/, amount: 2500, enabled: true },
   // Chad's intake sheet carries MVA plus his Roblox and Rideshare rows; MVA matches by buyer, the others by campaign
-  { key: 'ch-intake', label: 'CH-Intake',  buyer: 'CH-Intake',  vertical: 'MVA', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, campaigns: ['roblox-mt','roblox-chad','rideshare-chad'], amount: 2250, enabled: true },
+  { key: 'ch-intake', label: 'CH-Intake',  buyer: 'CH-Intake',  vertical: 'MVA', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, campaigns: ['roblox-mt','roblox-chad','rideshare-chad'], amount: 2250, enabled: false },   // patch 358: CH-Intake off
   // patch 350: DT-Intake's auto-updated pipeline sheet (lead_id / status / name / phone / received_date / retainer_date / reason / updated_at).
   // Statuses: New Lead, Contacted, Signed (billable), Unresponsive, Not Qualified, Duplicate. Matched by phone.
   { key: 'dt-intake', label: 'DT-Intake',  buyer: 'DT-Intake',  vertical: 'MVA', sheet: '1_pvfSFxsvK0saUvwQFmG0YHG7f4ySs0TysywLqhzRBQ', tab: null, amount: 2500, enabled: true },
