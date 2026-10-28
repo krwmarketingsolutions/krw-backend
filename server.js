@@ -6679,6 +6679,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     // "MVA-Intake") and LT-Intake (new intake buyer, posting spec pending)
     // added (Kyler, Sep 16).
     const mvaKnownBuyers = ['NLD CPA', 'MVA-003-LT', 'CH-Intake', 'DT-Intake'];   // patch 358: LT-Intake removed
+    const MVA_FUNNEL_HIDE = new Set(['LT-Intake']);   // patch 360: LT-Intake no longer a buyer - hide its node/edges even for historical leads
     for (const b of mvaKnownBuyers) mva.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
     // De-dupe by phone per publisher for display purposes only (Kyler, Sep 1)
     // - a real duplicate-dial issue was found inflating raw counts. This
@@ -6700,6 +6701,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       // patch 265: a lead that never reached a buyer (over a state cap, CA/CO blocked)
       // shows under a "Rejected" node - the funnel never says "Unknown".
       const buyerName = (row.status !== 'rejected' && row.buyer_name) ? row.buyer_name : 'Rejected';
+      if (MVA_FUNNEL_HIDE.has(buyerName)) continue;   // patch 360: LT-Intake removed from the funnel
       if (!mva.buyers[buyerName]) mva.buyers[buyerName] = { received: 0, accepted: 0, revenue: 0 };
       mva.buyers[buyerName].received++;
       // patch 308: count the real flow per publisher->buyer pair, so the
@@ -10632,7 +10634,7 @@ const BUYER_SHEETS = [
   // starts with a date; newest tab's row wins per phone via the existing de-dupe.
   { key: 'lt-intake', label: 'LT-Intake',  buyer: 'LT-Intake',  vertical: 'MVA', sheet: '16azBD-YOUB2dQbvLnwCXmPF4ntq0ntug582sJC_vs1Y', tab: null, tabPattern: /^\d{1,2}\.\d{1,2}/, amount: 2500, enabled: true },
   // Chad's intake sheet carries MVA plus his Roblox and Rideshare rows; MVA matches by buyer, the others by campaign
-  { key: 'ch-intake', label: 'CH-Intake',  buyer: 'CH-Intake',  vertical: 'MVA', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, campaigns: ['roblox-mt','roblox-chad','rideshare-chad'], amount: 2250, enabled: false },   // patch 358: CH-Intake off
+  { key: 'ch-intake', label: 'CH-AD Roblox/Rideshare', buyer: 'CH-AD', vertical: 'Rideshare', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, campaigns: ['roblox-mt','roblox-chad','rideshare-chad'], amount: 2250, enabled: true },   // patch 360: CH-Intake MVA off the sheet; Chad's roblox/rideshare (CH-AD) still scanned by campaign
   // patch 350: DT-Intake's auto-updated pipeline sheet (lead_id / status / name / phone / received_date / retainer_date / reason / updated_at).
   // Statuses: New Lead, Contacted, Signed (billable), Unresponsive, Not Qualified, Duplicate. Matched by phone.
   { key: 'dt-intake', label: 'DT-Intake',  buyer: 'DT-Intake',  vertical: 'MVA', sheet: '1_pvfSFxsvK0saUvwQFmG0YHG7f4ySs0TysywLqhzRBQ', tab: null, amount: 2500, enabled: true },
