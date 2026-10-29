@@ -8519,7 +8519,7 @@ app.post('/billable-queue/:id/approve', requireKey, async (req, res) => {
     const q = await client.query('SELECT * FROM billable_queue WHERE id=$1', [req.params.id]);
     if (!q.rows[0]) return res.status(404).json({ ok: false, error: 'Not found' });
     const item = q.rows[0];
-    if (item.status !== 'pending') {
+    if (item.status !== 'pending' && item.status !== 'held') {   // patch 363: a held case can still be approved (approve overrides a prior hold; revenue is set, not added)
       return res.status(400).json({ ok: false, error: `Already ${item.status}` });
     }
 
