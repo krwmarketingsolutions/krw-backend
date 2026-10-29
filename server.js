@@ -9667,7 +9667,8 @@ async function obEnsureTable() {
     created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())`);
   obTableReady = true;
 }
-const OB_STAGES = ['prospect', 'pre-contract', 'contract-sent', 'signed', 'setup', 'testing', 'live', 'scaling'];
+const OB_STAGES = ['prospect', 'pre-contract', 'contract-sent', 'pending-setup', 'live', 'scaling'];   // patch 365: pending-setup is the step before live
+const OB_STAGE_MIGRATE = { signed: 'pending-setup', setup: 'pending-setup', testing: 'pending-setup' };   // patch 365: old stages fold into pending-setup
 const OB_SEED = [
   { name: 'Daniel Intake', code: 'DT', stage: 'live', email: 'danielrochelegal@gmail.com', sort: 1,
     summary: 'MVA buyer, live as DT-Intake. GA, TX, MO, FL, IL, IN, MN. $2,500 per signed case. IO drafted, not sent.',
@@ -9731,6 +9732,7 @@ app.get('/onboarding', requireKey, async (req, res) => {
     await obEnsureTable();
     const n = (await pool.query('SELECT COUNT(*)::int AS n FROM onboarding_clients')).rows[0].n;
     if (n === 0) for (const s of OB_SEED) await pool.query('INSERT INTO onboarding_clients (name, code, stage, summary, email, notes, sort) VALUES ($1,$2,$3,$4,$5,$6,$7)', [s.name, s.code, s.stage, s.summary, s.email, s.notes, s.sort]);
+    for (const [o, n] of Object.entries(OB_STAGE_MIGRATE)) await pool.query('UPDATE onboarding_clients SET stage=$2 WHERE stage=$1', [o, n]);   // patch 365
     const all = req.query.all === '1';
     const r = await pool.query('SELECT * FROM onboarding_clients' + (all ? '' : ' WHERE archived IS NOT TRUE') + ' ORDER BY sort, id');
     res.json({ ok: true, stages: OB_STAGES, clients: r.rows });
