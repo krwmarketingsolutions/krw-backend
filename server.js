@@ -675,7 +675,7 @@ app.post('/leads/:id/disposition', requireKey, async (req, res) => {
   try {
     const { disposition, note, amount } = req.body || {};
     const d = String(disposition || '').toLowerCase().trim();
-    const ALLOWED = ['signed', 'pending', 'open', 'rejected', 'investigation'];   // patch 354
+    const ALLOWED = ['signed', 'pending', 'open', 'docs_collected', 'rejected', 'investigation'];   // patch 362: + docs_collected
     if (!ALLOWED.includes(d)) return res.status(400).json({ ok: false, error: 'disposition must be one of ' + ALLOWED.join(', ') });
     const q = await pool.query('SELECT * FROM leads WHERE id=$1', [req.params.id]);
     if (!q.rows[0]) return res.status(404).json({ ok: false, error: 'Lead not found' });
@@ -690,6 +690,8 @@ app.post('/leads/:id/disposition', requireKey, async (req, res) => {
       buyerStatus = 'Pending - ' + (note || 'signature'); notes = 'In outreach'; billable = false;
     } else if (d === 'open') {
       buyerStatus = 'Open - in outreach'; notes = note || 'Open - in outreach'; billable = false;
+    } else if (d === 'docs_collected') {   // patch 362: docs in hand, intake pending - a forward/in-progress stage, not a signing
+      buyerStatus = 'Docs Collected - Intake Needed'; notes = note || 'Docs collected - intake needed'; billable = false; status = 'forwarded';
     } else if (d === 'investigation') {   // patch 354
       buyerStatus = 'Under Investigation'; notes = note || 'Under investigation - buyer withholding payment pending validity'; billable = false;
     } else { // rejected
@@ -8912,6 +8914,7 @@ function pbLeadViewBase(l, payoutRate) {
   else if (bs === 'Test') response = 'Test';
   else if (/^open/i.test(bs)) response = 'In outreach';
   else if (/^pending/i.test(bs)) response = 'In outreach';
+  else if (/docs?\s*collected/i.test(bs)) response = 'Docs collected';   // patch 362
   else if (/^archived/i.test(bs)) response = 'Not worked';
   else if (st === 'rejected' || st === 'error') response = 'Not delivered';
   else response = 'Delivered';
