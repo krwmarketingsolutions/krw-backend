@@ -877,6 +877,49 @@ app.patch('/calls/:id/billable', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
+// patch 361: admin upsert for a Joshua SSDI "Signed" deal (KRW-JOSHUA-SIGNED).
+// Fills the gap where a signed transfer produced no call record on our side.
+// Upsert by phone; matches the real j_signed_postback record shape so it shows
+// on /calls/feed. Default payout $200 (SSDI CPA), disposition Retained.
+app.post('/calls/joshua-signed/upsert', requireKey, async (req, res) => {
+  const b = req.body || {};
+  let phone = String(b.phone || b.caller_id || b.cid || '').replace(/\D/g, '');
+  if (phone.length === 11 && phone.startsWith('1')) phone = phone.slice(1);
+  if (!phone) return res.status(400).json({ ok: false, error: 'phone (or caller_id) required' });
+  const payout   = (b.payout_amount !== undefined && b.payout_amount !== null && b.payout_amount !== '')
+                     ? parseFloat(b.payout_amount) : 200;
+  if (!isFinite(payout) || payout < 0) return res.status(400).json({ ok: false, error: 'payout_amount must be a non-negative number' });
+  const billable = (b.billable !== false);
+  const dispo    = b.disposition || 'Retained — Initial Application';
+  const callDate = b.call_date || new Date().toISOString().slice(0, 10);
+  try {
+    const upd = await pool.query(
+      `UPDATE calls SET billable = $1, payout_amount = $2::numeric, call_status_label = 'cpa',
+         disposition = $3, caller_name = COALESCE($4, caller_name)
+       WHERE publisher_sub = 'KRW-JOSHUA-SIGNED'
+         AND regexp_replace(caller_id, '\D', '', 'g') = $5
+       RETURNING id`,
+      [billable, payout.toFixed(2), dispo, b.caller_name || null, phone]);
+    if (upd.rows.length) {
+      console.log(`[J-Signed Upsert] updated call ${upd.rows[0].id} | ${phone} | $${payout} | ${dispo}`);
+      return res.json({ ok: true, action: 'updated', id: upd.rows[0].id, phone, payout_amount: payout.toFixed(2) });
+    }
+    const ins = await pool.query(
+      `INSERT INTO calls
+         (call_date, caller_id, caller_name, billable, publisher_sub, vertical,
+          campaign, campaign_name, buyer_name, payout_amount, disposition,
+          call_status, call_status_label, source_system, raw, received_at)
+       VALUES ($1,$2,$3,$4,'KRW-JOSHUA-SIGNED','SSDI',
+               'ssdi-signed-td','SSDI Signed (TD)','J-Signed Buyer',$5::numeric,$6,
+               'Completed','cpa','j_signed_postback',$7::jsonb,NOW())
+       RETURNING id`,
+      [callDate, phone, b.caller_name || null, billable, payout.toFixed(2), dispo,
+       JSON.stringify({ source: 'admin_backfill', ref: b.ref || null, entered_by: 'admin', entered_at: new Date().toISOString() })]);
+    console.log(`[J-Signed Upsert] inserted call ${ins.rows[0].id} | ${phone} | $${payout} | ${dispo}`);
+    return res.json({ ok: true, action: 'inserted', id: ins.rows[0].id, phone, payout_amount: payout.toFixed(2) });
+  } catch (err) { return res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.post('/send-invoice', requireKey, async (req, res) => {
   try {
     const { zapier_webhook, ...payload } = req.body;
