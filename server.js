@@ -7156,7 +7156,7 @@ async function sendToLtIntake(b, leadState, leadId) {
 //   DT_INTAKE_ENABLED  default true  - "false" removes DT from every ladder
 //   DT_INTAKE_WEBHOOK  default the URL below
 const DT_INTAKE_WEBHOOK_DEFAULT = 'https://services.leadconnectorhq.com/hooks/e35fEKrl9gkdsZYGbQJZ/webhook-trigger/092e51f3-2598-43b8-b04b-712d1ae1f8c2';
-function DT_INTAKE_ON() { return (process.env.DT_INTAKE_ENABLED || 'true') !== 'false'; }
+function DT_INTAKE_ON() { return false; }   // patch 366: DT-Intake PAUSED until set up. RESUME: return (process.env.DT_INTAKE_ENABLED || 'true') !== 'false';
 // patch 351: the states DT-Intake is contracted for. DT_INTAKE_STATES on Railway
 // (comma list, e.g. "GA,TX,MO,FL,IL") overrides without a code change.
 function DT_INTAKE_STATES() { const s = String(process.env.DT_INTAKE_STATES || 'GA,TX,MO,FL,IL,IN,MN').toUpperCase().split(/[,\s]+/).filter(Boolean); return s.length ? s : ['GA','TX','MO','FL','IL','IN','MN']; }   // patch 352: + IL, IN, MN
