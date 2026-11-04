@@ -3561,6 +3561,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const DT_STATES    = DT_INTAKE_STATES();
   const CH_FOR_LB    = (process.env.LB_CH_FALLBACK || 'true') !== 'false';
   const NYC_LADDER = [
+    { name: 'Legal Advocate Group', priority: 1, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 367: LAG takes GA/TX/SC (states NLD isn't buying), delivered to the LAG Google Sheet
     { name: 'DT-Intake',  priority: 1, group: 'intake',   cap: null, payout: 2500, enabled: DT_ON,       states: DT_STATES },
     { name: 'NLD CPA',    priority: 2, group: 'nld',      cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
     { name: 'DT-Intake',  priority: 3, group: 'catchall', cap: null, payout: 2500, enabled: DT_ON,       states: 'ALL' },   // patch 358: CH-Intake off, DT is the catch-all
@@ -3568,6 +3569,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   ];
   const LEADBLOOM_LADDER = NYC_LADDER;   // the shared ladder: NYC, Kevin, everyone but Leadbloom
   const LB_ONLY_LADDER = [
+    { name: 'Legal Advocate Group', priority: 1, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 367
     { name: 'DT-Intake',  priority: 1, group: 'intake',   cap: null, payout: 2500, enabled: DT_ON,       states: DT_STATES },
     { name: 'NLD CPA',    priority: 2, group: 'nld',      cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
     { name: 'DT-Intake',  priority: 3, group: 'catchall', cap: null, payout: 2500, enabled: DT_ON,       states: 'ALL' },   // patch 358: CH-Intake off, DT is the catch-all
@@ -3794,6 +3796,15 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     'DT-Intake': async () => {   // patch 350
       const r = await sendToDtIntake(b, leadState, leadId, PUB);
       return { result: r.result, accepted: r.accepted };
+    },
+    'Legal Advocate Group': async () => {   // patch 367: deliver to LAG's Google Sheet (Leads tab)
+      if (!LAG_LIVE()) return { result: { status: 'paused', message: 'LAG delivery paused' }, accepted: false };
+      try {
+        const out = await lagAppendRow(b, leadState, leadId);
+        return { result: { status: 'success', message: 'Delivered to Legal Advocate Group sheet', range: out && out.updates && out.updates.updatedRange }, accepted: true };
+      } catch (e) {
+        return { result: { status: 'error', message: 'LAG sheet append failed: ' + e.message }, accepted: false };
+      }
     },
   };
 
@@ -7462,7 +7473,10 @@ app.post('/leads/mva-intake', async (req, res) => {
      GROUP BY 1`);
   const today = {}, lastAt = {};
   cnt.rows.forEach(r => { today[r.buyer] = r.n; lastAt[r.buyer] = r.last_at ? new Date(r.last_at).getTime() : 0; });
-  const ladder = [{ name: 'DT-Intake', enabled: DT_INTAKE_ON() }]   // patch 359: CH-Intake off, DT catches all
+  const ladder = [
+      { name: 'Legal Advocate Group', enabled: LAG_LIVE() && LAG_STATES.includes(leadState) },   // patch 367: LAG takes its states on the LA-HI line too
+      { name: 'DT-Intake', enabled: DT_INTAKE_ON() },   // patch 359: CH-Intake off, DT catches all
+    ]
     .filter(x => x.enabled)
     .sort((a, c) => ((today[a.name] || 0) - (today[c.name] || 0)) || ((lastAt[a.name] || 0) - (lastAt[c.name] || 0)));
 
@@ -7478,6 +7492,15 @@ app.post('/leads/mva-intake', async (req, res) => {
     },
     'LT-Intake': async () => { const r = await sendToLtIntake(b, leadState, leadId); return { result: r.result, accepted: r.accepted }; },
     'DT-Intake': async () => { const r = await sendToDtIntake(b, leadState, leadId, MVA_INTAKE_PUB); return { result: r.result, accepted: r.accepted }; },   // patch 350
+    'Legal Advocate Group': async () => {   // patch 367
+      if (!LAG_LIVE()) return { result: { status: 'paused', message: 'LAG delivery paused' }, accepted: false };
+      try {
+        const out = await lagAppendRow(b, leadState, leadId);
+        return { result: { status: 'success', message: 'Delivered to Legal Advocate Group sheet', range: out && out.updates && out.updates.updatedRange }, accepted: true };
+      } catch (e) {
+        return { result: { status: 'error', message: 'LAG sheet append failed: ' + e.message }, accepted: false };
+      }
+    },
   };
 
   const attempts = []; let buyerName = null, result = {}, accepted = false;
@@ -7500,6 +7523,36 @@ app.post('/leads/mva-intake', async (req, res) => {
   console.log(`[MVA-Intake] ${accepted ? '✓' : '✕'} ${b.first_name} ${b.last_name} | ${leadState} | -> ${buyerName || 'nobody'}`);
   return res.json({ ok: accepted, result: accepted ? 'success' : 'rejected', message: accepted ? 'Lead accepted' : (result.message || 'Lead rejected'),
     buyer: buyerName, krw_id: leadId });
+});
+
+// ─── patch 367: push one stored lead to the LAG sheet by id ──────────────────
+// Appends a stored lead to LAG's Leads tab and marks it delivered to LAG. For a
+// dashboard "send to LAG" action and for retrying a failed delivery. Guarded so
+// the same lead isn't delivered twice; ?force=true overrides the state check.
+app.post('/leads/:id/lag-push', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29', process.env.LEAD_API_KEY || 'krwleads2026secure'];
+  if (validKeys.indexOf(key) < 0) return res.status(401).json({ ok: false, error: 'Invalid API key' });
+  if (!LAG_LIVE()) return res.status(409).json({ ok: false, error: 'LAG delivery is paused (LAG_LIVE=false)' });
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ ok: false, error: 'Bad lead id' });
+  const lr = await pool.query('SELECT id, state, raw FROM leads WHERE id=$1', [id]);
+  if (!lr.rows.length) return res.status(404).json({ ok: false, error: 'Lead not found' });
+  const lead = lr.rows[0]; const b = lead.raw || {}; const st = (lead.state || '').toUpperCase().trim();
+  if (b.lag_delivered) return res.json({ ok: true, already: true, krw_id: id, message: 'Already delivered to LAG' });
+  if (req.query.force !== 'true' && LAG_STATES.indexOf(st) < 0) {
+    return res.status(400).json({ ok: false, error: 'State ' + st + ' is not a LAG state (' + LAG_STATES.join('/') + '); pass ?force=true to override' });
+  }
+  try {
+    await lagAppendRow(b, st, id);
+    await pool.query(
+      "UPDATE leads SET status='forwarded', buyer_status='Accepted', billable=false, revenue=0, " +
+      "raw = COALESCE(raw,'{}'::jsonb) || $1::jsonb WHERE id=$2",
+      [JSON.stringify({ buyer_name: 'Legal Advocate Group', lag_delivered: true, lag_pushed_at: new Date().toISOString() }), id]);
+    return res.json({ ok: true, krw_id: id, buyer: 'Legal Advocate Group' });
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: e.message, krw_id: id });
+  }
 });
 // ─── END MVA-INTAKE (LA-HI) ──────────────────────────────────────────────────
 
@@ -10693,7 +10746,69 @@ const BUYER_SHEETS = [
   // Statuses: New Lead, Contacted, Signed (billable), Unresponsive, Not Qualified, Duplicate. Matched by phone.
   { key: 'dt-intake', label: 'DT-Intake',  buyer: 'DT-Intake',  vertical: 'MVA', sheet: '1_pvfSFxsvK0saUvwQFmG0YHG7f4ySs0TysywLqhzRBQ', tab: null, amount: 2500, enabled: true },
   { key: 'mva-003',   label: 'MVA-003-LT', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1700, enabled: true },
+  { key: 'lag-mva',   label: 'Legal Advocate Group', buyer: 'Legal Advocate Group', vertical: 'MVA', sheet: '1-Kx2As3kn4CZ6iXODQJ8NVwugteEM2U1fJlNjmkxU9I', tab: 'Dispositions', amount: 2200, enabled: true },   // patch 367: read LAG dispositions back from the Dispositions tab
 ];
+
+// ── patch 367: Legal Advocate Group (LAG) lead delivery ──────────────────────
+// LAG buys the MVA states NLD isn't buying (GA, TX, SC of their requested 7) at
+// $2,200/signed. Leads are DELIVERED by appending a row to their Google Sheet's
+// "Leads" tab (write path below, isolated from the read-only buyer-sheet scanner
+// above), and their dispositions are read back from the "Dispositions" tab by
+// the scanner (BUYER_SHEETS 'lag-mva'). Pause delivery with LAG_LIVE=false.
+// The sheet is shared with the service account (GOOGLE_SA_KEY) as editor.
+const LAG_SHEET_ID  = '1-Kx2As3kn4CZ6iXODQJ8NVwugteEM2U1fJlNjmkxU9I';
+const LAG_LEADS_TAB = 'Leads';
+const LAG_STATES    = ['GA', 'TX', 'SC'];
+const LAG_PAYOUT    = 2200;
+function LAG_LIVE() { return (process.env.LAG_LIVE || 'true') !== 'false'; }
+
+// Separate write-scoped service-account token, so the read-only scanner token
+// (bsAccessToken, spreadsheets.readonly) is never touched by the write path.
+let lagWToken = null, lagWTokenExp = 0;
+async function lagWriteToken() {
+  if (lagWToken && Date.now() < lagWTokenExp - 60000) return lagWToken;
+  const sa = bsSaKey(); if (!sa || !sa.client_email || !sa.private_key) throw new Error('GOOGLE_SA_KEY missing or invalid');
+  const now = Math.floor(Date.now() / 1000);
+  const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const unsigned = b64({ alg: 'RS256', typ: 'JWT' }) + '.' + b64({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/spreadsheets', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 });
+  const sig = require('crypto').createSign('RSA-SHA256').update(unsigned).sign(sa.private_key, 'base64url');
+  const body = 'grant_type=' + encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer') + '&assertion=' + unsigned + '.' + sig;
+  const r = await bsHttp('POST', 'https://oauth2.googleapis.com/token', body, { 'Content-Type': 'application/x-www-form-urlencoded' });
+  const j = JSON.parse(r.body || '{}');
+  if (!j.access_token) throw new Error('LAG token error: ' + (j.error_description || j.error || r.status));
+  lagWToken = j.access_token; lagWTokenExp = Date.now() + (j.expires_in || 3600) * 1000;
+  return lagWToken;
+}
+
+// Append one lead as a row on the LAG "Leads" tab. Column order matches the
+// sheet header A:P exactly. Throws on any non-2xx so the caller can treat it as
+// a delivery failure (lead shows buyer_rejected, re-pushable via /leads/:id/lag-push).
+async function lagAppendRow(b, leadState, leadId) {
+  const tok = await lagWriteToken();
+  const nowET = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+  const row = [[
+    nowET,
+    b.first_name || '', b.last_name || '',
+    String(b.phone || '').replace(/\D/g, ''),
+    b.email || '',
+    (leadState || '').toUpperCase(),
+    b.incident_date || '',
+    b.at_fault || '',
+    b.injury || b.physical_injury || '',
+    b.have_attorney || '',
+    '', '', '',                       // Police Report / SOL OK / At-Fault Insurance-UMC: not captured on the lander yet
+    b.trustedform_cert_url || '',
+    'KRW-' + leadId,
+    LAG_PAYOUT,
+  ]];
+  const url = 'https://sheets.googleapis.com/v4/spreadsheets/' + LAG_SHEET_ID +
+    '/values/' + encodeURIComponent("'" + LAG_LEADS_TAB + "'!A:P") +
+    ':append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS';
+  const r = await bsHttp('POST', url, JSON.stringify({ values: row }), { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' });
+  if (r.status >= 300) throw new Error('append ' + r.status + ': ' + String(r.body).slice(0, 160));
+  return JSON.parse(r.body || '{}');
+}
+
 
 // ── Google auth (service account JWT -> access token), no dependencies ──
 let bsToken = null, bsTokenExp = 0;
