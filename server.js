@@ -3561,19 +3561,15 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const DT_STATES    = DT_INTAKE_STATES();
   const CH_FOR_LB    = (process.env.LB_CH_FALLBACK || 'true') !== 'false';
   const NYC_LADDER = [
-    { name: 'Legal Advocate Group', priority: 1, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 367: LAG takes GA/TX/SC (states NLD isn't buying), delivered to the LAG Google Sheet
-    { name: 'DT-Intake',  priority: 1, group: 'intake',   cap: null, payout: 2500, enabled: DT_ON,       states: DT_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',      cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
-    { name: 'DT-Intake',  priority: 3, group: 'catchall', cap: null, payout: 2500, enabled: DT_ON,       states: 'ALL' },   // patch 358: CH-Intake off, DT is the catch-all
-    { name: 'MVA-003-LT', priority: 4, group: '003',      cap: 5,    payout: 1700, enabled: false,       states: 'ALL' },   // patch 305: 003 off
-  ];
+    { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
+    { name: 'Legal Advocate Group', priority: 2, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 368: LAG 2nd after NLD - sole buyer in GA/TX/SC, catches NLD's overflow in the shared states
+    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: 5,    payout: 1700, enabled: false,       states: 'ALL' },   // patch 305: 003 off
+  ];   // patch 368: DT-Intake removed from the funnel (no longer a buyer)
   const LEADBLOOM_LADDER = NYC_LADDER;   // the shared ladder: NYC, Kevin, everyone but Leadbloom
   const LB_ONLY_LADDER = [
-    { name: 'Legal Advocate Group', priority: 1, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 367
-    { name: 'DT-Intake',  priority: 1, group: 'intake',   cap: null, payout: 2500, enabled: DT_ON,       states: DT_STATES },
-    { name: 'NLD CPA',    priority: 2, group: 'nld',      cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318
-    { name: 'DT-Intake',  priority: 3, group: 'catchall', cap: null, payout: 2500, enabled: DT_ON,       states: 'ALL' },   // patch 358: CH-Intake off, DT is the catch-all
-  ];
+    { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
+    { name: 'Legal Advocate Group', priority: 2, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 368: LAG 2nd after NLD
+  ];   // patch 368: DT-Intake removed
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
   if (missing.length) {
@@ -7474,8 +7470,7 @@ app.post('/leads/mva-intake', async (req, res) => {
   const today = {}, lastAt = {};
   cnt.rows.forEach(r => { today[r.buyer] = r.n; lastAt[r.buyer] = r.last_at ? new Date(r.last_at).getTime() : 0; });
   const ladder = [
-      { name: 'Legal Advocate Group', enabled: LAG_LIVE() && LAG_STATES.includes(leadState) },   // patch 367: LAG takes its states on the LA-HI line too
-      { name: 'DT-Intake', enabled: DT_INTAKE_ON() },   // patch 359: CH-Intake off, DT catches all
+      { name: 'Legal Advocate Group', enabled: LAG_LIVE() && LAG_STATES.includes(leadState) },   // patch 367 / 368: LAG only (DT-Intake removed)
     ]
     .filter(x => x.enabled)
     .sort((a, c) => ((today[a.name] || 0) - (today[c.name] || 0)) || ((lastAt[a.name] || 0) - (lastAt[c.name] || 0)));
@@ -10758,7 +10753,7 @@ const BUYER_SHEETS = [
 // The sheet is shared with the service account (GOOGLE_SA_KEY) as editor.
 const LAG_SHEET_ID  = '1-Kx2As3kn4CZ6iXODQJ8NVwugteEM2U1fJlNjmkxU9I';
 const LAG_LEADS_TAB = 'Leads';
-const LAG_STATES    = ['GA', 'TX', 'SC'];
+const LAG_STATES    = ['AZ', 'NV', 'GA', 'TX', 'NM', 'SC', 'UT'];   // patch 368: LAG's full contracted 7 (NLD takes the shared states first; LAG is 2nd)
 const LAG_PAYOUT    = 2200;
 function LAG_LIVE() { return (process.env.LAG_LIVE || 'true') !== 'false'; }
 
