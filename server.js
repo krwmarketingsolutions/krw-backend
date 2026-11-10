@@ -10862,10 +10862,11 @@ async function sendToCag(b, leadState, leadId) {
   const bodyText = String(r.body || '');
   const low = bodyText.toLowerCase();
   const http2xx = r.status >= 200 && r.status < 300;
-  const looksRejected = /reject|declin|duplicat|\bdupe\b|invalid|\berror\b|\bfail|not\s*accept/.test(low);
-  const looksAccepted = /accept|success|received|"?status"?\s*[:=]\s*"?(1|accepted|success)/.test(low);
-  // Until CAG's real response is seen: accept on 2xx with no rejection signal.
-  const accepted = http2xx && !looksRejected && (looksAccepted || true);
+  // patch 370: CAG returns HTTP 200 for BOTH accept and reject, so the body is
+  // the only signal. Accept body is "Lead Accepted"; rejects are validation /
+  // dupe messages with no "accept" in them (e.g. 'state does not have a valid
+  // value "ZZ".'). Accept ONLY on an explicit accept word.
+  const accepted = http2xx && /accept/i.test(bodyText) && !/not\s+accept|un\s*accept/i.test(low);
   console.log(`[CAG] ${accepted ? 'OK' : 'X'} ${b.first_name} ${b.last_name} | ${params.state} | http ${r.status} | ${bodyText.slice(0, 160)}`);
   return { accepted, result: { status: accepted ? 'success' : 'rejected', http: r.status, message: bodyText.slice(0, 300) }, sent: params };
 }
