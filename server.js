@@ -754,6 +754,33 @@ app.get('/leads/export/:campaign', requireKey, async (req, res) => {
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
+// ── patch 374: batch TrustedForm lookup by phone (read-only) ─────────────────
+app.post('/leads/trustedform-lookup', requireKey, async (req, res) => {
+  try {
+    const phones = Array.isArray(req.body && req.body.phones) ? req.body.phones : [];
+    const p10s = [...new Set(phones.map(p => String(p || '').replace(/\D/g, '').slice(-10)).filter(p => p.length === 10))];
+    if (!p10s.length) return res.json({ ok: true, count: 0, matched: 0, withCert: 0, results: [] });
+    const r = await pool.query(
+      `SELECT right(regexp_replace(phone, '\\D', '', 'g'), 10) AS p10,
+              id, first_name, last_name, status, received_at,
+              COALESCE(NULLIF(raw->>'trustedform_cert_url', ''), NULLIF(raw->>'trusted_form_cert_url', '')) AS tf
+         FROM leads
+        WHERE right(regexp_replace(phone, '\\D', '', 'g'), 10) = ANY($1::text[])
+        ORDER BY (COALESCE(NULLIF(raw->>'trustedform_cert_url', ''), NULLIF(raw->>'trusted_form_cert_url', '')) IS NOT NULL) DESC, received_at DESC`,
+      [p10s]);
+    const map = {};
+    for (const row of r.rows) { if (!map[row.p10]) map[row.p10] = row; }
+    const results = p10s.map(p => ({
+      phone: p,
+      trustedform: (map[p] && map[p].tf) || '',
+      krw_id: (map[p] && map[p].id) || null,
+      status: (map[p] && map[p].status) || '',
+      matched: !!map[p],
+    }));
+    return res.json({ ok: true, count: results.length, matched: results.filter(x => x.matched).length, withCert: results.filter(x => x.trustedform).length, results });
+  } catch (e) { return res.status(500).json({ ok: false, error: e.message }); }
+});
+
 // ══════════════════════════════════════════════════════
 //  CALL / REVENUE ENDPOINTS (existing TrackDrive flow)
 // ══════════════════════════════════════════════════════
