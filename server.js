@@ -641,7 +641,7 @@ app.get('/leads/feed', requirePortalKey, async (req, res) => {
     const r = await pool.query(
       `SELECT id,received_at,campaign,first_name,last_name,email,phone,state,
               status,zapier_status,buyer_intake_id,buyer_error,buyer_status,notes,publisher_sub,billable,revenue,
-              raw->>'buyer_name' as buyer_name,
+              CASE WHEN raw->>'buyer_name' = 'MVA-003-LT' THEN 'Eilers Law' ELSE raw->>'buyer_name' END as buyer_name,   -- patch 380: 003 shows as Eilers Law
               COALESCE(NULLIF(raw->>'case_description',''), NULLIF(raw->>'summary',''), NULLIF(raw->>'description','')) as case_description,
               COALESCE(NULLIF(raw->>'injury',''), raw->>'physical_injury') as injury,
               raw->>'incident_date' as incident_date, raw->>'county' as county,
@@ -3708,23 +3708,27 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   if (!b.injury && !b.physical_injury) missing.push('injury (or physical_injury)');
   if (missing.length) return res.status(400).json({ ok: false, error: 'Missing required fields', missing });
 
-  const eligible = LADDER_FOR_PUB.filter(buyer => {   // patch 299
-    if (!buyer.enabled) return false;
-    if (buyer.states !== 'ALL' && !buyer.states.includes(leadState)) return false;
-    if (buyer.cap != null && (todayCount[buyer.name] || 0) >= buyer.cap) return false;
-    if (buyer.name === 'NLD CPA' && nldMissing.length) return false;
-    return true;
-  }).sort((a, b2) => {
-    if (a.priority !== b2.priority) return a.priority - b2.priority;
-    // same rung: the buyer with fewer accepted today goes first; on a tie,
-    // whoever did NOT get the most recent one - this is the 50/50.
-    // patch 317: Leadbloom balances its own sends, not the campaign's.
-    const tc = PUB === 'KRW-LEADBLOOM-MVA' ? lbCount : todayCount;
-    const la = PUB === 'KRW-LEADBLOOM-MVA' ? lbLast : lastAt;
-    const ca = tc[a.name] || 0, cb = tc[b2.name] || 0;
-    if (ca !== cb) return ca - cb;
-    return (la[a.name] || 0) - (la[b2.name] || 0);
-  });
+  // patch 379: NLD is the first-priority gate on its own states. On an NLD
+  // state NLD alone is offered; if NLD does not take it the lead HOLDS for
+  // Kyler's review (never auto-sells to the bottom tier). On every other state
+  // the bottom tier (CAG / LAG / Eilers) competes by price point - highest
+  // payout first, first to accept wins.
+  const isNldState = NLD_ONLY_STATES.includes(leadState) && !NLD_PAUSED;
+  let eligible;
+  if (isNldState) {
+    eligible = LADDER_FOR_PUB.filter(x =>
+      x.name === 'NLD CPA' && x.enabled &&
+      (x.cap == null || (todayCount[x.name] || 0) < x.cap) &&
+      !nldMissing.length);
+  } else {
+    eligible = LADDER_FOR_PUB.filter(buyer => {
+      if (!buyer.enabled) return false;
+      if (buyer.name === 'NLD CPA') return false;   // NLD only serves its own states
+      if (buyer.states !== 'ALL' && !buyer.states.includes(leadState)) return false;
+      if (buyer.cap != null && (todayCount[buyer.name] || 0) >= buyer.cap) return false;
+      return true;
+    }).sort((a, b2) => (Number(b2.payout) || 0) - (Number(a.payout) || 0));   // bid: highest payout first
+  }
   // patch 299: a buyer can appear on both its state rung and the nationwide
   // overflow rung. Keep only its first (best-priority) appearance so the
   // ladder never re-posts the same lead to a buyer that already declined it.
@@ -3755,7 +3759,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   }
 
   if (!eligible.length) {
-    const why = nldMissing.length && NLD_ONLY_STATES.includes(leadState) ? `Missing fields for buyer: ${nldMissing.join(', ')}` : `No eligible buyer for ${leadState} right now (daily caps reached)`;
+    const why = isNldState ? (nldMissing.length ? `NLD needs: ${nldMissing.join(', ')} - held for your review` : `NLD could not take it right now - held for your review`) : `No eligible buyer for ${leadState} right now`;   // patch 379
     const c0 = await pool.connect();
     try { await c0.query("UPDATE leads SET status='received', buyer_error=$1 WHERE id=$2", [why, leadId]); } finally { c0.release(); }
     console.log(`[MVA-NYC-SPLIT] ⏸ ${b.first_name} ${b.last_name} | ${leadState} | held: ${why}`);
@@ -3860,6 +3864,10 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
 
   // nld_attempted / nld_response kept for anything that reads them (Sep 15 fix)
   const nldTry = attempts.find(a => a.buyer === 'NLD CPA');
+  const heldForReview = !accepted && isNldState;   // patch 379: NLD declined on its state -> hold
+  const heldReason = heldForReview
+    ? ('NLD did not take it - held for your review' + (nldTry && nldTry.response && nldTry.response.message ? ': ' + nldTry.response.message : (nldMissing.length ? ': needs ' + nldMissing.join(', ') : '')))
+    : null;
   const c2 = await pool.connect();
   try {
     await c2.query(
@@ -3867,14 +3875,15 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
          status          = $1,
          buyer_status    = $2,
          buyer_response  = $3::jsonb,
+         buyer_error     = $6,
          billable        = false,
          revenue         = 0,
          raw             = COALESCE(raw,'{}'::jsonb) || $4::jsonb
        WHERE id = $5`,
-      [accepted ? 'forwarded' : 'buyer_rejected',
-       accepted ? 'Accepted' : 'Rejected',
+      [accepted ? 'forwarded' : (heldForReview ? 'received' : 'buyer_rejected'),
+       accepted ? 'Accepted' : (heldForReview ? 'Held' : 'Rejected'),
        JSON.stringify({ final: result, attempts, ladder: ladderPlan, nld_attempted: !!nldTry, nld_response: nldTry ? (nldTry.response || nldTry.error) : null }),
-       JSON.stringify({ buyer_name: buyerName, routing_attempts: attempts.map(a => a.buyer + (a.accepted ? ':accepted' : ':rejected')) }), leadId]
+       JSON.stringify({ buyer_name: accepted ? buyerName : (heldForReview ? null : buyerName), routing_attempts: attempts.map(a => a.buyer + (a.accepted ? ':accepted' : ':rejected')) }), leadId, heldReason]
     );
   } finally { c2.release(); }
 
@@ -3882,8 +3891,8 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
 
   return res.json({
     ok: accepted,
-    result: accepted ? 'success' : 'rejected',
-    message: result.message || (accepted ? 'Lead accepted' : 'Lead rejected'),
+    result: accepted ? 'success' : (isNldState ? 'held' : 'rejected'),
+    message: result.message || (accepted ? 'Lead accepted' : (isNldState ? 'Held for your review' : 'Lead rejected')),
     buyer: buyerName,
     attempts: attempts.map(a => ({ buyer: a.buyer, accepted: a.accepted })),
     krw_id: leadId
@@ -6753,7 +6762,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     };
     const mvaRows = await pool.query(
       `SELECT publisher_sub, status, billable, revenue, phone,
-              raw->>'buyer_name' as buyer_name
+              CASE WHEN raw->>'buyer_name' = 'MVA-003-LT' THEN 'Eilers Law' ELSE raw->>'buyer_name' END as buyer_name
        FROM leads
        WHERE campaign IN ('mva-funnel','mva-nyc-split','mva-leadbloom2')
          AND publisher_sub = ANY($1::text[]) AND COALESCE(raw->>'excluded','') <> 'true'
@@ -6773,8 +6782,8 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
     // Email Agency and LAR-MVA-CPA dropped as MVA buyers; CH-Intake (was
     // "MVA-Intake") and LT-Intake (new intake buyer, posting spec pending)
     // added (Kyler, Sep 16).
-    const mvaKnownBuyers = ['NLD CPA', 'MVA-003-LT', 'CH-Intake', 'DT-Intake'];   // patch 358: LT-Intake removed
-    const MVA_FUNNEL_HIDE = new Set(['LT-Intake']);   // patch 360: LT-Intake no longer a buyer - hide its node/edges even for historical leads
+    const mvaKnownBuyers = ['NLD CPA', 'CAG', 'Legal Advocate Group', 'Eilers Law'];   // patch 380: live ladder buyers (CH/DT retired, 003 -> Eilers Law)
+    const MVA_FUNNEL_HIDE = new Set(['LT-Intake', 'CH-Intake', 'DT-Intake', 'MVA-003-LT']);   // patch 380: hide retired buyers (003 already remapped to Eilers Law above)
     for (const b of mvaKnownBuyers) mva.buyers[b] = { received: 0, accepted: 0, revenue: 0 };
     // De-dupe by phone per publisher for display purposes only (Kyler, Sep 1)
     // - a real duplicate-dial issue was found inflating raw counts. This
@@ -6955,9 +6964,9 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         // patch 308: MVA-003-LT removed - 003 is off for every publisher (patch 305)
         // patch 350: DT-Intake replaces CH/LT as the intake buyer for everyone
         // patch 351: CH-Intake is the catch-all again
-        'KRW-KANTHONY-RS':  ['DT-Intake', 'NLD CPA'],   // patch 358: CH-Intake off
-        [LEADBLOOM_PUB_ID]: ['DT-Intake', 'NLD CPA'],   // patch 358
-        'KRW-NYC-MVA':      ['DT-Intake', 'NLD CPA'],   // patch 358
+        'KRW-KANTHONY-RS':  ['NLD CPA', 'CAG', 'Legal Advocate Group', 'Eilers Law'],   // patch 380
+        [LEADBLOOM_PUB_ID]: ['NLD CPA', 'CAG', 'Legal Advocate Group', 'Eilers Law'],   // patch 380
+        'KRW-NYC-MVA':      ['NLD CPA', 'CAG', 'Legal Advocate Group', 'Eilers Law'],   // patch 380
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Signed (TD)'], // Fields Law paused - this line now routes via Trackdrive
@@ -9388,6 +9397,14 @@ async function janSend(buyer, b, st, leadId, pub) {
     const r = await sendToDtIntake(b, st, leadId, pub);
     return { result: r.result, accepted: r.accepted };
   }
+  if (buyer === 'CAG') {   // patch 379: bottom-tier bid on resend
+    try { const r = await sendToCag(b, st, leadId); return { result: r.result, accepted: r.accepted }; }
+    catch (e) { return { result: { status: 'error', message: 'CAG post failed: ' + e.message }, accepted: false }; }
+  }
+  if (buyer === 'Legal Advocate Group') {   // patch 379: bottom-tier bid on resend
+    try { const out = await lagAppendRow(b, st, leadId); return { result: { status: 'success', message: 'Delivered to LAG sheet', range: out && out.updates && out.updates.updatedRange }, accepted: true }; }
+    catch (e) { return { result: { status: 'error', message: 'LAG sheet append failed: ' + e.message }, accepted: false }; }
+  }
   return { result: { error: 'unknown buyer' }, accepted: false };
 }
 
@@ -9532,14 +9549,15 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
 
     // patch 350: DT-Intake replaces CH/LT. Intake states + AZ go to DT first
     // (Leadbloom: NLD keeps OK/NE first); NLD on its other states; DT catches the rest.
+    // patch 379: push-through = NLD first on its states, then the bottom tier
+    // (CAG / LAG / Eilers) by price point, highest payout first. DT/CH retired.
     const rungs = [];
-    const dtOn = DT_INTAKE_ON();
-    const wantNld = !NLD_PAUSED && NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10;   // patch 318
-    // patch 351: DT on its contracted states, NLD on its states, CH catches the rest
-    if (dtOn && DT_INTAKE_STATES().includes(st)) rungs.push('DT-Intake');
-    if (wantNld) rungs.push('NLD CPA');
-    if (dtOn && !rungs.includes('DT-Intake')) rungs.push('DT-Intake');   // patch 359: DT catches the rest (CH off)
-    if (typeof MVA003_LIVE === 'function' && MVA003_LIVE()) rungs.push('MVA-003-LT');   // patch 377: Eilers is the nationwide catch-all on resend too (bottom of the plan)
+    if (!NLD_PAUSED && NLD_ONLY_STATES_GLOBAL.includes(st) && nldToday < 10) rungs.push('NLD CPA');
+    const bid = [];
+    if (typeof CAG_LIVE === 'function' && CAG_LIVE() && CAG_STATES.includes(st)) bid.push({ name: 'CAG', payout: CAG_PAYOUT(st) });
+    if (typeof LAG_LIVE === 'function' && LAG_LIVE() && LAG_STATES.includes(st)) bid.push({ name: 'Legal Advocate Group', payout: LAG_PAYOUT });
+    if (typeof MVA003_LIVE === 'function' && MVA003_LIVE()) bid.push({ name: 'MVA-003-LT', payout: 1800 });
+    bid.sort((a, b) => b.payout - a.payout).forEach(x => rungs.push(x.name));
     let plan = rungs.filter((x, i) => rungs.indexOf(x) === i);   // dedupe, order kept
     if (Array.isArray(req.body && req.body.only)) plan = plan.filter(x => req.body.only.includes(x));   // patch 333: restrict to named buyers
     if (!plan.length) return res.status(409).json({ ok: false, error: 'No eligible buyer right now (caps reached)', state: st });
