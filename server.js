@@ -9539,6 +9539,7 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     if (dtOn && DT_INTAKE_STATES().includes(st)) rungs.push('DT-Intake');
     if (wantNld) rungs.push('NLD CPA');
     if (dtOn && !rungs.includes('DT-Intake')) rungs.push('DT-Intake');   // patch 359: DT catches the rest (CH off)
+    if (typeof MVA003_LIVE === 'function' && MVA003_LIVE()) rungs.push('MVA-003-LT');   // patch 377: Eilers is the nationwide catch-all on resend too (bottom of the plan)
     let plan = rungs.filter((x, i) => rungs.indexOf(x) === i);   // dedupe, order kept
     if (Array.isArray(req.body && req.body.only)) plan = plan.filter(x => req.body.only.includes(x));   // patch 333: restrict to named buyers
     if (!plan.length) return res.status(409).json({ ok: false, error: 'No eligible buyer right now (caps reached)', state: st });
