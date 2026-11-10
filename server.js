@@ -10820,7 +10820,7 @@ async function lagAppendRow(b, leadState, leadId) {
 // conservative until CAG's exact accept/reject format is confirmed by a test.
 const CAG_POST_URL = process.env.CAG_POST_URL || 'https://sys.cagadv.com/leadPost.php?cid=50&fid=3234';
 const CAG_STATES   = ['NY','NJ','PA','AZ','IA','MT','NE','NV','ND','OK','UT','WY','TX'];
-function CAG_LIVE()  { return (process.env.CAG_LIVE || 'false') !== 'false'; }   // default OFF until verified
+function CAG_LIVE()  { return (process.env.CAG_LIVE || 'true') !== 'false'; }   // patch 371: LIVE (set CAG_LIVE=false on Railway to pause)
 function CAG_PAYOUT(st) {
   st = String(st || '').toUpperCase().trim();
   if (st === 'NY' || st === 'NJ' || st === 'PA') return 2500;
