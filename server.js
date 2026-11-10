@@ -3563,12 +3563,14 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const NYC_LADDER = [
     { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
     { name: 'Legal Advocate Group', priority: 2, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 368: LAG 2nd after NLD - sole buyer in GA/TX/SC, catches NLD's overflow in the shared states
+    { name: 'CAG',                  priority: 3, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 369: CAG 3rd - sole buyer of NY/NJ/PA, catches NLD/LAG overflow in shared states
     { name: 'MVA-003-LT',           priority: 4, group: '003', cap: 5,    payout: 1700, enabled: false,       states: 'ALL' },   // patch 305: 003 off
   ];   // patch 368: DT-Intake removed from the funnel (no longer a buyer)
   const LEADBLOOM_LADDER = NYC_LADDER;   // the shared ladder: NYC, Kevin, everyone but Leadbloom
   const LB_ONLY_LADDER = [
     { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
     { name: 'Legal Advocate Group', priority: 2, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 368: LAG 2nd after NLD
+    { name: 'CAG',                  priority: 3, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 369
   ];   // patch 368: DT-Intake removed
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
@@ -3801,6 +3803,10 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
       } catch (e) {
         return { result: { status: 'error', message: 'LAG sheet append failed: ' + e.message }, accepted: false };
       }
+    },
+    'CAG': async () => {   // patch 369
+      try { const r = await sendToCag(b, leadState, leadId); return { result: r.result, accepted: r.accepted }; }
+      catch (e) { return { result: { status: 'error', message: 'CAG post failed: ' + e.message }, accepted: false }; }
     },
   };
 
@@ -7471,6 +7477,7 @@ app.post('/leads/mva-intake', async (req, res) => {
   cnt.rows.forEach(r => { today[r.buyer] = r.n; lastAt[r.buyer] = r.last_at ? new Date(r.last_at).getTime() : 0; });
   const ladder = [
       { name: 'Legal Advocate Group', enabled: LAG_LIVE() && LAG_STATES.includes(leadState) },   // patch 367 / 368: LAG only (DT-Intake removed)
+      { name: 'CAG', enabled: CAG_LIVE() && CAG_STATES.includes(leadState) },   // patch 369
     ]
     .filter(x => x.enabled)
     .sort((a, c) => ((today[a.name] || 0) - (today[c.name] || 0)) || ((lastAt[a.name] || 0) - (lastAt[c.name] || 0)));
@@ -7487,6 +7494,7 @@ app.post('/leads/mva-intake', async (req, res) => {
     },
     'LT-Intake': async () => { const r = await sendToLtIntake(b, leadState, leadId); return { result: r.result, accepted: r.accepted }; },
     'DT-Intake': async () => { const r = await sendToDtIntake(b, leadState, leadId, MVA_INTAKE_PUB); return { result: r.result, accepted: r.accepted }; },   // patch 350
+    'CAG': async () => { try { const r = await sendToCag(b, leadState, leadId); return { result: r.result, accepted: r.accepted }; } catch (e) { return { result: { status: 'error', message: 'CAG post failed: ' + e.message }, accepted: false }; } },   // patch 369
     'Legal Advocate Group': async () => {   // patch 367
       if (!LAG_LIVE()) return { result: { status: 'paused', message: 'LAG delivery paused' }, accepted: false };
       try {
@@ -10800,9 +10808,103 @@ async function lagAppendRow(b, leadState, leadId) {
     '/values/' + encodeURIComponent("'" + LAG_LEADS_TAB + "'!A:P") +
     ':append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS';
   const r = await bsHttp('POST', url, JSON.stringify({ values: row }), { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' });
+
   if (r.status >= 300) throw new Error('append ' + r.status + ': ' + String(r.body).slice(0, 160));
   return JSON.parse(r.body || '{}');
 }
+
+// ── patch 369: CAG Advertising (Dylan Rossi) MVA buyer - lead posting ─────────
+// Posts KRW MVA leads to CAG's endpoint. Billing (which leads CAG retained) is
+// set up after the Nov call; CAG_PAYOUT holds the agreed per-state CPR price for
+// then. Staged off (CAG_LIVE=true on Railway to route live). Response parse is
+// conservative until CAG's exact accept/reject format is confirmed by a test.
+const CAG_POST_URL = process.env.CAG_POST_URL || 'https://sys.cagadv.com/leadPost.php?cid=50&fid=3234';
+const CAG_STATES   = ['NY','NJ','PA','AZ','IA','MT','NE','NV','ND','OK','UT','WY','TX'];
+function CAG_LIVE()  { return (process.env.CAG_LIVE || 'false') !== 'false'; }   // default OFF until verified
+function CAG_PAYOUT(st) {
+  st = String(st || '').toUpperCase().trim();
+  if (st === 'NY' || st === 'NJ' || st === 'PA') return 2500;
+  if (st === 'TX') return 2250;
+  if (CAG_STATES.includes(st)) return 1800;
+  return 0;
+}
+
+// POST the lead to CAG as application/x-www-form-urlencoded (cid/fid stay in URL).
+function cagPostForm(params) {
+  return new Promise((resolve, reject) => {
+    const https = require('https');
+    const url = new URL(CAG_POST_URL);
+    const body = new URLSearchParams(params).toString();
+    const options = { hostname: url.hostname, path: url.pathname + (url.search || ''), method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) } };
+    const rq = https.request(options, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => resolve({ status: r.statusCode, body: d })); });
+    rq.on('error', reject); rq.write(body); rq.end();
+  });
+}
+
+async function sendToCag(b, leadState, leadId) {
+  const digits = String(b.phone || '').replace(/\D/g, '');
+  const params = {
+    fname: b.first_name || '', lname: b.last_name || '',
+    phone: digits, mobile: digits,
+    state: String(leadState || '').toUpperCase().trim(),
+    email: b.email || '',
+    IPAddress: b.ip_address || b.ipaddress || b.IPAddress || '',
+    AutoAccident: 'Yes',
+    address1: b.address || b.address1 || '',
+    city: b.city || '',
+    zip: b.zip_code || b.zip || '',
+    Comments: b.summary || b.injury || b.physical_injury || '',
+    VendorLeadId: 'KRW-' + (leadId == null ? 'TEST' : leadId),
+    SubId: b.publisher_sub || '',
+  };
+  const r = await cagPostForm(params);
+  const bodyText = String(r.body || '');
+  const low = bodyText.toLowerCase();
+  const http2xx = r.status >= 200 && r.status < 300;
+  const looksRejected = /reject|declin|duplicat|\bdupe\b|invalid|\berror\b|\bfail|not\s*accept/.test(low);
+  const looksAccepted = /accept|success|received|"?status"?\s*[:=]\s*"?(1|accepted|success)/.test(low);
+  // Until CAG's real response is seen: accept on 2xx with no rejection signal.
+  const accepted = http2xx && !looksRejected && (looksAccepted || true);
+  console.log(`[CAG] ${accepted ? 'OK' : 'X'} ${b.first_name} ${b.last_name} | ${params.state} | http ${r.status} | ${bodyText.slice(0, 160)}`);
+  return { accepted, result: { status: accepted ? 'success' : 'rejected', http: r.status, message: bodyText.slice(0, 300) }, sent: params };
+}
+
+// Manual / test: { test:true, phone?, state? } posts a clearly-marked fake lead
+// so CAG's exact response can be seen; { krw_id } re-sends a stored lead. Works
+// even when CAG_LIVE is off. Never touches a billable lead.
+app.post('/leads/forward-to-cag', async (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.api_key || '';
+  const validKeys = [process.env.API_KEY || '64tgzb5ostadx1azjio9crdlduw4vf29', process.env.LEAD_API_KEY || 'krwleads2026secure'];
+  const bearerOk = typeof callerRole === 'function' && callerRole(req) === 'admin';
+  if (!validKeys.includes(key) && !bearerOk) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  const { krw_id, test, phone, state } = req.body || {};
+  try {
+    if (test === true) {
+      const b = { first_name: 'Test', last_name: 'KRW-TEST', phone: String(phone || '5550001234').replace(/\D/g, ''),
+        email: 'test@krwmarketingsolutions.com', ip_address: '8.8.8.8', address: '123 Test St', city: 'Phoenix', zip_code: '85001',
+        summary: 'TEST LEAD - KRW integration check, please disregard', publisher_sub: 'KRW-TEST' };
+      const r = await sendToCag(b, (state || 'AZ'), null);
+      return res.json({ ok: r.accepted, test: true, sent: r.sent, response: r.result });
+    }
+    if (!krw_id) return res.status(400).json({ ok: false, error: 'krw_id required (or { test:true, phone, state })' });
+    const q = await pool.query('SELECT * FROM leads WHERE id=$1', [krw_id]);
+    if (!q.rows[0]) return res.status(404).json({ ok: false, error: 'Lead not found' });
+    const row = q.rows[0];
+    if (row.billable === true) return res.status(409).json({ ok: false, error: 'Lead is billable - refusing to touch it' });
+    const b = Object.assign({}, row.raw || {}); b.phone = b.phone || row.phone; b.first_name = b.first_name || row.first_name; b.last_name = b.last_name || row.last_name; b.email = b.email || row.email;
+    const st = (row.state || b.state || '').toUpperCase();
+    const r = await sendToCag(b, st, row.id);
+    if (r.accepted) {
+      await pool.query(`UPDATE leads SET status='forwarded', buyer_status='Accepted', buyer_error=NULL,
+          raw = COALESCE(raw,'{}'::jsonb) || $1::jsonb WHERE id=$2`,
+        [JSON.stringify({ buyer_name: 'CAG', manual_forward: true, manual_forward_at: new Date().toISOString() }), row.id]);
+    }
+    return res.json({ ok: r.accepted, krw_id: row.id, sent: r.sent, response: r.result });
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: e.message });
+  }
+});
 
 
 // ── Google auth (service account JWT -> access token), no dependencies ──
