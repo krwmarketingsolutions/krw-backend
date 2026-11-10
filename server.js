@@ -762,7 +762,8 @@ app.post('/leads/trustedform-lookup', requireKey, async (req, res) => {
     if (!p10s.length) return res.json({ ok: true, count: 0, matched: 0, withCert: 0, results: [] });
     const r = await pool.query(
       `SELECT right(regexp_replace(phone, '\\D', '', 'g'), 10) AS p10,
-              id, first_name, last_name, status, received_at,
+              id, first_name, last_name, status, received_at, email,
+              COALESCE(NULLIF(ip_address, ''), NULLIF(raw->>'ip_address', '')) AS ip,   -- patch 375
               COALESCE(NULLIF(raw->>'trustedform_cert_url', ''), NULLIF(raw->>'trusted_form_cert_url', '')) AS tf
          FROM leads
         WHERE right(regexp_replace(phone, '\\D', '', 'g'), 10) = ANY($1::text[])
@@ -773,6 +774,8 @@ app.post('/leads/trustedform-lookup', requireKey, async (req, res) => {
     const results = p10s.map(p => ({
       phone: p,
       trustedform: (map[p] && map[p].tf) || '',
+      email: (map[p] && map[p].email) || '',
+      ip: (map[p] && map[p].ip) || '',
       krw_id: (map[p] && map[p].id) || null,
       status: (map[p] && map[p].status) || '',
       matched: !!map[p],
