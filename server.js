@@ -10819,7 +10819,8 @@ async function lagAppendRow(b, leadState, leadId) {
 // then. Staged off (CAG_LIVE=true on Railway to route live). Response parse is
 // conservative until CAG's exact accept/reject format is confirmed by a test.
 const CAG_POST_URL = process.env.CAG_POST_URL || 'https://sys.cagadv.com/leadPost.php?cid=50&fid=3234';
-const CAG_STATES   = ['NY','NJ','PA','AZ','IA','MT','NE','NV','ND','OK','UT','WY','TX'];
+const CAG_STATES   = ['NY','NJ','PA','AZ','IA','MT','NE','NV','ND','OK','UT','WY','TX',
+                      'VA','NC','IL','NM','WA','GA','SC'];   // patch 372: + Dylan's 7 NEW states (Nov 10), all $1,800 CPR
 function CAG_LIVE()  { return (process.env.CAG_LIVE || 'true') !== 'false'; }   // patch 371: LIVE (set CAG_LIVE=false on Railway to pause)
 function CAG_PAYOUT(st) {
   st = String(st || '').toUpperCase().trim();
