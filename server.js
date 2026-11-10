@@ -3594,14 +3594,14 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
     { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 373: LAG now 3rd (CAG moved to 2nd behind NLD)
     { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 373: CAG 2nd behind NLD - sole buyer of NY/NJ/PA, first after NLD in shared states
-    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: 5,    payout: 1800, enabled: MVA003_LIVE(), states: 'ALL' },   // patch 376: Eilers reactivated nationwide @ $1800, bottom rung (higher-payout buyers go first)
+    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: null, payout: 1800, enabled: MVA003_LIVE(), states: 'ALL' },   // patch 376/378: Eilers nationwide @ $1800, bottom rung, uncapped (higher-payout buyers go first)
   ];   // patch 368: DT-Intake removed from the funnel (no longer a buyer)
   const LEADBLOOM_LADDER = NYC_LADDER;   // the shared ladder: NYC, Kevin, everyone but Leadbloom
   const LB_ONLY_LADDER = [
     { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
     { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 373: LAG now 3rd
     { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 373: CAG 2nd behind NLD
-    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: 5,    payout: 1800, enabled: MVA003_LIVE(), states: 'ALL' },   // patch 376: Eilers catch-all for Leadbloom too
+    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: null, payout: 1800, enabled: MVA003_LIVE(), states: 'ALL' },   // patch 376/378: Eilers catch-all for Leadbloom too, uncapped
   ];   // patch 368: DT-Intake removed
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
