@@ -3594,13 +3594,14 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
     { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 373: LAG now 3rd (CAG moved to 2nd behind NLD)
     { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 373: CAG 2nd behind NLD - sole buyer of NY/NJ/PA, first after NLD in shared states
-    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: 5,    payout: 1700, enabled: false,       states: 'ALL' },   // patch 305: 003 off
+    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: 5,    payout: 1800, enabled: MVA003_LIVE(), states: 'ALL' },   // patch 376: Eilers reactivated nationwide @ $1800, bottom rung (higher-payout buyers go first)
   ];   // patch 368: DT-Intake removed from the funnel (no longer a buyer)
   const LEADBLOOM_LADDER = NYC_LADDER;   // the shared ladder: NYC, Kevin, everyone but Leadbloom
   const LB_ONLY_LADDER = [
     { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
     { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 373: LAG now 3rd
     { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 373: CAG 2nd behind NLD
+    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: 5,    payout: 1800, enabled: MVA003_LIVE(), states: 'ALL' },   // patch 376: Eilers catch-all for Leadbloom too
   ];   // patch 368: DT-Intake removed
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
@@ -10778,7 +10779,7 @@ const BUYER_SHEETS = [
   // patch 350: DT-Intake's auto-updated pipeline sheet (lead_id / status / name / phone / received_date / retainer_date / reason / updated_at).
   // Statuses: New Lead, Contacted, Signed (billable), Unresponsive, Not Qualified, Duplicate. Matched by phone.
   { key: 'dt-intake', label: 'DT-Intake',  buyer: 'DT-Intake',  vertical: 'MVA', sheet: '1_pvfSFxsvK0saUvwQFmG0YHG7f4ySs0TysywLqhzRBQ', tab: null, amount: 2500, enabled: true },
-  { key: 'mva-003',   label: 'MVA-003-LT', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1700, enabled: true },
+  { key: 'mva-003',   label: 'MVA-003-LT', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1800, enabled: true },   // patch 376: Eilers payout 1700 -> 1800
   { key: 'lag-mva',   label: 'Legal Advocate Group', buyer: 'Legal Advocate Group', vertical: 'MVA', sheet: '1-Kx2As3kn4CZ6iXODQJ8NVwugteEM2U1fJlNjmkxU9I', tab: 'Dispositions', amount: 2200, enabled: true },   // patch 367: read LAG dispositions back from the Dispositions tab
 ];
 
@@ -10852,6 +10853,7 @@ const CAG_POST_URL = process.env.CAG_POST_URL || 'https://sys.cagadv.com/leadPos
 const CAG_STATES   = ['NY','NJ','PA','AZ','IA','MT','NE','NV','ND','OK','UT','WY','TX',
                       'VA','NC','IL','NM','WA','GA','SC'];   // patch 372: + Dylan's 7 NEW states (Nov 10), all $1,800 CPR
 function CAG_LIVE()  { return (process.env.CAG_LIVE || 'true') !== 'false'; }   // patch 371: LIVE (set CAG_LIVE=false on Railway to pause)
+function MVA003_LIVE() { return (process.env.MVA003_LIVE || 'true') !== 'false'; }   // patch 376: Eilers (MVA-003-LT) live (set MVA003_LIVE=false on Railway to pause)
 function CAG_PAYOUT(st) {
   st = String(st || '').toUpperCase().trim();
   if (st === 'NY' || st === 'NJ' || st === 'PA') return 2500;
