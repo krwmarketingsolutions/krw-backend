@@ -1,44 +1,41 @@
 #!/usr/bin/env python3
 r"""
-patch-372.py  --  CAG moves to priority 2 (behind NLD), LAG to 3
+patch-372.py  --  CAG Advertising: add the seven NEW states from Dylan's Nov 10 list
 
-Kyler (Nov 10): make CAG #2 behind NLD for incoming leads. The ladder dispatch
-sorts by priority number, so this swaps CAG (was 3) and LAG (was 2):
-  NLD CPA 1  ->  CAG 2  ->  LAG 3  ->  MVA-003 4 (off)
-In the states CAG and LAG share (AZ, NV, UT, TX) CAG now gets first crack after
-NLD and LAG catches what CAG leaves. Exclusive states are unchanged. Applied to
-both mva-nyc-split ladders.
+Dylan (Nov 10): "unlimited budget available for MVA campaigns in the following
+states starting this week", with a per-state CPR table. The 13 states already
+in the node are unchanged and keep their prices. Seven states are added, all at
+$1,800 CPR: VA, NC, IL, NM, WA, GA, SC.
 
-  krw-backend/server.js (four edits).
+Full CAG list after this patch (20):
+  $2,500  NY, NJ, PA
+  $2,250  TX
+  $1,800  AZ, IA, MT, NE, NV, ND, OK, UT, WY, VA, NC, IL, NM, WA, GA, SC
+
+CAG_PAYOUT() already prices NY/NJ/PA at 2500, TX at 2250 and every other
+CAG state at 1800, so only CAG_STATES changes. Priority is untouched: NLD
+first, LAG second, CAG third, so in the states CAG shares with NLD and LAG
+(AZ, NV, NM, UT, GA, TX, SC, IA, MT, NE, ND, OK, WY) CAG still catches
+overflow and rejects. CAG becomes the SOLE live buyer in VA, NC, IL and WA
+(nobody bought those before), plus NY, NJ, PA as before.
 
 Backup: server.js.pre-372.bak    Safe to re-run: refuses twice.
 """
 import os, shutil, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 def find_root():
-    for c in (HERE, os.path.dirname(HERE), os.getcwd(), os.path.dirname(os.getcwd())):
-        if os.path.isdir(os.path.join(c, "krw-backend")):
-            return c
-    return None
-ROOT = find_root() or sys.exit("run from ~/krw (needs krw-backend/)")
+    for c in (HERE, os.path.dirname(HERE), os.getcwd(), os.path.dirname(os.getcwd()), os.path.expanduser("~/krw")):
+        if os.path.isdir(os.path.join(c, "krw-backend")): return c
+ROOT = find_root() or sys.exit("STOPPED: could not find krw-backend - run from ~/krw")
 FILE = os.path.join(ROOT, "krw-backend", "server.js")
 src = open(FILE, encoding="utf-8").read()
-if "patch 372" in src:
-    sys.exit("patch 372 already applied - nothing to do")
+if "patch 372" in src: sys.exit("patch 372 already applied - nothing to do")
 
-edits = [
-("    { name: 'Legal Advocate Group', priority: 2, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 368: LAG 2nd after NLD - sole buyer in GA/TX/SC, catches NLD's overflow in the shared states\n",
- "    { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 372: LAG now 3rd (CAG moved to 2nd behind NLD)\n"),
-("    { name: 'CAG',                  priority: 3, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 369: CAG 3rd - sole buyer of NY/NJ/PA, catches NLD/LAG overflow in shared states\n",
- "    { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 372: CAG 2nd behind NLD - sole buyer of NY/NJ/PA, first after NLD in shared states\n"),
-("    { name: 'Legal Advocate Group', priority: 2, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 368: LAG 2nd after NLD\n",
- "    { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 372: LAG now 3rd\n"),
-("    { name: 'CAG',                  priority: 3, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 369\n",
- "    { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 372: CAG 2nd behind NLD\n"),
-]
-for i,(a,r) in enumerate(edits,1):
-    if src.count(a)!=1: sys.exit("ABORT: edit %d anchor found %d times, expected 1." % (i, src.count(a)))
-for a,r in edits: src=src.replace(a,r,1)
-shutil.copyfile(FILE, FILE+".pre-372.bak")
-open(FILE,"w",encoding="utf-8").write(src)
-print("patch 372 applied to", FILE)
+OLD = "const CAG_STATES   = ['NY','NJ','PA','AZ','IA','MT','NE','NV','ND','OK','UT','WY','TX'];"
+NEW = ("const CAG_STATES   = ['NY','NJ','PA','AZ','IA','MT','NE','NV','ND','OK','UT','WY','TX',\n"
+       "                      'VA','NC','IL','NM','WA','GA','SC'];   // patch 372: + Dylan's 7 NEW states (Nov 10), all $1,800 CPR")
+if src.count(OLD) != 1: sys.exit("STOPPED - CAG_STATES anchor found %d time(s), expected 1. Nothing changed." % src.count(OLD))
+
+shutil.copyfile(FILE, FILE + ".pre-372.bak")
+open(FILE, "w", encoding="utf-8").write(src.replace(OLD, NEW, 1))
+print("Patched OK: %s" % FILE)

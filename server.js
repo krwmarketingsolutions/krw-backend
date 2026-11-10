@@ -3562,15 +3562,15 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   const CH_FOR_LB    = (process.env.LB_CH_FALLBACK || 'true') !== 'false';
   const NYC_LADDER = [
     { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
-    { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 372: LAG now 3rd (CAG moved to 2nd behind NLD)
-    { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 372: CAG 2nd behind NLD - sole buyer of NY/NJ/PA, first after NLD in shared states
+    { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 373: LAG now 3rd (CAG moved to 2nd behind NLD)
+    { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 373: CAG 2nd behind NLD - sole buyer of NY/NJ/PA, first after NLD in shared states
     { name: 'MVA-003-LT',           priority: 4, group: '003', cap: 5,    payout: 1700, enabled: false,       states: 'ALL' },   // patch 305: 003 off
   ];   // patch 368: DT-Intake removed from the funnel (no longer a buyer)
   const LEADBLOOM_LADDER = NYC_LADDER;   // the shared ladder: NYC, Kevin, everyone but Leadbloom
   const LB_ONLY_LADDER = [
     { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
-    { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 372: LAG now 3rd
-    { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 372: CAG 2nd behind NLD
+    { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 373: LAG now 3rd
+    { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 373: CAG 2nd behind NLD
   ];   // patch 368: DT-Intake removed
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
@@ -10819,7 +10819,8 @@ async function lagAppendRow(b, leadState, leadId) {
 // then. Staged off (CAG_LIVE=true on Railway to route live). Response parse is
 // conservative until CAG's exact accept/reject format is confirmed by a test.
 const CAG_POST_URL = process.env.CAG_POST_URL || 'https://sys.cagadv.com/leadPost.php?cid=50&fid=3234';
-const CAG_STATES   = ['NY','NJ','PA','AZ','IA','MT','NE','NV','ND','OK','UT','WY','TX'];
+const CAG_STATES   = ['NY','NJ','PA','AZ','IA','MT','NE','NV','ND','OK','UT','WY','TX',
+                      'VA','NC','IL','NM','WA','GA','SC'];   // patch 372: + Dylan's 7 NEW states (Nov 10), all $1,800 CPR
 function CAG_LIVE()  { return (process.env.CAG_LIVE || 'true') !== 'false'; }   // patch 371: LIVE (set CAG_LIVE=false on Railway to pause)
 function CAG_PAYOUT(st) {
   st = String(st || '').toUpperCase().trim();
