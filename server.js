@@ -584,7 +584,7 @@ function portalGuard(req, res) {
 }
 function portalStrip(req, rows) {
   if (req.authRole !== 'portal') return rows;
-  const drop = ["buyer_name", "buyer_status", "buyer_error", "buyer_intake_id", "revenue", "billable", "notes", "zapier_status"];
+  const drop = ["buyer_name", "buyer_status", "buyer_error", "buyer_intake_id", "revenue", "billable", "notes", "zapier_status", "prev_buyer", "prev_note", "resent_at", "disp_source"];   // patch 387
   return rows.map(r => { const o = Object.assign({}, r); drop.forEach(k => { delete o[k]; }); return o; });
 }
 
@@ -649,7 +649,8 @@ app.get('/leads/feed', requirePortalKey, async (req, res) => {
               raw->'buyer_disposition'->>'note'   as disp_note,
               raw->'buyer_disposition'->>'synced_at'    as disp_changed_at,   -- patch 385
               raw->'buyer_disposition'->>'confirmed_at' as disp_checked_at,
-              raw->'buyer_disposition'->>'source'       as disp_source
+              raw->'buyer_disposition'->>'source'       as disp_source,
+              raw->>'previous_buyer' as prev_buyer, raw->'previous_disposition'->>'note' as prev_note, raw->>'manual_forward_at' as resent_at   -- patch 387
        FROM leads ${wc} ORDER BY received_at DESC LIMIT $${i}`, params);
     res.json({ ok:true, count:r.rows.length, leads:portalStrip(req, r.rows) });   // patch 288
   } catch(err) { res.status(500).json({ error:err.message }); }
@@ -9515,7 +9516,7 @@ async function janitorRun() {
         AND COALESCE(raw->'buyer_disposition'->>'awaiting_approval','')<>'true'
         AND NOT EXISTS (SELECT 1 FROM billable_queue q WHERE q.lead_id = leads.id AND q.status='pending')
         AND COALESCE(buyer_status,'') NOT IN ('Signed','Retained','Rejected','Returned','Test')
-        AND received_at < NOW() - make_interval(days => ${JAN_AGEOUT_DAYS})
+        AND GREATEST(received_at, COALESCE(NULLIF(raw->>'manual_forward_at','')::timestamptz, received_at)) < NOW() - make_interval(days => ${JAN_AGEOUT_DAYS})   -- patch 387: a resend restarts the clock
       RETURNING id`);
     if (aged.rows.length) lines.push(`auto write-off: ${aged.rows.length} lead(s) over ${JAN_AGEOUT_DAYS} days with no outcome -> Rejected`);
   } catch (e) { lines.push('auto write-off error: ' + e.message); }
@@ -10969,9 +10970,14 @@ app.post('/leads/forward-to-cag', async (req, res) => {
     const st = (row.state || b.state || '').toUpperCase();
     const r = await sendToCag(b, st, row.id);
     if (r.accepted) {
-      await pool.query(`UPDATE leads SET status='forwarded', buyer_status='Accepted', buyer_error=NULL,
-          raw = COALESCE(raw,'{}'::jsonb) || $1::jsonb WHERE id=$2`,
-        [JSON.stringify({ buyer_name: 'CAG', manual_forward: true, manual_forward_at: new Date().toISOString() }), row.id]);
+      // patch 387: the lead starts over with CAG - the old buyer's disposition
+      // moves to previous_disposition, and CAG's accept is kept on the record.
+      const nowIso = new Date().toISOString();
+      await pool.query(`UPDATE leads SET status='forwarded', buyer_status='Accepted', buyer_error=NULL, notes=NULL,
+          buyer_response = COALESCE(buyer_response,'{}'::jsonb) || $3::jsonb,
+          raw = (COALESCE(raw,'{}'::jsonb) - 'buyer_disposition' - 'aged_out') || $1::jsonb WHERE id=$2`,
+        [JSON.stringify(Object.assign(agedResendReset(row, 'CAG'), { buyer_name: 'CAG', manual_forward: true, manual_forward_at: nowIso })), row.id,
+         JSON.stringify({ manual_forward: Object.assign({ buyer: 'CAG', at: nowIso }, r.result || {}) })]);
     }
     return res.json({ ok: r.accepted, krw_id: row.id, sent: r.sent, response: r.result });
   } catch (e) {
@@ -11240,6 +11246,181 @@ setInterval(() => {
 })();
 
 // ── admin / Home box ──
+// ── patch 386: buyer disposition postbacks ───────────────────────────────────
+// Buyers with their own system (CAG first) push lead updates here instead of
+// keeping a sheet. Same rules as the sheet scanner (bsScanOne): only that
+// buyer's leads, signings go to the approval queue, approved billables are
+// never downgraded. Every call is logged.
+const BUYER_POSTBACKS = {
+  cag: { key: 'cag', label: 'CAG', buyer: 'CAG', vertical: 'MVA', amount: (st) => CAG_PAYOUT(st) },
+};
+function bpKey(buyerKey) {
+  const env = process.env[String(buyerKey).toUpperCase() + '_POSTBACK_KEY'];
+  if (env) return env;
+  return _crypto288.createHmac('sha256', _tokenSecret()).update('buyer-postback|' + buyerKey).digest('hex').slice(0, 32);
+}
+function bpKeyOk(given, buyerKey) {
+  const a = Buffer.from(String(given || '')), b = Buffer.from(bpKey(buyerKey));
+  return a.length === b.length && _crypto288.timingSafeEqual(a, b);
+}
+(async () => {
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS buyer_postback_log (
+      id SERIAL PRIMARY KEY, buyer_key TEXT, received_at TIMESTAMPTZ DEFAULT NOW(), lead_id INT,
+      reported_status TEXT, reported_note TEXT, result TEXT, detail TEXT, raw JSONB)`);
+  } catch (e) { console.error('[Buyer Postback] table init failed:', e.message); }
+})();
+
+async function buyerPostback(req, res) {
+  const cfg = BUYER_POSTBACKS[String(req.params.buyer || '').toLowerCase()];
+  if (!cfg) return res.status(404).json({ ok: false, error: 'Unknown buyer' });
+  const p = Object.assign({}, req.query || {}, (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {});
+  const norm = (k) => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const pick = (...keys) => {
+    for (const k of Object.keys(p)) {
+      if (keys.includes(norm(k))) { const v = p[k]; if (v !== undefined && v !== null && typeof v !== 'object' && String(v).trim() !== '') return String(v).trim(); }
+    }
+    return '';
+  };
+  if (!bpKeyOk(req.headers['x-postback-key'] || pick('key'), cfg.key)) return res.status(401).json({ ok: false, error: 'Invalid or missing key' });
+
+  const ref = pick('leadid', 'vendorleadid', 'krwid', 'reference', 'referenceid');
+  const refNum = (ref.match(/^(?:KRW-)?(\d{1,9})$/i) || [])[1] || null;
+  const phone = bsPhone(pick('phone', 'mobile', 'phonenumber', 'callerid'));
+  const statusRaw = pick('status', 'disposition', 'dispo', 'leadstatus').slice(0, 200);
+  const noteRaw = pick('note', 'notes', 'reason', 'comment', 'comments').slice(0, 500);
+  const flag = pick('signed', 'billable', 'retained');
+  const isTest = /^(1|true|yes)$/i.test(pick('test'));
+  const safe = {}; Object.keys(p).forEach(k => { if (norm(k) !== 'key') safe[k] = p[k]; });
+  const log = async (leadId, result, detail) => {
+    try {
+      await pool.query(`INSERT INTO buyer_postback_log (buyer_key, lead_id, reported_status, reported_note, result, detail, raw) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+        [cfg.key, leadId, statusRaw, noteRaw, result, detail, JSON.stringify(safe)]);
+    } catch (e) { console.error('[Buyer Postback] log failed:', e.message); }
+  };
+  try {
+    if (ref && !refNum) { await log(null, 'error', 'bad lead_id: ' + ref.slice(0, 60)); return res.status(400).json({ ok: false, error: 'lead_id must be the VendorLeadId we sent you, like KRW-2577' }); }
+    if (!refNum && !phone) { await log(null, 'error', 'no lead reference'); return res.status(400).json({ ok: false, error: 'Send lead_id (the VendorLeadId we sent you, like KRW-2577) or phone' }); }
+    const cls = bsClassify(cfg, { status: statusRaw, notes: noteRaw, billableFlag: flag });
+    if (!cls) { await log(null, 'error', 'no status'); return res.status(400).json({ ok: false, error: 'status is required' }); }
+
+    const lead = (await pool.query(
+      `SELECT id, status, billable, raw, publisher_sub, state, phone FROM leads
+       WHERE ( ($1::int IS NOT NULL AND id=$1::int)
+            OR ($1::int IS NULL AND $2::text IS NOT NULL AND RIGHT(regexp_replace(phone,'\\D','','g'),10)=$2::text) )
+         AND raw->>'buyer_name' = $3::text
+       ORDER BY received_at DESC LIMIT 1`, [refNum ? parseInt(refNum, 10) : null, phone, cfg.buyer])).rows[0];
+    if (!lead) { await log(null, 'unmatched', (ref || phone || '').slice(0, 60)); return res.status(404).json({ ok: false, error: 'No lead with that reference was sent to ' + cfg.label }); }
+    if (refNum && phone && bsPhone(lead.phone) && bsPhone(lead.phone) !== phone) {
+      await log(lead.id, 'error', 'phone does not match lead_id');
+      return res.status(409).json({ ok: false, error: 'phone does not match that lead_id' });
+    }
+    const leadRef = 'KRW-' + lead.id;
+    if (isTest) { await log(lead.id, 'test', cls.status); return res.json({ ok: true, test: true, lead_id: leadRef, would_record: cls.status }); }
+
+    const raw = lead.raw || {};
+    const locked = raw.billable_locked === true || raw.billable_locked === 'true';
+    if (cls.kind === 'billable') {
+      const dup = await pool.query(`SELECT id FROM billable_queue WHERE lead_id=$1 LIMIT 1`, [lead.id]);
+      if (dup.rows.length || lead.billable) { await log(lead.id, 'duplicate', 'already signed or queued'); return res.json({ ok: true, lead_id: leadRef, recorded: 'Signed', already_on_file: true }); }
+      await pool.query(
+        `INSERT INTO billable_queue (cid, amount, publisher_sub, lead_id, status, raw) VALUES ($1,$2,$3,$4,'pending',$5::jsonb)`,
+        [bsPhone(lead.phone) || String(lead.id), cfg.amount(lead.state), lead.publisher_sub, lead.id,
+         JSON.stringify({ source: 'buyer_postback', buyer_key: cfg.key, buyer: cfg.buyer, vertical: cfg.vertical, sheet_status: statusRaw, sheet_notes: noteRaw, scanned_at: new Date().toISOString(), trigger: 'postback' })]);
+      // Same as the sheet scanner: nothing reads Signed until Kyler approves it.
+      await pool.query(
+        `UPDATE leads SET buyer_status='Pending', notes='In outreach', status=CASE WHEN status='buyer_rejected' THEN 'forwarded' ELSE status END,
+           raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_postback','buyer_key',$1::text,'status','Pending','note','In outreach','sheet_status',$2::text,'awaiting_approval',true,'synced_at',NOW(),'confirmed_at',NOW()))
+         WHERE id=$3::int`, [cfg.key, statusRaw, lead.id]);
+      await log(lead.id, 'queued', 'signed - awaiting approval');
+      console.log(`[Buyer Postback] $ ${cfg.label} | lead ${lead.id} | ${statusRaw} -> queued for approval`);
+      return res.json({ ok: true, lead_id: leadRef, recorded: 'Signed' });
+    }
+    if (locked || lead.billable) { await log(lead.id, 'skipped', 'lead already billable - not downgraded'); return res.json({ ok: true, lead_id: leadRef, recorded: cls.status, note: 'lead is already marked signed' }); }
+    let note = cls.note;
+    if (/\bcag\b|law\s*firm|lawfirm/i.test(note)) note = cls.status;   // never leak a buyer name into a publisher-facing note
+    await pool.query(
+      `UPDATE leads SET buyer_status=$1::text,
+         status=CASE WHEN $2::text='rejected' THEN 'buyer_rejected' WHEN status='buyer_rejected' THEN 'forwarded' ELSE status END, notes=$3::text,
+         raw = COALESCE(raw,'{}'::jsonb) || jsonb_build_object('buyer_disposition', jsonb_build_object('source','buyer_postback','buyer_key',$4::text,'status',$1::text,'note',$3::text,'sheet_status',$5::text,'synced_at',NOW(),'confirmed_at',NOW()))
+       WHERE id=$6::int`, [cls.status, cls.kind, note, cfg.key, statusRaw, lead.id]);
+    await log(lead.id, 'updated', cls.status);
+    console.log(`[Buyer Postback] ${cfg.label} | lead ${lead.id} | ${statusRaw} -> ${cls.status}`);
+    return res.json({ ok: true, lead_id: leadRef, recorded: cls.status });
+  } catch (err) {
+    await log(null, 'error', err.message.slice(0, 200));
+    return res.status(500).json({ ok: false, error: 'Server error - please retry' });
+  }
+}
+app.all('/postback/buyer/:buyer', express.urlencoded({ extended: false }), buyerPostback);
+
+// Admin only: the posting URL (with its key) and the recent log per buyer.
+app.get('/buyer-postbacks', requireKey, async (req, res) => {
+  try {
+    const host = 'https://' + req.get('host');
+    const out = [];
+    for (const k of Object.keys(BUYER_POSTBACKS)) {
+      const cfg = BUYER_POSTBACKS[k];
+      const logq = await pool.query(`SELECT received_at, lead_id, reported_status, reported_note, result, detail FROM buyer_postback_log WHERE buyer_key=$1 ORDER BY id DESC LIMIT 25`, [k]);
+      const tot = await pool.query(`SELECT COUNT(*)::int AS n, MAX(received_at) AS last FROM buyer_postback_log WHERE buyer_key=$1 AND result IN ('updated','queued','duplicate','skipped')`, [k]);
+      out.push({ key: k, label: cfg.label, url: host + '/postback/buyer/' + k, secret: bpKey(k), received: tot.rows[0].n, last_received: tot.rows[0].last, log: logq.rows });
+    }
+    res.json({ ok: true, buyers: out });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+// ── end patch 386 ────────────────────────────────────────────────────────────
+
+// ── patch 387: aged leads resent to a new buyer start over with that buyer ───
+const AR_BUYER_BY_KEY = { 'nld-mva': 'NLD CPA', 'lt-intake': 'LT-Intake', 'ch-intake': 'CH-Intake', 'dt-intake': 'DT-Intake', 'mva-003': 'MVA-003-LT', 'lag-mva': 'Legal Advocate Group', 'cag': 'CAG' };
+function agedResendReset(row, newBuyer) {
+  const raw = row.raw || {}, d = raw.buyer_disposition || null, br = row.buyer_response || {};
+  let prev = raw.buyer_name && raw.buyer_name !== newBuyer ? raw.buyer_name : null;
+  if (!prev && d && AR_BUYER_BY_KEY[d.buyer_key] && AR_BUYER_BY_KEY[d.buyer_key] !== newBuyer) prev = AR_BUYER_BY_KEY[d.buyer_key];
+  if (!prev && Array.isArray(br.attempts)) { const a = br.attempts.filter(x => x && x.accepted && x.buyer && x.buyer !== newBuyer).pop(); if (a) prev = a.buyer; }
+  if (!prev && br.nld_attempted && br.nld_response && /accepted/i.test(String(br.nld_response.status || ''))) prev = 'NLD CPA';
+  if (!prev && raw.manual_cert_send && raw.manual_cert_send.buyer && raw.manual_cert_send.buyer !== newBuyer) prev = raw.manual_cert_send.buyer;
+  if (!prev && raw.previous_buyer && raw.previous_buyer !== newBuyer) prev = raw.previous_buyer;
+  const out = { aged_resend: true };
+  if (prev) out.previous_buyer = prev;
+  if (d) out.previous_disposition = d;
+  return out;
+}
+app.post('/admin/aged-resend/fix', requireKey, async (req, res) => {
+  try {
+    const buyer = String((req.body && req.body.buyer) || 'CAG');
+    const apply = !!(req.body && req.body.apply === true);
+    const q = await pool.query(
+      `SELECT id, status, buyer_status, billable, revenue, raw, buyer_response FROM leads
+       WHERE raw->>'buyer_name' = $1 AND raw->>'manual_forward' = 'true' ORDER BY id`, [buyer]);
+    const rep = { ok: true, buyer, apply, total: q.rows.length, fixed: 0, already_ok: 0, skipped: [], by_previous_buyer: {}, by_old_disposition: {} };
+    for (const row of q.rows) {
+      const raw = row.raw || {}, d = raw.buyer_disposition || null;
+      const fwdAt = Date.parse(raw.manual_forward_at || '') || 0;
+      const skip = (why) => rep.skipped.push({ id: row.id, why });
+      if (row.billable === true || raw.billable_locked === true || raw.billable_locked === 'true') { skip('billable'); continue; }
+      if (Number(row.revenue) > 0) { skip('has revenue on file'); continue; }
+      if (d && d.awaiting_approval) { skip('signing awaiting approval'); continue; }
+      const dAt = d ? (Date.parse(d.synced_at || '') || 0) : 0;
+      const stale = d && (d.source === 'aged_out' || (d.source !== 'buyer_postback' && d.buyer_key !== 'cag' && dAt < fwdAt));
+      if (d && !stale) { skip('disposition set after the resend (' + (d.source || '?') + ')'); continue; }
+      if (!d && row.status === 'forwarded' && raw.aged_out !== true) { rep.already_ok++; continue; }
+      const reset = agedResendReset(row, buyer);
+      const pk = reset.previous_buyer || 'unknown'; rep.by_previous_buyer[pk] = (rep.by_previous_buyer[pk] || 0) + 1;
+      const dk = d ? (d.source === 'aged_out' ? 'aged out' : (d.status || '?')) : 'none'; rep.by_old_disposition[dk] = (rep.by_old_disposition[dk] || 0) + 1;
+      if (apply) {
+        await pool.query(
+          `UPDATE leads SET status='forwarded', buyer_status='Accepted', buyer_error=NULL, notes=NULL,
+             raw = (COALESCE(raw,'{}'::jsonb) - 'buyer_disposition' - 'aged_out') || $1::jsonb WHERE id=$2`,
+          [JSON.stringify(reset), row.id]);
+      }
+      rep.fixed++;
+    }
+    if (apply) console.log(`[Aged Resend] ${buyer}: reset ${rep.fixed} lead(s) to awaiting, ${rep.skipped.length} skipped`);
+    res.json(rep);
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+// ── end patch 387 ────────────────────────────────────────────────────────────
+
 app.post('/buyer-sheets/scan', requireKey, async (req, res) => {
   try { res.json({ ok: true, results: await bsScanAll('manual', req.query.buyer || null) }); }
   catch (err) { res.status(500).json({ ok: false, error: err.message }); }
