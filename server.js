@@ -3594,14 +3594,14 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
     { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 373: LAG now 3rd (CAG moved to 2nd behind NLD)
     { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 373: CAG 2nd behind NLD - sole buyer of NY/NJ/PA, first after NLD in shared states
-    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: null, payout: 1800, enabled: MVA003_LIVE(), states: 'ALL' },   // patch 376/378: Eilers nationwide @ $1800, bottom rung, uncapped (higher-payout buyers go first)
+    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: null, payout: 1700, enabled: MVA003_LIVE(), states: 'ALL' },   // patch 376/378/381: Eilers nationwide @ $1700 net, bottom rung, uncapped (higher-payout buyers go first)
   ];   // patch 368: DT-Intake removed from the funnel (no longer a buyer)
   const LEADBLOOM_LADDER = NYC_LADDER;   // the shared ladder: NYC, Kevin, everyone but Leadbloom
   const LB_ONLY_LADDER = [
     { name: 'NLD CPA',              priority: 1, group: 'nld', cap: 10,   payout: 2250, enabled: !NLD_PAUSED, states: NLD_ONLY_STATES },   // patch 318 / 368: NLD first
     { name: 'Legal Advocate Group', priority: 3, group: 'lag', cap: null, payout: LAG_PAYOUT, enabled: LAG_LIVE(), states: LAG_STATES },   // patch 373: LAG now 3rd
     { name: 'CAG',                  priority: 2, group: 'cag', cap: null, payout: CAG_PAYOUT(leadState), enabled: CAG_LIVE(), states: CAG_STATES },   // patch 373: CAG 2nd behind NLD
-    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: null, payout: 1800, enabled: MVA003_LIVE(), states: 'ALL' },   // patch 376/378: Eilers catch-all for Leadbloom too, uncapped
+    { name: 'MVA-003-LT',           priority: 4, group: '003', cap: null, payout: 1700, enabled: MVA003_LIVE(), states: 'ALL' },   // patch 376/378/381: Eilers catch-all for Leadbloom too, uncapped, $1700 net
   ];   // patch 368: DT-Intake removed
   const LADDER_FOR_PUB = PUB === 'KRW-LEADBLOOM-MVA' ? LB_ONLY_LADDER : LEADBLOOM_LADDER;
 
@@ -9556,7 +9556,7 @@ app.post('/leads/:id/resend-ladder', requireKey, async (req, res) => {
     const bid = [];
     if (typeof CAG_LIVE === 'function' && CAG_LIVE() && CAG_STATES.includes(st)) bid.push({ name: 'CAG', payout: CAG_PAYOUT(st) });
     if (typeof LAG_LIVE === 'function' && LAG_LIVE() && LAG_STATES.includes(st)) bid.push({ name: 'Legal Advocate Group', payout: LAG_PAYOUT });
-    if (typeof MVA003_LIVE === 'function' && MVA003_LIVE()) bid.push({ name: 'MVA-003-LT', payout: 1800 });
+    if (typeof MVA003_LIVE === 'function' && MVA003_LIVE()) bid.push({ name: 'MVA-003-LT', payout: 1700 });   // patch 381
     bid.sort((a, b) => b.payout - a.payout).forEach(x => rungs.push(x.name));
     let plan = rungs.filter((x, i) => rungs.indexOf(x) === i);   // dedupe, order kept
     if (Array.isArray(req.body && req.body.only)) plan = plan.filter(x => req.body.only.includes(x));   // patch 333: restrict to named buyers
@@ -10798,7 +10798,7 @@ const BUYER_SHEETS = [
   // patch 350: DT-Intake's auto-updated pipeline sheet (lead_id / status / name / phone / received_date / retainer_date / reason / updated_at).
   // Statuses: New Lead, Contacted, Signed (billable), Unresponsive, Not Qualified, Duplicate. Matched by phone.
   { key: 'dt-intake', label: 'DT-Intake',  buyer: 'DT-Intake',  vertical: 'MVA', sheet: '1_pvfSFxsvK0saUvwQFmG0YHG7f4ySs0TysywLqhzRBQ', tab: null, amount: 2500, enabled: true },
-  { key: 'mva-003',   label: 'MVA-003-LT', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1800, enabled: true },   // patch 376: Eilers payout 1700 -> 1800
+  { key: 'mva-003',   label: 'MVA-003-LT', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1700, enabled: true },   // patch 381: Eilers payout $1700 net (broker split)
   { key: 'lag-mva',   label: 'Legal Advocate Group', buyer: 'Legal Advocate Group', vertical: 'MVA', sheet: '1-Kx2As3kn4CZ6iXODQJ8NVwugteEM2U1fJlNjmkxU9I', tab: 'Dispositions', amount: 2200, enabled: true },   // patch 367: read LAG dispositions back from the Dispositions tab
 ];
 
