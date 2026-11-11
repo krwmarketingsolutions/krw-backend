@@ -6774,6 +6774,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
       'KRW-KANTHONY-RS': 'Kevin Anthony (CPA)',
       [LEADBLOOM_PUB_ID]: 'Leadbloom',
       'KRW-NYC-MVA': 'Lumrah LLC',
+      'LJA-MVA-GOOGLE': 'LJA (Google)',   // patch 384
     };
     const mvaRows = await pool.query(
       `SELECT publisher_sub, status, billable, revenue, phone,
@@ -6982,6 +6983,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
         'KRW-KANTHONY-RS':  ['NLD CPA', 'CAG', 'Legal Advocate Group', 'Eilers Law'],   // patch 380
         [LEADBLOOM_PUB_ID]: ['NLD CPA', 'CAG', 'Legal Advocate Group', 'Eilers Law'],   // patch 380
         'KRW-NYC-MVA':      ['NLD CPA', 'CAG', 'Legal Advocate Group', 'Eilers Law'],   // patch 380
+        'LJA-MVA-GOOGLE':   ['NLD CPA', 'CAG', 'Legal Advocate Group', 'Eilers Law'],   // patch 384
         // SSDI lines are dedicated 1:1 - each publisher only ever reaches its one buyer.
         'SSDI-AZ-1696':      ['Calltoffic 1696'],
         'KRW-JOSHUA-SIGNED': ['Signed (TD)'], // Fields Law paused - this line now routes via Trackdrive
