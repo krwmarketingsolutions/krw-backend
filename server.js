@@ -646,7 +646,10 @@ app.get('/leads/feed', requirePortalKey, async (req, res) => {
               COALESCE(NULLIF(raw->>'injury',''), raw->>'physical_injury') as injury,
               raw->>'incident_date' as incident_date, raw->>'county' as county,
               raw->'buyer_disposition'->>'status' as disp_status,
-              raw->'buyer_disposition'->>'note'   as disp_note
+              raw->'buyer_disposition'->>'note'   as disp_note,
+              raw->'buyer_disposition'->>'synced_at'    as disp_changed_at,   -- patch 385
+              raw->'buyer_disposition'->>'confirmed_at' as disp_checked_at,
+              raw->'buyer_disposition'->>'source'       as disp_source
        FROM leads ${wc} ORDER BY received_at DESC LIMIT $${i}`, params);
     res.json({ ok:true, count:r.rows.length, leads:portalStrip(req, r.rows) });   // patch 288
   } catch(err) { res.status(500).json({ error:err.message }); }
