@@ -3267,7 +3267,7 @@ app.post('/leads/mva-funnel', async (req, res) => {
   // (CH-Intake / LT-Intake 50/50 -> NLD -> 003) with the same screenings and
   // caps. His posting URL and format stay exactly as they are - the ladder
   // handler attributes the lead to his publisher ID.
-  if (['KRW-KANTHONY-RS', 'KRW-LEADBLOOM-MVA'].includes(b.publisher_sub || '')) {   // + Leadbloom (patch 267)
+  if (['KRW-KANTHONY-RS', 'KRW-LEADBLOOM-MVA', 'LJA-MVA-GOOGLE'].includes(b.publisher_sub || '')) {   // + Leadbloom (patch 267), + LJA Google (patch 382)
     req.url = '/leads/mva-nyc-split';
     return app.handle(req, res);
   }
@@ -3529,7 +3529,7 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
   b.channel = chanFromLanding(b.landing_page_url);   // patch 357
   // patch 266/267: this ladder serves NYC (default), Kevin Anthony and both
   // Leadbloom lines - the lead is attributed to whichever of them posted it.
-  const LADDER_PUBS = ['KRW-KANTHONY-RS', 'KRW-LEADBLOOM-MVA']; // one Leadbloom account (patch 268)
+  const LADDER_PUBS = ['KRW-KANTHONY-RS', 'KRW-LEADBLOOM-MVA', 'LJA-MVA-GOOGLE']; // one Leadbloom account (patch 268); LJA Google (patch 382)
   const PUB = LADDER_PUBS.includes(b.publisher_sub) ? b.publisher_sub : 'KRW-NYC-MVA';
 
   // Hardcoded fallback IP for this campaign only, per Kyler's explicit
@@ -3756,6 +3756,21 @@ app.post('/leads/mva-nyc-split', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Database error' });
   } finally {
     client.release();
+  }
+
+  // patch 383: test leads (DONOTCONTACT name / reserved 555 test phone) are
+  // never sent to a buyer - held with the plan they WOULD have followed.
+  {
+    const nm = ((b.first_name || '') + ' ' + (b.last_name || '')).toUpperCase();
+    const ph = String(b.phone || '').replace(/\D/g, '').slice(-10);
+    if (nm.includes('DONOTCONTACT') || /^555\d{7}$/.test(ph) || /^\d{3}55501\d{2}$/.test(ph)) {
+      const plan = ladderPlan.length ? ladderPlan.map(n => n === 'MVA-003-LT' ? 'Eilers Law' : n).join(' -> ') : (isNldState ? 'NLD unavailable (would hold for review)' : 'nobody eligible');
+      const why = 'TEST lead - not sent. Would route: ' + plan;
+      const ct = await pool.connect();
+      try { await ct.query("UPDATE leads SET status='received', buyer_error=$1 WHERE id=$2", [why, leadId]); } finally { ct.release(); }
+      console.log(`[MVA-NYC-SPLIT] TEST ${b.first_name} ${b.last_name} | ${leadState} | ${why}`);
+      return res.json({ ok: true, result: 'test', message: why, krw_id: leadId });
+    }
   }
 
   if (!eligible.length) {
