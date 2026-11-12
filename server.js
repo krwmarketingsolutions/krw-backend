@@ -167,21 +167,13 @@ async function partnerSanitize(path, body) {
   if (path === '/buyer-sheets/status') {
     delete body.service_account;
     if (Array.isArray(body.buyers)) {
-      const out = [];
-      for (const b of body.buyers) {
-        if (String(b.vertical || '').toUpperCase() !== 'MVA') continue;
-        if (['nld-ride', 'lt-intake', 'ch-intake', 'dt-intake'].includes(b.key)) continue;   // patch 390: not on a partner's buyer sheets
-        const cfg = BUYER_SHEETS.find(c => c.key === b.key);
-        if (!cfg) continue;
-        const rec = (await pool.query(
-          `SELECT COUNT(*)::int AS sent,
-                  COUNT(*) FILTER (WHERE raw->'buyer_disposition' IS NOT NULL OR buyer_status IN ('Rejected','Signed','Retained','Returned'))::int AS dispositioned,
-                  COUNT(*) FILTER (WHERE raw->'buyer_disposition' IS NULL AND buyer_status NOT IN ('Rejected','Signed','Retained','Returned','Test') AND received_at < NOW() - INTERVAL '3 days')::int AS waiting_3d
-           FROM leads WHERE raw->>'buyer_name'=$1 AND status IN ('forwarded','buyer_rejected') AND campaign ILIKE 'mva%'
-             AND received_at >= GREATEST(NOW() - INTERVAL '45 days', $2::timestamptz)`, [cfg.buyer, PARTNER_SINCE_ISO])).rows[0];
-        out.push(Object.assign({}, b, { pending_approval: 0, pending_amount: 0, sent_45d: rec.sent, dispositioned_45d: rec.dispositioned, waiting_over_3d: rec.waiting_3d }));
-      }
-      body.buyers = out;
+      // patch 394: the recount from the floor is done by the route itself (the
+      // sheet list is only in scope there); a body that was not recounted is refused.
+      if (body.partner_scoped !== true) return refuse;
+      delete body.partner_scoped;
+      body.buyers = body.buyers
+        .filter(b => String(b.vertical || '').toUpperCase() === 'MVA' && !['nld-ride', 'lt-intake', 'ch-intake', 'dt-intake'].includes(b.key))   // patch 390: not on a partner's buyer sheets
+        .map(b => Object.assign({}, b, { pending_approval: 0, pending_amount: 0 }));
     }
     return body;
   }
@@ -238,7 +230,12 @@ app.use(async (req, res, next) => {
     const send = res.json.bind(res);
     res.json = (body) => {   // patch 389: the filter is async (it recounts from the floor)
       Promise.resolve().then(() => partnerSanitize(path, body))
-        .catch(() => ({ ok: false, restricted: true, error: 'Not available for this login' }))
+        .catch((e) => {   // patch 394: never silent
+          console.error('[Partner] filter failed on ' + path + ': ' + (e && e.message));
+          const o = { ok: false, restricted: true, error: 'Not available for this login' };
+          if (req.krwUser && req.krwUser.preview) o.debug = String((e && e.message) || e);
+          return o;
+        })
         .then(out => send(out));
       return res;
     };
@@ -11623,15 +11620,19 @@ app.post('/buyer-sheets/scan', requireKey, async (req, res) => {
 app.get('/buyer-sheets/status', requireKey, async (req, res) => {
   try {
     const out = [];
+    const partnerReq = !!(req.krwUser && req.krwUser.role === 'partner');   // patch 394: partner counts are MVA only, from the floor
     for (const cfg of BUYER_SHEETS) {
       if (cfg.hidden && req.query.all !== '1') continue;   // patch 392: retired buyers are not listed
+      if (partnerReq && (cfg.hidden || String(cfg.vertical || '').toUpperCase() !== 'MVA')) continue;   // patch 394
       const last = (await pool.query(`SELECT * FROM buyer_sheet_scans WHERE buyer_key=$1 ORDER BY scanned_at DESC LIMIT 1`, [cfg.key])).rows[0] || null;
       const lastOk = (await pool.query(`SELECT scanned_at, modified_time FROM buyer_sheet_scans WHERE buyer_key=$1 AND ok=true ORDER BY scanned_at DESC LIMIT 1`, [cfg.key])).rows[0] || null;
       const rec = (await pool.query(
         `SELECT COUNT(*)::int AS sent,
                 COUNT(*) FILTER (WHERE raw->'buyer_disposition' IS NOT NULL OR buyer_status IN ('Rejected','Signed','Retained','Returned'))::int AS dispositioned,
                 COUNT(*) FILTER (WHERE raw->'buyer_disposition' IS NULL AND buyer_status NOT IN ('Rejected','Signed','Retained','Returned','Test') AND received_at < NOW() - INTERVAL '3 days')::int AS waiting_3d
-         FROM leads WHERE raw->>'buyer_name'=$1 AND status IN ('forwarded','buyer_rejected') AND received_at >= NOW() - INTERVAL '45 days'`, [cfg.buyer])).rows[0];
+         FROM leads WHERE raw->>'buyer_name'=$1 AND status IN ('forwarded','buyer_rejected') AND ` +
+        (partnerReq ? `campaign ILIKE 'mva%' AND received_at >= GREATEST(NOW() - INTERVAL '45 days', $2::timestamptz)` : `received_at >= NOW() - INTERVAL '45 days'`),
+        partnerReq ? [cfg.buyer, PARTNER_SINCE_ISO] : [cfg.buyer])).rows[0];
       const un = (await pool.query(`SELECT COUNT(*)::int AS n FROM buyer_sheet_rows WHERE buyer_key=$1 AND lead_id IS NULL AND kind <> 'blank'`, [cfg.key])).rows[0];
       const pend = (await pool.query(`SELECT COUNT(*)::int AS n, COALESCE(SUM(amount),0)::float AS amt FROM billable_queue WHERE status='pending' AND raw->>'source'='buyer_sheet' AND raw->>'buyer_key'=$1`, [cfg.key])).rows[0];
       out.push({ key: cfg.key, label: cfg.label, vertical: cfg.vertical, enabled: cfg.enabled, sheet_url: 'https://docs.google.com/spreadsheets/d/' + cfg.sheet,
@@ -11639,6 +11640,7 @@ app.get('/buyer-sheets/status', requireKey, async (req, res) => {
         rows: last ? last.rows : 0, unmatched_rows: un.n, pending_approval: pend.n, pending_amount: pend.amt,
         sent_45d: rec.sent, dispositioned_45d: rec.dispositioned, waiting_over_3d: rec.waiting_3d });
     }
+    if (partnerReq) return res.json({ ok: true, partner_scoped: true, scan_times_et: BS_SCAN_TIMES, buyers: out });   // patch 394
     res.json({ ok: true, scan_times_et: BS_SCAN_TIMES, service_account: (bsSaKey() || {}).client_email || null, buyers: out });
   } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
