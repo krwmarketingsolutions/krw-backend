@@ -146,18 +146,22 @@ const PARTNER_SINCE_ISO = (() => {
   return isNaN(d.getTime()) ? '2026-10-21T07:00:00.000Z' : d.toISOString();
 })();
 const PARTNER_SINCE_MS = Date.parse(PARTNER_SINCE_ISO);
+// patch 391: buyers whose leads a partner login never sees
+const PARTNER_BUYER_HIDE = ['LT-Intake', 'LT-Intake-transfer', 'DT-Intake', 'CH-Intake', 'CH-AD'];
+const PARTNER_BUYER_SQL = `COALESCE(raw->>'buyer_name','') NOT IN (${PARTNER_BUYER_HIDE.map(b => "'" + b.replace(/'/g, "''") + "'").join(',')})`;
 async function partnerSanitize(path, body) {
   if (!body || typeof body !== 'object') return body;
   const refuse = { ok: false, restricted: true, error: 'Not available for this login' };
   const isSsdi = (x) => /ssdi/i.test(String((x && (x.vertical || '')) || '')) || /ssdi/i.test(String((x && (x.campaign || '')) || ''));
   const tooOld = (x) => { const t = Date.parse((x && x.received_at) || ''); return !(t >= PARTNER_SINCE_MS); };   // unknown date counts as too old
   const notMva = (x) => !/^mva/i.test(String((x && x.campaign) || ''));   // partner sees MVA only
+  const hiddenBuyer = (x) => PARTNER_BUYER_HIDE.includes(String((x && (x.buyer_name || (x.raw && x.raw.buyer_name))) || ''));   // patch 391
   if (path === '/leads/feed') {
-    if (Array.isArray(body.leads)) { body.leads = body.leads.filter(l => !isSsdi(l) && !tooOld(l) && !notMva(l)); body.count = body.leads.length; }
+    if (Array.isArray(body.leads)) { body.leads = body.leads.filter(l => !isSsdi(l) && !tooOld(l) && !notMva(l) && !hiddenBuyer(l)); body.count = body.leads.length; }
     return body;
   }
   if (/^\/leads\/detail\//.test(path)) {
-    if (body.lead && (isSsdi(body.lead) || tooOld(body.lead) || notMva(body.lead))) return refuse;
+    if (body.lead && (isSsdi(body.lead) || tooOld(body.lead) || notMva(body.lead) || hiddenBuyer(body.lead))) return refuse;
     return body;
   }
   if (path === '/buyer-sheets/status') {
@@ -191,7 +195,7 @@ async function partnerSanitize(path, body) {
 }
 // /leads/summary for a partner: the same shape, counted from the floor only.
 async function partnerLeadsSummary() {
-  const base = `COALESCE(vertical,'') != 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true' AND campaign ILIKE 'mva%' AND received_at >= $1::timestamptz`;
+  const base = `COALESCE(vertical,'') != 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true' AND campaign ILIKE 'mva%' AND ${PARTNER_BUYER_SQL} AND received_at >= $1::timestamptz`;
   const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
   const monthStart = new Date().toISOString().slice(0, 7) + '-01';
   const [todayQ, weekQ, monthQ, statusQ] = await Promise.all([
@@ -795,7 +799,7 @@ app.get('/leads/feed', requirePortalKey, async (req, res) => {
       where.push(`COALESCE(vertical,'') != 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true'`);
     }
     if (status)   { where.push(`status=$${i++}`);   params.push(status); }
-    if (req.krwUser && req.krwUser.role === 'partner') { where.push(`received_at >= $${i++}::timestamptz AND campaign ILIKE 'mva%'`); params.push(PARTNER_SINCE_ISO); }   // patch 389: MVA only, from the floor
+    if (req.krwUser && req.krwUser.role === 'partner') { where.push(`received_at >= $${i++}::timestamptz AND campaign ILIKE 'mva%' AND ${PARTNER_BUYER_SQL}`); params.push(PARTNER_SINCE_ISO); }   // patch 389 / 391: MVA only, from the floor, no retired intake buyers
 
     // Support portal_id lookup — finds all pub_ids for that portal then filters
     if (portal_id) {
@@ -6970,7 +6974,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
        FROM leads
        WHERE campaign IN ('mva-funnel','mva-nyc-split','mva-leadbloom2')
          AND publisher_sub = ANY($1::text[]) AND COALESCE(raw->>'excluded','') <> 'true'
-         AND ${sinceClause}
+         AND ${sinceClause}${(req.krwUser && req.krwUser.role === 'partner') ? ' AND ' + PARTNER_BUYER_SQL : ''}
        ORDER BY (billable IS TRUE) DESC, (status='forwarded') DESC, (status='buyer_rejected') DESC, id DESC`,
       [Object.keys(mvaPubs)]
     );
@@ -10993,16 +10997,16 @@ const BS_NOT_BILLABLE_FLAG = /^(no|n|false|not billable|non-billable)$/i;
 const BUYER_SHEETS = [
   { key: 'nld-mva',   label: 'NLD CPA',    buyer: 'NLD CPA',    vertical: 'MVA', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'MVA CPA Leads - New', amount: 2250, enabled: true /* patch 331: NLD $2000 -> $2250 */ },
   // Rideshare leads carry no buyer_name on the record, so this tab matches by campaign instead
-  { key: 'nld-ride',  label: 'NLD Rideshare', buyer: 'CH-AD',   vertical: 'Rideshare', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'Rideshare', campaigns: ['rideshare-tb'], amount: 1800, enabled: true },
+  { key: 'nld-ride',  label: 'NLD Rideshare', buyer: 'CH-AD',   vertical: 'Rideshare', sheet: '1_NBKeIAg7p87mTDneR_fANGx9AqGV8abpWe29EBoko4', tab: 'Rideshare', campaigns: ['rideshare-tb'], amount: 1800, enabled: true, hidden: true },   // patch 392: retired - off the table, still scanned
   // LT's sheet (patch 273): Adam's team moved to dated tabs ("9.16-10.1" dialer
   // export, "10.2" simplified layout, more to come) - scan every tab whose name
   // starts with a date; newest tab's row wins per phone via the existing de-dupe.
-  { key: 'lt-intake', label: 'LT-Intake',  buyer: 'LT-Intake',  vertical: 'MVA', sheet: '16azBD-YOUB2dQbvLnwCXmPF4ntq0ntug582sJC_vs1Y', tab: null, tabPattern: /^\d{1,2}\.\d{1,2}/, amount: 2500, enabled: true },
+  { key: 'lt-intake', label: 'LT-Intake',  buyer: 'LT-Intake',  vertical: 'MVA', sheet: '16azBD-YOUB2dQbvLnwCXmPF4ntq0ntug582sJC_vs1Y', tab: null, tabPattern: /^\d{1,2}\.\d{1,2}/, amount: 2500, enabled: true, hidden: true },   // patch 392: retired - off the table, still scanned
   // Chad's intake sheet carries MVA plus his Roblox and Rideshare rows; MVA matches by buyer, the others by campaign
-  { key: 'ch-intake', label: 'CH-AD Roblox/Rideshare', buyer: 'CH-AD', vertical: 'Rideshare', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, campaigns: ['roblox-mt','roblox-chad','rideshare-chad'], amount: 2250, enabled: true },   // patch 360: CH-Intake MVA off the sheet; Chad's roblox/rideshare (CH-AD) still scanned by campaign
+  { key: 'ch-intake', label: 'CH-AD Roblox/Rideshare', buyer: 'CH-AD', vertical: 'Rideshare', sheet: '1vlM4f8lqOHemrRZ1IhYdS9amU826GNV5GJS8nfGRgE0', tab: null, campaigns: ['roblox-mt','roblox-chad','rideshare-chad'], amount: 2250, enabled: true, hidden: true },   // patch 360: CH-Intake MVA off the sheet; Chad's roblox/rideshare (CH-AD) still scanned by campaign   // patch 392: retired - off the table, still scanned
   // patch 350: DT-Intake's auto-updated pipeline sheet (lead_id / status / name / phone / received_date / retainer_date / reason / updated_at).
   // Statuses: New Lead, Contacted, Signed (billable), Unresponsive, Not Qualified, Duplicate. Matched by phone.
-  { key: 'dt-intake', label: 'DT-Intake',  buyer: 'DT-Intake',  vertical: 'MVA', sheet: '1_pvfSFxsvK0saUvwQFmG0YHG7f4ySs0TysywLqhzRBQ', tab: null, amount: 2500, enabled: true },
+  { key: 'dt-intake', label: 'DT-Intake',  buyer: 'DT-Intake',  vertical: 'MVA', sheet: '1_pvfSFxsvK0saUvwQFmG0YHG7f4ySs0TysywLqhzRBQ', tab: null, amount: 2500, enabled: true, hidden: true },   // patch 392: retired - off the table, still scanned
   { key: 'mva-003',   label: 'Eilers Law', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1700, enabled: true },   // patch 381: Eilers payout $1700 net (broker split)
   { key: 'lag-mva',   label: 'Legal Advocate Group', buyer: 'Legal Advocate Group', vertical: 'MVA', sheet: '1-Kx2As3kn4CZ6iXODQJ8NVwugteEM2U1fJlNjmkxU9I', tab: 'Dispositions', amount: 2200, enabled: true },   // patch 367: read LAG dispositions back from the Dispositions tab
 ];
@@ -11613,6 +11617,7 @@ app.get('/buyer-sheets/status', requireKey, async (req, res) => {
   try {
     const out = [];
     for (const cfg of BUYER_SHEETS) {
+      if (cfg.hidden && req.query.all !== '1') continue;   // patch 392: retired buyers are not listed
       const last = (await pool.query(`SELECT * FROM buyer_sheet_scans WHERE buyer_key=$1 ORDER BY scanned_at DESC LIMIT 1`, [cfg.key])).rows[0] || null;
       const lastOk = (await pool.query(`SELECT scanned_at, modified_time FROM buyer_sheet_scans WHERE buyer_key=$1 AND ok=true ORDER BY scanned_at DESC LIMIT 1`, [cfg.key])).rows[0] || null;
       const rec = (await pool.query(
