@@ -140,31 +140,66 @@ async function dashUserByPassword(given) {
   }
   return hit;
 }
-function partnerSanitize(path, body) {
+// patch 389: a partner login only sees leads received on or after this moment.
+const PARTNER_SINCE_ISO = (() => {
+  const d = new Date(process.env.PARTNER_DATA_SINCE || '2026-10-21T00:00:00-07:00');
+  return isNaN(d.getTime()) ? '2026-10-21T07:00:00.000Z' : d.toISOString();
+})();
+const PARTNER_SINCE_MS = Date.parse(PARTNER_SINCE_ISO);
+async function partnerSanitize(path, body) {
   if (!body || typeof body !== 'object') return body;
+  const refuse = { ok: false, restricted: true, error: 'Not available for this login' };
   const isSsdi = (x) => /ssdi/i.test(String((x && (x.vertical || '')) || '')) || /ssdi/i.test(String((x && (x.campaign || '')) || ''));
+  const tooOld = (x) => { const t = Date.parse((x && x.received_at) || ''); return !(t >= PARTNER_SINCE_MS); };   // unknown date counts as too old
+  const notMva = (x) => !/^mva/i.test(String((x && x.campaign) || ''));   // partner sees MVA only
   if (path === '/leads/feed') {
-    if (Array.isArray(body.leads)) { body.leads = body.leads.filter(l => !isSsdi(l)); body.count = body.leads.length; }
+    if (Array.isArray(body.leads)) { body.leads = body.leads.filter(l => !isSsdi(l) && !tooOld(l) && !notMva(l)); body.count = body.leads.length; }
     return body;
   }
   if (/^\/leads\/detail\//.test(path)) {
-    if (body.lead && isSsdi(body.lead)) return { ok: false, restricted: true, error: 'Not available for this login' };
+    if (body.lead && (isSsdi(body.lead) || tooOld(body.lead) || notMva(body.lead))) return refuse;
     return body;
   }
   if (path === '/buyer-sheets/status') {
+    delete body.service_account;
     if (Array.isArray(body.buyers)) {
-      body.buyers = body.buyers.filter(b => !/ssdi/i.test(String(b.vertical || '')))
-        .map(b => Object.assign({}, b, { pending_approval: 0, pending_amount: 0 }));
+      const out = [];
+      for (const b of body.buyers) {
+        if (String(b.vertical || '').toUpperCase() !== 'MVA') continue;
+        const cfg = BUYER_SHEETS.find(c => c.key === b.key);
+        if (!cfg) continue;
+        const rec = (await pool.query(
+          `SELECT COUNT(*)::int AS sent,
+                  COUNT(*) FILTER (WHERE raw->'buyer_disposition' IS NOT NULL OR buyer_status IN ('Rejected','Signed','Retained','Returned'))::int AS dispositioned,
+                  COUNT(*) FILTER (WHERE raw->'buyer_disposition' IS NULL AND buyer_status NOT IN ('Rejected','Signed','Retained','Returned','Test') AND received_at < NOW() - INTERVAL '3 days')::int AS waiting_3d
+           FROM leads WHERE raw->>'buyer_name'=$1 AND status IN ('forwarded','buyer_rejected') AND campaign ILIKE 'mva%'
+             AND received_at >= GREATEST(NOW() - INTERVAL '45 days', $2::timestamptz)`, [cfg.buyer, PARTNER_SINCE_ISO])).rows[0];
+        out.push(Object.assign({}, b, { pending_approval: 0, pending_amount: 0, sent_45d: rec.sent, dispositioned_45d: rec.dispositioned, waiting_over_3d: rec.waiting_3d }));
+      }
+      body.buyers = out;
     }
     return body;
   }
   if (path === '/dashboard/funnel') {
-    const ssdiPubs = Object.keys((body.ssdi && body.ssdi.publishers) || {});
-    delete body.ssdi;
-    if (body.routing) Object.keys(body.routing).forEach(k => { if (ssdiPubs.includes(k) || /ssdi/i.test(k)) delete body.routing[k]; });
+    const mvaPubs = Object.keys((body.mva && body.mva.publishers) || {});
+    delete body.ssdi; delete body.mass_tort;
+    if (body.routing) Object.keys(body.routing).forEach(k => { if (!mvaPubs.includes(k)) delete body.routing[k]; });
     return body;
   }
   return body;
+}
+// /leads/summary for a partner: the same shape, counted from the floor only.
+async function partnerLeadsSummary() {
+  const base = `COALESCE(vertical,'') != 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true' AND campaign ILIKE 'mva%' AND received_at >= $1::timestamptz`;
+  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+  const monthStart = new Date().toISOString().slice(0, 7) + '-01';
+  const [todayQ, weekQ, monthQ, statusQ] = await Promise.all([
+    pool.query(`SELECT campaign, COUNT(*) as count FROM leads WHERE (received_at AT TIME ZONE 'America/New_York')::date=(NOW() AT TIME ZONE 'America/New_York')::date AND ${base} GROUP BY campaign`, [PARTNER_SINCE_ISO]),
+    pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$2 AND ${base}`, [PARTNER_SINCE_ISO, weekAgo]),
+    pool.query(`SELECT COUNT(*) as count FROM leads WHERE received_at::date>=$2 AND ${base}`, [PARTNER_SINCE_ISO, monthStart]),
+    pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE ${base} GROUP BY status ORDER BY count DESC`, [PARTNER_SINCE_ISO]),
+  ]);
+  return { ok: true, today: todayQ.rows, week: parseInt((weekQ.rows[0] || {}).count || 0), month: parseInt((monthQ.rows[0] || {}).count || 0), by_status: statusQ.rows, since: PARTNER_SINCE_ISO };
 }
 app.use(async (req, res, next) => {
   let t = null;
@@ -187,11 +222,13 @@ app.use(async (req, res, next) => {
     req.url = path + (Object.keys(clean).length ? '?' + new URLSearchParams(clean).toString() : '');
     if (!API_KEY) return deny();
     req.headers['x-api-key'] = API_KEY;   // the allow-listed read may pass the admin guard
+    if (path === '/leads/summary') return res.json(await partnerLeadsSummary());   // patch 389: floor-limited counts
     const send = res.json.bind(res);
-    res.json = (body) => {
-      let out;
-      try { out = partnerSanitize(path, body); } catch (e) { out = { ok: false, restricted: true, error: 'Not available for this login' }; }
-      return send(out);
+    res.json = (body) => {   // patch 389: the filter is async (it recounts from the floor)
+      Promise.resolve().then(() => partnerSanitize(path, body))
+        .catch(() => ({ ok: false, restricted: true, error: 'Not available for this login' }))
+        .then(out => send(out));
+      return res;
     };
     return next();
   } catch (e) {
@@ -222,7 +259,7 @@ app.post('/auth/login', async (req, res) => {
 });
 app.get('/auth/check', (req, res) => {
   const role = callerRole(req);
-  if (!role && req.krwUser) return res.json({ ok: true, role: 'partner', name: req.krwUser.name, pages: PARTNER_PAGES, login_available: !!DASH_PASSWORD });   // patch 388
+  if (!role && req.krwUser) return res.json({ ok: true, role: 'partner', name: req.krwUser.name, pages: PARTNER_PAGES, data_since: PARTNER_SINCE_ISO, login_available: !!DASH_PASSWORD });   // patch 388 / 389
   res.json({ ok: !!role, role: role || null, login_available: !!DASH_PASSWORD });
 });
 // Admin-only. Lets the dashboard build publisher posting instructions without
@@ -757,6 +794,7 @@ app.get('/leads/feed', requirePortalKey, async (req, res) => {
       where.push(`COALESCE(vertical,'') != 'SSDI' AND COALESCE(raw->>'excluded','') <> 'true'`);
     }
     if (status)   { where.push(`status=$${i++}`);   params.push(status); }
+    if (req.krwUser && req.krwUser.role === 'partner') { where.push(`received_at >= $${i++}::timestamptz AND campaign ILIKE 'mva%'`); params.push(PARTNER_SINCE_ISO); }   // patch 389: MVA only, from the floor
 
     // Support portal_id lookup — finds all pub_ids for that portal then filters
     if (portal_id) {
@@ -6910,6 +6948,7 @@ app.get('/dashboard/funnel', requireKey, async (req, res) => {
   else if (period === 'today')      sinceClause = "(received_at AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date";
   else if (period === 'month') sinceClause = "received_at >= (date_trunc('month', (NOW() AT TIME ZONE 'America/New_York')) AT TIME ZONE 'America/New_York')";
   else                         sinceClause = "received_at >= (date_trunc('week', (NOW() AT TIME ZONE 'America/New_York')) AT TIME ZONE 'America/New_York')"; // default: this week
+  if (req.krwUser && req.krwUser.role === 'partner') sinceClause = `(${sinceClause}) AND received_at >= '${PARTNER_SINCE_ISO}'`;   // patch 389: partner data floor (a validated server constant)
 
   try {
     // ── MVA ──────────────────────────────────────────────────────────────
