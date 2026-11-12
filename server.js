@@ -209,14 +209,21 @@ async function partnerLeadsSummary() {
 app.use(async (req, res, next) => {
   let t = null;
   try { t = readToken(_bearer(req)); } catch (e) { t = null; }
-  if (!t || t.role !== 'partner') return next();
+  const isPartner = !!(t && t.role === 'partner');
+  // patch 393: an admin may preview the partner view with ?view_as=partner (it only narrows what they get)
+  const preview = !isPartner && req.method === 'GET' && req.query && req.query.view_as === 'partner' && callerRole(req) === 'admin';
+  if (!isPartner && !preview) return next();
   const deny = () => res.status(200).json({ ok: false, restricted: true, error: 'Not available for this login' });
   try {
-    const u = (await dashUsersLoad())[t.uid];
-    if (!u || !u.active || u.role !== 'partner' || Number(u.pass_ver) !== Number(t.pv)) {
-      return res.status(401).json({ ok: false, error: 'This login is no longer active. Sign in again.' });
+    if (preview) {
+      req.krwUser = { id: 0, name: 'Preview', role: 'partner', preview: true };
+    } else {
+      const u = (await dashUsersLoad())[t.uid];
+      if (!u || !u.active || u.role !== 'partner' || Number(u.pass_ver) !== Number(t.pv)) {
+        return res.status(401).json({ ok: false, error: 'This login is no longer active. Sign in again.' });
+      }
+      req.krwUser = { id: u.id, name: u.name, role: 'partner' };
     }
-    req.krwUser = { id: u.id, name: u.name, role: 'partner' };
     const path = req.path;
     if (path === '/auth/check' || path === '/auth/login') return next();
     if (req.method !== 'GET' || !PARTNER_GET_ALLOW.some(rx => rx.test(path))) return deny();
@@ -264,7 +271,7 @@ app.post('/auth/login', async (req, res) => {
 });
 app.get('/auth/check', (req, res) => {
   const role = callerRole(req);
-  if (!role && req.krwUser) return res.json({ ok: true, role: 'partner', name: req.krwUser.name, pages: PARTNER_PAGES, data_since: PARTNER_SINCE_ISO, login_available: !!DASH_PASSWORD });   // patch 388 / 389
+  if (req.krwUser) return res.json({ ok: true, role: 'partner', preview: !!req.krwUser.preview, name: req.krwUser.name, pages: PARTNER_PAGES, data_since: PARTNER_SINCE_ISO, login_available: !!DASH_PASSWORD });   // patch 388 / 389
   res.json({ ok: !!role, role: role || null, login_available: !!DASH_PASSWORD });
 });
 // Admin-only. Lets the dashboard build publisher posting instructions without
