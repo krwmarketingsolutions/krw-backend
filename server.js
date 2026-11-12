@@ -166,6 +166,7 @@ async function partnerSanitize(path, body) {
       const out = [];
       for (const b of body.buyers) {
         if (String(b.vertical || '').toUpperCase() !== 'MVA') continue;
+        if (['nld-ride', 'lt-intake', 'ch-intake', 'dt-intake'].includes(b.key)) continue;   // patch 390: not on a partner's buyer sheets
         const cfg = BUYER_SHEETS.find(c => c.key === b.key);
         if (!cfg) continue;
         const rec = (await pool.query(
@@ -11002,7 +11003,7 @@ const BUYER_SHEETS = [
   // patch 350: DT-Intake's auto-updated pipeline sheet (lead_id / status / name / phone / received_date / retainer_date / reason / updated_at).
   // Statuses: New Lead, Contacted, Signed (billable), Unresponsive, Not Qualified, Duplicate. Matched by phone.
   { key: 'dt-intake', label: 'DT-Intake',  buyer: 'DT-Intake',  vertical: 'MVA', sheet: '1_pvfSFxsvK0saUvwQFmG0YHG7f4ySs0TysywLqhzRBQ', tab: null, amount: 2500, enabled: true },
-  { key: 'mva-003',   label: 'MVA-003-LT', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1700, enabled: true },   // patch 381: Eilers payout $1700 net (broker split)
+  { key: 'mva-003',   label: 'Eilers Law', buyer: 'MVA-003-LT', vertical: 'MVA', sheet: '10sbja-_waUhHvWnu2t_K_WNHMiKOOE020-70yudDoLI', tab: null, amount: 1700, enabled: true },   // patch 381: Eilers payout $1700 net (broker split)
   { key: 'lag-mva',   label: 'Legal Advocate Group', buyer: 'Legal Advocate Group', vertical: 'MVA', sheet: '1-Kx2As3kn4CZ6iXODQJ8NVwugteEM2U1fJlNjmkxU9I', tab: 'Dispositions', amount: 2200, enabled: true },   // patch 367: read LAG dispositions back from the Dispositions tab
 ];
 
